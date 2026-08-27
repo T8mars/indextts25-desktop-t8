@@ -1,0 +1,173 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:;" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>T8star-Aix · IndexTTS 2.5</title>
+    <link rel="stylesheet" href="styles.css?v=0.16.0" />
+  </head>
+  <body>
+    <main class="shell">
+      <section class="hero">
+        <div class="hero-main">
+          <div class="badge">INDEXTTS 2.5 · DESKTOP 0.16.0</div>
+          <h1>T8star-Aix · IndexTTS 2.5</h1>
+          <p class="build-meta">
+            Desktop 0.16.0 · ComfyUI Node 0.15.0<br />
+            Core ee40fa7d · Model c39ce5ba
+          </p>
+        </div>
+        <div class="hero-copy">
+          <p class="subtitle">正式版权重 · 语速控制 · KV Cache 加速</p>
+          <p class="credit">整合制作：B站 @T8star-Aix</p>
+        </div>
+      </section>
+
+      <div class="workspace">
+        <section class="card status-card">
+          <div class="status-heading">
+            <div>
+              <span id="statusDot" class="status-dot"></span>
+              <strong id="statusText">正在检查运行环境…</strong>
+            </div>
+            <button id="openLogsButton" class="ghost">打开日志</button>
+          </div>
+
+          <div class="model-form">
+            <label for="modelPath">IndexTTS 2.5 模型目录</label>
+            <div class="path-row">
+              <input id="modelPath" type="text" readonly placeholder="请选择下载后的模型目录" />
+              <button id="chooseModelButton">选择目录</button>
+            </div>
+            <ul id="missingFiles" class="missing-files"></ul>
+
+            <div class="runtime-profile-card">
+              <label for="runtimeProfile">按显存一键运行方案（应用后仍可手动微调）</label>
+              <div class="profile-row">
+                <select id="runtimeProfile">
+                  <option value="recommended">自动推荐（检测本机 NVIDIA 显存）</option>
+                  <option value="low_vram">6–8GB 省显存</option>
+                  <option value="balanced">10–16GB 均衡</option>
+                  <option value="max_speed">16GB+ 速度优先</option>
+                  <option value="compatibility">稳定兼容 / 排错</option>
+                  <option value="custom">手动自定义</option>
+                </select>
+                <button id="applyRuntimeProfileButton" class="secondary">应用方案</button>
+              </div>
+              <p id="hardwareSummary" class="hardware-summary">正在检测显卡（只检测环境，不加载模型）…</p>
+              <p id="runtimeProfileHint" class="hint">自动推荐只填写下方选项，不会自动启动或加载模型。</p>
+            </div>
+
+            <label for="accelerationMode">可选加速模式（整合包已内置，默认关闭，失败自动回退）</label>
+            <select id="accelerationMode">
+              <option value="off">关闭（最稳，零附加依赖）</option>
+              <option value="auto_safe">自动安全（只用已具备的融合核）</option>
+              <option value="bigvgan_cuda">BigVGAN CUDA 融合核</option>
+              <option value="torch_compile">Torch Compile（已内置 Triton）</option>
+              <option value="gpt_accel">GPT 加速（已内置 FlashAttention + Triton）</option>
+              <option value="deepspeed">DeepSpeed FP16（Windows 兼容，手动选择）</option>
+            </select>
+            <p class="hint">轮子精确适配内置 Python 3.10 / torch 2.8.0+cu128；加速不会默认开启，不兼容时自动回退普通模式。</p>
+
+            <label for="precisionMode">GPT 精度（启动前选择）</label>
+            <select id="precisionMode">
+              <option value="auto">自动（原生 BF16，旧显卡回退 FP16）</option>
+              <option value="bfloat16">BF16（新显卡）</option>
+              <option value="float16">FP16（旧显卡/低显存）</option>
+              <option value="float32">FP32（兼容优先，显存最高）</option>
+            </select>
+
+            <label for="referenceDevice">参考编码器设备</label>
+            <select id="referenceDevice">
+              <option value="auto">自动（低于 10GB 显存放到 CPU）</option>
+              <option value="same">与主模型相同（首次参考更快）</option>
+              <option value="cpu">CPU（节省约 2GB 常驻显存）</option>
+            </select>
+
+            <label class="checkbox-row" for="reuseDefaultEmotion">
+              <input id="reuseDefaultEmotion" type="checkbox" />
+              快速默认情感（没有独立情感输入时复用音色条件，可能轻微改变听感）
+            </label>
+            <p class="hint">推荐 6–8GB 显卡：精度“自动/FP16” + 参考编码器“CPU”；所有选项都在点击启动后才加载模型。</p>
+
+            <section class="diagnostics-card" aria-labelledby="diagnosticsTitle">
+              <div class="diagnostics-heading">
+                <div>
+                  <strong id="diagnosticsTitle">加速环境预检</strong>
+                  <p class="hint">只检查显卡、运行库和编译工具，不加载模型；“预计可用”不等于已经启动。</p>
+                </div>
+                <div class="diagnostics-actions">
+                  <button id="refreshDiagnosticsButton" class="ghost">重新检测</button>
+                  <button id="exportDiagnosticsButton" class="secondary">导出诊断报告</button>
+                </div>
+              </div>
+              <div id="diagnosticsVersions" class="diagnostics-versions">正在读取内置运行库版本…</div>
+              <div id="diagnosticsGrid" class="diagnostics-grid" aria-live="polite">
+                <div class="diagnostic-item pending">正在检测；此过程不会加载 IndexTTS 模型。</div>
+              </div>
+              <p class="hint diagnostics-note">实际初始化失败会自动回退；启动后的真实生效模式请查看 WebUI“环境与可选加速”或启动日志。DeepSpeed 的 aio/cufile 可选扩展警告不代表语音推理失败。</p>
+            </section>
+
+            <section class="diagnostics-card benchmark-card" aria-labelledby="benchmarkTitle">
+              <div class="diagnostics-heading">
+                <div>
+                  <strong id="benchmarkTitle">真实加速基准与推荐</strong>
+                  <p class="hint">仅在你主动开始后加载模型；使用同一参考音频、文本与随机种子，逐个实测可用模式。</p>
+                </div>
+                <div class="diagnostics-actions">
+                  <button id="runBenchmarkButton" class="secondary">开始真实基准</button>
+                  <button id="cancelBenchmarkButton" class="ghost" hidden>停止基准</button>
+                  <button id="applyBenchmarkButton" class="ghost" disabled>应用推荐</button>
+                </div>
+              </div>
+              <p id="benchmarkSummary" class="hint benchmark-summary">尚未运行真实基准。</p>
+              <div id="benchmarkResults" class="benchmark-results" aria-live="polite"></div>
+              <p class="hint diagnostics-note">推荐会优先选择接近最快、依赖更少的模式；不会自动启动服务或覆盖模型文件。</p>
+            </section>
+
+            <section class="diagnostics-card update-card" aria-labelledby="updateTitle">
+              <div class="diagnostics-heading">
+                <div>
+                  <strong id="updateTitle">版本与上游动态</strong>
+                  <p class="hint">手动联网比较官方代码、官方模型和 T8star-Aix 节点版本；只检查，不自动更新。</p>
+                </div>
+                <div class="diagnostics-actions">
+                  <button id="checkUpdatesButton" class="secondary">检查更新</button>
+                  <button id="openOfficialButton" class="ghost">官方仓库</button>
+                  <button id="openNodeRepositoryButton" class="ghost">节点仓库</button>
+                </div>
+              </div>
+              <p id="updateSummary" class="hint update-summary">尚未检查。</p>
+              <div id="updateResults" class="update-results" aria-live="polite"></div>
+            </section>
+
+            <div class="actions">
+              <button id="startButton" class="primary" disabled>启动 IndexTTS 2.5</button>
+              <button id="downloadModelscopeButton" class="secondary">ModelScope 下载模型</button>
+              <button id="downloadHuggingfaceButton" class="secondary">Hugging Face 下载模型</button>
+              <button id="cancelDownloadButton" class="ghost" hidden>取消下载</button>
+            </div>
+          </div>
+          <div class="model-links">
+            模型约 10GB，建议至少预留 20GB 空间。
+            <button id="modelscopeButton" class="link-button">打开 ModelScope 模型页</button>
+            <button id="huggingfaceButton" class="link-button">打开 Hugging Face 模型页</button>
+          </div>
+        </section>
+
+        <section class="card log-card">
+          <div class="log-title">启动日志</div>
+          <pre id="logOutput">等待启动…</pre>
+        </section>
+      </div>
+
+      <footer>
+        基于 Bilibili IndexTTS 2.5 · 非官方桌面整合版 · Python 与运行依赖已包含在应用中<br />
+        Desktop 0.16.0 · ComfyUI Node 0.15.0 · Core ee40fa7d · Model c39ce5ba<br />
+        启动器只检测模型，不会自动加载；请先选择精度、参考编码器与加速模式，再点击“启动 IndexTTS 2.5”
+      </footer>
+    </main>
+    <script src="renderer.js"></script>
+  </body>
+</html>

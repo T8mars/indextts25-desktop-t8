@@ -1,0 +1,32 @@
+const { contextBridge, ipcRenderer } = require("electron");
+
+contextBridge.exposeInMainWorld("desktopApi", {
+  getState: () => ipcRenderer.invoke("desktop:get-state"),
+  chooseModelDirectory: () => ipcRenderer.invoke("desktop:choose-model-directory"),
+  downloadModel: (source) => ipcRenderer.invoke("desktop:download-model", source),
+  cancelModelDownload: () => ipcRenderer.invoke("desktop:cancel-model-download"),
+  startService: () => ipcRenderer.invoke("desktop:start-service"),
+  applyRuntimeProfile: (profile) => ipcRenderer.invoke("desktop:apply-runtime-profile", profile),
+  refreshDiagnostics: () => ipcRenderer.invoke("desktop:refresh-diagnostics"),
+  exportDiagnostics: () => ipcRenderer.invoke("desktop:export-diagnostics"),
+  runRuntimeBenchmark: () => ipcRenderer.invoke("desktop:run-runtime-benchmark"),
+  cancelRuntimeBenchmark: () => ipcRenderer.invoke("desktop:cancel-runtime-benchmark"),
+  applyBenchmarkRecommendation: () => ipcRenderer.invoke("desktop:apply-benchmark-recommendation"),
+  checkUpdates: () => ipcRenderer.invoke("desktop:check-updates"),
+  openUpdatePage: (target) => ipcRenderer.invoke("desktop:open-update-page", target),
+  setAcceleration: (mode) => ipcRenderer.invoke("desktop:set-acceleration", mode),
+  setRuntimeOptions: (options) => ipcRenderer.invoke("desktop:set-runtime-options", options),
+  stopService: () => ipcRenderer.invoke("desktop:stop-service"),
+  openModelPage: (source) => ipcRenderer.invoke("desktop:open-model-page", source),
+  openLogs: () => ipcRenderer.invoke("desktop:open-logs"),
+  onState: (callback) => {
+    const handler = (_event, state) => callback(state);
+    ipcRenderer.on("desktop:state", handler);
+    return () => ipcRenderer.removeListener("desktop:state", handler);
+  },
+  onLog: (callback) => {
+    const handler = (_event, line) => callback(line);
+    ipcRenderer.on("desktop:log", handler);
+    return () => ipcRenderer.removeListener("desktop:log", handler);
+  }
+});

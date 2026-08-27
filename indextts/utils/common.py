@@ -1,0 +1,179 @@
+import os
+import random
+import re
+
+import torch
+import torchaudio
+
+MATPLOTLIB_FLAG = False
+
+# Keep IndexTTS' historical PCM-scale convention while producing a valid
+# 16-bit WAV on both torchaudio <= 2.8 and the TorchCodec-backed 2.9+ saver.
+PCM16_MAX = 32767.0
+
+
+def fade_out_pcm_tail(wav, sampling_rate, duration_ms=20.0):
+    """Return a copy whose final samples fade smoothly to an exact zero.
+
+    IndexTTS keeps generated audio in PCM scale until it is saved.  Applying
+    the fade in that scale avoids an abrupt last-sample discontinuity without
+    changing the rest of the waveform or mutating the caller's tensor.
+    """
+    result = wav.detach().clone()
+    if result.numel() == 0 or result.shape[-1] == 0:
+        return result.contiguous()
+    fade_samples = min(
+        result.shape[-1],
+        max(1, round(float(sampling_rate) * max(0.0, float(duration_ms)) / 1000.0)),
+    )
+    if fade_samples == 1:
+        result[..., -1] = 0
+        return result.contiguous()
+    fade = torch.linspace(
+        1.0,
+        0.0,
+        fade_samples,
+        dtype=torch.float32,
+        device=result.device,
+    )
+    tail = result[..., -fade_samples:].to(torch.float32) * fade
+    result[..., -fade_samples:] = tail.to(result.dtype)
+    result[..., -1] = 0
+    return result.contiguous()
+
+
+def _torchaudio_honors_wav_encoding_args():
+    """Return whether torchaudio.save still honors WAV encoding arguments."""
+    raw = getattr(torchaudio, "__version__", "") or ""
+    parts = []
+    for chunk in raw.split("+")[0].split(".")[:2]:
+        if not chunk.isdigit():
+            return False
+        parts.append(int(chunk))
+    return len(parts) == 2 and tuple(parts) < (2, 9)
+
+
+def save_pcm_wav(path, wav, sampling_rate):
+    """Save a PCM-scale waveform as 16-bit PCM without TorchCodec clipping."""
+    wav = wav.detach().to(device="cpu", dtype=torch.float32) / PCM16_MAX
+    wav = wav.clamp_(-1.0, 1.0)
+    encoding_args = (
+        {"encoding": "PCM_S", "bits_per_sample": 16}
+        if _torchaudio_honors_wav_encoding_args()
+        else {}
+    )
+    torchaudio.save(path, wav, sampling_rate, **encoding_args)
+
+
+def load_audio(audiopath, sampling_rate):
+    audio, sr = torchaudio.load(audiopath)
+    # print(f"wave shape: {audio.shape}, sample_rate: {sr}")
+
+    if audio.size(0) > 1:  # mix to mono
+        audio = audio[0].unsqueeze(0)
+
+    if sr != sampling_rate:
+        try:
+            audio = torchaudio.functional.resample(audio, sr, sampling_rate)
+        except Exception as e:
+            print(f"Warning: {audiopath}, wave shape: {audio.shape}, sample_rate: {sr}")
+            return None
+    # clip audio invalid values
+    audio.clip_(-1, 1)
+    return audio
+
+
+def tokenize_by_CJK_char(line: str, do_upper_case=True) -> str:
+    """
+    Tokenize a line of text with CJK char.
+
+    Note: All return charaters will be upper case.
+
+    Example:
+      input = "你好世界是 hello world 的中文"
+      output = "你 好 世 界 是 HELLO WORLD 的 中 文"
+
+    Args:
+      line:
+        The input text.
+
+    Return:
+      A new string tokenize by CJK char.
+    """
+    # The CJK ranges is from https://github.com/alvations/nltk/blob/79eed6ddea0d0a2c212c1060b477fc268fec4d4b/nltk/tokenize/util.py
+    CJK_RANGE_PATTERN = (
+        r"([\u1100-\u11ff\u2e80-\ua4cf\ua840-\uD7AF\uF900-\uFAFF\uFE30-\uFE4F\uFF65-\uFFDC\U00020000-\U0002FFFF])"
+    )
+    chars = re.split(CJK_RANGE_PATTERN, line.strip())
+    return " ".join([w.strip().upper() if do_upper_case else w.strip() for w in chars if w.strip()])
+
+
+def de_tokenized_by_CJK_char(line: str, do_lower_case=False) -> str:
+    """
+    Example:
+      input = "你 好 世 界 是 HELLO WORLD 的 中 文"
+      output = "你好世界是 hello world 的中文"
+
+    do_lower_case:
+      input = "SEE YOU!"
+      output = "see you!"
+    """
+    # replace english words in the line with placeholders
+    english_word_pattern = re.compile(r"([A-Z]+(?:[\s'-][A-Z-]+)*)", re.IGNORECASE)
+    english_sents = english_word_pattern.findall(line)
+    for i, sent in enumerate(english_sents):
+        line = line.replace(sent, f"<sent_{i}>")
+
+    words = line.split()
+    # restore english sentences
+    sent_placeholder_pattern = re.compile(r"(<sent_(\d+)>)")
+    for i in range(len(words)):
+        all_matches = sent_placeholder_pattern.findall(words[i])
+        if len(all_matches) > 1:
+            # restore the english word
+            for h,j in all_matches:
+                placeholder_index = int(j)
+                words[i] = words[i].replace(h, english_sents[placeholder_index])
+                if do_lower_case:
+                    words[i] = words[i].lower()
+    return "".join(words)
+
+
+def make_pad_mask(lengths: torch.Tensor, max_len: int = 0) -> torch.Tensor:
+    """Make mask tensor containing indices of padded part.
+
+    See description of make_non_pad_mask.
+
+    Args:
+        lengths (torch.Tensor): Batch of lengths (B,).
+    Returns:
+        torch.Tensor: Mask tensor containing indices of padded part.
+
+    Examples:
+        >>> lengths = [5, 3, 2]
+        >>> make_pad_mask(lengths)
+        masks = [[0, 0, 0, 0 ,0],
+                 [0, 0, 0, 1, 1],
+                 [0, 0, 1, 1, 1]]
+    """
+    batch_size = lengths.size(0)
+    max_len = max_len if max_len > 0 else lengths.max().item()
+    seq_range = torch.arange(0, max_len, dtype=torch.int64, device=lengths.device)
+    seq_range_expand = seq_range.unsqueeze(0).expand(batch_size, max_len)
+    seq_length_expand = lengths.unsqueeze(-1)
+    mask = seq_range_expand >= seq_length_expand
+    return mask
+
+
+def safe_log(x: torch.Tensor, clip_val: float = 1e-7) -> torch.Tensor:
+    """
+    Computes the element-wise logarithm of the input tensor with clipping to avoid near-zero values.
+
+    Args:
+        x (Tensor): Input tensor.
+        clip_val (float, optional): Minimum value to clip the input tensor. Defaults to 1e-7.
+
+    Returns:
+        Tensor: Element-wise logarithm of the input tensor with clipping applied.
+    """
+    return torch.log(torch.clip(x, min=clip_val))

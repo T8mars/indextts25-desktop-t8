@@ -1,0 +1,52 @@
+{
+  "schemaVersion": 1,
+  "target": {
+    "platform": "win_amd64",
+    "pythonTag": "cp310",
+    "torch": "2.8.0+cu128",
+    "cuda": "12.8"
+  },
+  "packages": [
+    {
+      "distribution": "flash-attn",
+      "importName": "flash_attn",
+      "version": "2.8.3",
+      "filename": "flash_attn-2.8.3+cu128torch2.8.0cxx11abiFALSE-cp310-cp310-win_amd64.whl",
+      "url": "https://github.com/kingbri1/flash-attention/releases/download/v2.8.3/flash_attn-2.8.3%2Bcu128torch2.8.0cxx11abiFALSE-cp310-cp310-win_amd64.whl",
+      "sha256": "c880adca3f6cb81ad1ffa25cee2a09295ca5f10da0ac5d380dae2033947f068f"
+    },
+    {
+      "distribution": "triton-windows",
+      "importName": "triton",
+      "version": "3.4.0.post21",
+      "filename": "triton_windows-3.4.0.post21-cp310-cp310-win_amd64.whl",
+      "url": "https://files.pythonhosted.org/packages/9d/77/58e419d467770ccabe83650f22e35cd5cba7e8fe23294fb49621d3c2aa57/triton_windows-3.4.0.post21-cp310-cp310-win_amd64.whl",
+      "sha256": "b5d12acb71d8fb4af8baff7588b5d26614bbe383888c22ab27b50948dc3baa82"
+    },
+    {
+      "distribution": "deepspeed",
+      "importName": "deepspeed",
+      "version": "0.17.5+e1560d84",
+      "filename": "deepspeed-0.17.5+e1560d84-2.8torch_cu128-cp310-cp310-win_amd64.whl",
+      "url": "https://github.com/6Morpheus6/deepspeed-windows-wheels/releases/download/v0.17.5/deepspeed-0.17.5%2Be1560d84-2.8torch_cu128-cp310-cp310-win_amd64.whl",
+      "sha256": "f56f6420a00c36e79127a2a666c0ec900e73641f59c8700f05ddf921c6b74aac"
+    }
+  ],
+  "runtimeDependencies": [
+    "hjson==3.1.0",
+    "ninja==1.13.0",
+    "py-cpuinfo==9.0.0",
+    "nvidia-ml-py==13.610.43"
+  ],
+  "validation": {
+    "date": "2026-08-24",
+    "gpu": "NVIDIA GeForce RTX 5090 Laptop GPU",
+    "computeCapability": "12.0",
+    "checks": [
+      "Triton JIT CUDA vector kernel",
+      "FlashAttention dense, varlen and KV-cache kernels",
+      "IndexTTS 2.5 GPT acceleration WAV generation",
+      "IndexTTS 2.5 DeepSpeed FP32 and BF16 WAV generation"
+    ]
+  }
+}

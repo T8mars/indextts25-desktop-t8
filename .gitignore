@@ -1,0 +1,60 @@
+# Development Tools.
+.mypy_cache/
+.ruff_cache/
+__pycache__/
+**/.ipynb_checkpoints/
+.idea/
+.vscode/
+
+# Environments.
+.venv*/
+venv*/
+conda_env*/
+/.python/
+/.uv-cache/
+
+# Python Bytecode.
+*.py[cod]
+
+# Distribution/Packaging.
+/build/
+/dist/
+*.egg-info/
+.pypirc
+
+# Operating System Junk.
+*.DS_Store
+Thumbs.db
+desktop.ini
+
+# IndexTTS.
+/cache/
+/checkpoints/*
+!/checkpoints/*.yaml
+/outputs/
+
+# Example audio files (downloaded on demand, not stored in git)
+/examples/*.wav
+/tests/sample_prompt.wav
+.memsearch
+.github
+
+# Local audits, test sandboxes, and generated user data.
+/.accel-wheel-audit/
+/.comfyui-v3-api-audit/
+/.compat-transformers-4576-audit/
+/.gh-auth-temp/
+/.packaged-*/
+/.pytest*/
+/.ui-*/
+/data/
+/failed-artifacts/
+
+# Published independently as a ComfyUI custom-node repository.
+/comfyui-indextts25-T8/
+
+# Electron desktop packaging artifacts.
+/desktop/node_modules/
+/desktop/out/
+/desktop/.vite/
+/desktop/runtime-stage/

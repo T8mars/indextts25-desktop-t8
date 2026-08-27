@@ -1,0 +1,27 @@
+{
+  "name": "t8star-aix-indextts-2-5-desktop",
+  "productName": "T8star-Aix · IndexTTS 2.5",
+  "version": "0.16.0",
+  "description": "Official-model-aligned IndexTTS 2.5 Windows desktop integration by Bilibili creator T8star-Aix",
+  "main": "src/main.js",
+  "author": "T8star-Aix",
+  "license": "SEE LICENSE IN ../LICENSE_ZH.txt",
+  "private": true,
+  "scripts": {
+    "start": "electron-forge start",
+    "package": "electron-forge package",
+    "make": "electron-forge make --targets @electron-forge/maker-zip",
+    "make:installer": "electron-forge make --targets @electron-forge/maker-squirrel",
+    "test:prune": "node scripts/test-prune-runtime.js",
+    "test:launcher": "node scripts/test-launcher-startup.js",
+    "test:profiles": "node scripts/test-runtime-profiles.js",
+    "test:diagnostics": "node scripts/test-diagnostic-report.js",
+    "verify:runtime": "node scripts/verify-runtime.js"
+  },
+  "devDependencies": {
+    "@electron-forge/cli": "7.11.2",
+    "@electron-forge/maker-squirrel": "7.11.2",
+    "@electron-forge/maker-zip": "7.11.2",
+    "electron": "43.3.0"
+  }
+}
