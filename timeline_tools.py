@@ -138,6 +138,54 @@ def apply_timeline_edits(
     return result
 
 
+def apply_timeline_drag_payload(
+    lines: Sequence[DialogueLine],
+    payload: str | dict[str, Any],
+) -> tuple[list[DialogueLine], dict[str, Any]]:
+    """Apply one browser drag/resize edit with the same validation as the table."""
+
+    if isinstance(payload, str):
+        try:
+            data = json.loads(payload)
+        except json.JSONDecodeError as exc:
+            raise ValueError("拖拽时间轴数据不是有效 JSON。") from exc
+    elif isinstance(payload, dict):
+        data = dict(payload)
+    else:
+        raise ValueError("拖拽时间轴数据无效。")
+    try:
+        line_index = int(data["index"])
+        start_ms = int(round(float(data["start_ms"])))
+        end_ms = int(round(float(data["end_ms"])))
+    except (KeyError, TypeError, ValueError, OverflowError) as exc:
+        raise ValueError("拖拽时间轴缺少有效的台词序号或毫秒范围。") from exc
+    if start_ms < 0 or end_ms <= start_ms:
+        raise ValueError("拖拽后的结束时间必须晚于非负开始时间。")
+    if end_ms > 86_400_000:
+        raise ValueError("拖拽后的时间不能超过 24 小时。")
+    mode = str(data.get("mode") or "move")
+    if mode not in {"move", "resize_start", "resize_end", "select"}:
+        raise ValueError(f"未知时间轴拖拽模式：{mode}")
+    updated = []
+    matched = False
+    for line in lines:
+        if line.index == line_index:
+            updated.append(replace(line, start_ms=start_ms, end_ms=end_ms))
+            matched = True
+        else:
+            updated.append(line)
+    if not matched:
+        raise ValueError(f"拖拽时间轴中不存在第 {line_index} 条台词。")
+    normalized = {
+        "index": line_index,
+        "start_ms": start_ms,
+        "end_ms": end_ms,
+        "mode": mode,
+        "snapped_to_ms": data.get("snapped_to_ms"),
+    }
+    return updated, normalized
+
+
 def format_srt_timestamp(milliseconds: int) -> str:
     value = max(0, int(milliseconds))
     hours, remainder = divmod(value, 3_600_000)
@@ -235,10 +283,11 @@ def render_timeline_html(
         cursor = max(cursor, end)
         entries.append((line, start, end, report.get("asr") or {}))
     total = max(end for _line, _start, end, _asr in entries)
+    canvas_total = max(1000, total + max(500, round(total * 0.08)))
     tracks = []
     for line, start, end, asr in entries:
-        left = 100 * start / total
-        width = max(0.8, 100 * (end - start) / total)
+        left = 100 * start / canvas_total
+        width = max(0.8, 100 * (end - start) / canvas_total)
         hue = abs(hash(line.role)) % 360
         score = asr.get("similarity")
         score_text = "" if score is None else f" · ASR {float(score):.0%}"
@@ -260,22 +309,30 @@ def render_timeline_html(
             )
             word_markers.append(
                 f'<span class="t8-timeline-word" title="{marker_title}" '
+                f'data-snap-ms="{start + round(word_start * 1000)}" '
+                f'data-snap-end-ms="{start + round(word_end * 1000)}" '
                 f'style="position:absolute;left:{marker_left:.3f}%;top:0;bottom:0;'
                 'width:2px;background:#38bdf8"></span>'
             )
         tracks.append(
-            '<div class="t8-timeline-track">'
+            f'<div class="t8-timeline-track" data-index="{line.index}">'
             f'<div class="t8-timeline-bar" title="{title}" '
+            f'data-index="{line.index}" data-start-ms="{start}" data-end-ms="{end}" '
+            f'data-snap-start-ms="{start}" data-snap-end-ms="{end}" '
             f'style="left:{left:.3f}%;width:{width:.3f}%;background:hsl({hue} 72% 62%)">'
-            f'{label}{"".join(word_markers)}</div>'
+            '<span class="t8-timeline-handle t8-timeline-handle-start" title="拖动左边界"></span>'
+            f'<span class="t8-timeline-bar-label">{label}</span>{"".join(word_markers)}'
+            '<span class="t8-timeline-handle t8-timeline-handle-end" title="拖动右边界"></span>'
+            '</div>'
             "</div>"
         )
     seconds = total / 1000
+    canvas_seconds = canvas_total / 1000
     return (
-        '<div class="t8-timeline">'
-        f'<div class="t8-timeline-scale">0s <span>总时长 {seconds:.2f}s</span> {seconds:.2f}s</div>'
+        f'<div class="t8-timeline" data-total-ms="{canvas_total}" data-snap-threshold-px="12">'
+        f'<div class="t8-timeline-scale">0s <span>成品总时长 {seconds:.2f}s</span> 可编辑至 {canvas_seconds:.2f}s</div>'
         + "".join(tracks)
-        + '<div class="t8-timeline-hint">提交上方表格单元格后轨道自动刷新；点击一行可单独重做并合入。仅修改时间可直接重新混音。蓝线为 ASR 逐字时间点。</div>'
+        + '<div class="t8-timeline-hint">拖动音频块可平移；拖左右手柄可改边界；靠近其他边界或蓝色 ASR 逐字点会自动吸附，按住 Alt 可临时关闭吸附。拖完会同步上方表格；点击音频块可选中并单独重做。</div>'
         + "</div>"
     )
 
@@ -294,6 +351,7 @@ def timeline_json(lines: Sequence[DialogueLine], line_reports: Sequence[dict] | 
 __all__ = [
     "TIMELINE_HEADERS",
     "apply_timeline_edits",
+    "apply_timeline_drag_payload",
     "format_srt_timestamp",
     "render_timeline_html",
     "rewrite_srt",

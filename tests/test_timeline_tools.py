@@ -3,7 +3,13 @@ from __future__ import annotations
 import pytest
 
 from dialogue_runtime import DialogueLine
-from timeline_tools import apply_timeline_edits, render_timeline_html, rewrite_srt, timeline_rows
+from timeline_tools import (
+    apply_timeline_drag_payload,
+    apply_timeline_edits,
+    render_timeline_html,
+    rewrite_srt,
+    timeline_rows,
+)
 
 
 def _lines():
@@ -76,7 +82,10 @@ def test_timeline_visual_escapes_user_text_and_includes_asr_score():
     )
     assert "<script>" not in rendered
     assert "ASR 95%" in rendered
-    assert "总时长 0.90s" in rendered
+    assert "成品总时长 0.90s" in rendered
+    assert 'data-index="1"' in rendered
+    assert 'data-start-ms="0"' in rendered
+    assert "t8-timeline-handle-start" in rendered
 
 
 def test_timeline_visual_includes_word_timestamp_markers():
@@ -98,3 +107,26 @@ def test_timeline_visual_includes_word_timestamp_markers():
     assert rendered.count("t8-timeline-word") == 2
     assert "第一" in rendered
     assert "left:10.000%" in rendered
+    assert 'data-snap-ms="100"' in rendered
+
+
+def test_drag_payload_updates_only_selected_line_and_validates_bounds():
+    edited, payload = apply_timeline_drag_payload(
+        _lines(),
+        {
+            "index": 2,
+            "start_ms": 1500,
+            "end_ms": 2800,
+            "mode": "move",
+            "snapped_to_ms": 1500,
+        },
+    )
+    assert edited[0] == _lines()[0]
+    assert edited[1].start_ms == 1500
+    assert edited[1].end_ms == 2800
+    assert payload["snapped_to_ms"] == 1500
+
+    with pytest.raises(ValueError, match="结束时间"):
+        apply_timeline_drag_payload(
+            _lines(), {"index": 1, "start_ms": 1000, "end_ms": 900, "mode": "resize_end"}
+        )

@@ -4,11 +4,13 @@ import pytest
 import torch
 
 from desktop_generation_controls import (
+    assess_long_text_result,
     apply_duration_policy,
     allocate_native_chunk_durations,
     build_desktop_plan,
     concatenate_with_pauses,
     postprocess_waveform,
+    run_with_long_text_guard,
     split_speech_chunks,
 )
 
@@ -114,3 +116,44 @@ def test_native_duration_is_distributed_after_external_pauses():
     assert len(durations) == 2
     assert sum(durations) == pytest.approx(4.0)
     assert durations[1] > durations[0]
+
+
+def test_long_english_guard_retries_with_smaller_segments_after_max_mel_warning():
+    calls = []
+
+    def generate(limit):
+        import warnings
+
+        calls.append(limit)
+        if len(calls) == 1:
+            warnings.warn(
+                "generation stopped due to exceeding max_mel_tokens",
+                RuntimeWarning,
+            )
+            return {"duration": 1.0}
+        return {"duration": 18.0}
+
+    result, report = run_with_long_text_guard(
+        generate,
+        lambda value: value["duration"],
+        text=(
+            "This deliberately long English paragraph contains enough words to verify "
+            "that a collapsed decode is detected and regenerated with safer segments "
+            "instead of silently returning an incomplete final sentence to the user."
+        ),
+        language="EN",
+        token_count=58,
+        max_tokens=60,
+    )
+    assert result["duration"] == 18.0
+    assert calls == [60, 40]
+    assert report["retried"] is True
+    assert report["recovered"] is True
+    assert report["first_reasons"] == ["max_mel_tokens_reached", "suspiciously_short_for_latin_text"]
+
+
+def test_long_spanish_guard_detects_implausibly_short_audio_but_ignores_chinese():
+    spanish = " ".join(["Esta frase contiene palabras para comprobar una salida demasiado corta"] * 4)
+    reasons = assess_long_text_result(spanish, "ES", 50, 0.8)
+    assert "suspiciously_short_for_latin_text" in reasons
+    assert assess_long_text_result("这是一个很长的中文测试。" * 20, "ZH", 100, 0.8) == []

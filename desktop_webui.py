@@ -41,6 +41,7 @@ from desktop_generation_controls import (
     build_desktop_plan,
     concatenate_with_pauses,
     postprocess_waveform,
+    run_with_long_text_guard,
 )
 from desktop_model_lifecycle import DesktopModelLifecycle
 from desktop_streaming_audio import BundledStreamingAudio
@@ -55,12 +56,14 @@ from dialogue_runtime import (
 from speech_review import ASR_BACKENDS, ASR_MODELS, asr_available, review_transcript, transcribe_audio_file
 from timeline_tools import (
     TIMELINE_HEADERS,
+    apply_timeline_drag_payload,
     apply_timeline_edits,
     render_timeline_html,
     rewrite_srt,
     timeline_rows,
 )
 from indextts.infer_v2_5 import IndexTTS2
+from indextts.utils.reference_condition_cache import ReferenceConditionCache
 from indextts.pronunciation import (
     ANNOTATION_PATTERN,
     PronunciationEntry,
@@ -83,7 +86,7 @@ from runtime_metrics import (
 
 
 APP_TITLE = "T8star-Aix · IndexTTS 2.5"
-DESKTOP_VERSION = "0.17.0"
+DESKTOP_VERSION = "0.18.0"
 MODEL_MANIFEST = json.loads(
     (Path(__file__).resolve().parent / "desktop_model_manifest.json").read_text(encoding="utf-8")
 )
@@ -362,8 +365,16 @@ CSS = """
 .t8-generate { min-height: 48px; }
 .t8-timeline { padding: 14px; border: 1px solid rgba(251,114,153,.28); border-radius: 14px; background: rgba(255,255,255,.68); overflow: hidden; }
 .t8-timeline-scale { display: flex; justify-content: space-between; font-size: 11px; opacity: .7; margin-bottom: 8px; }
-.t8-timeline-track { position: relative; height: 34px; margin: 5px 0; border-radius: 8px; background: rgba(148,163,184,.13); overflow: hidden; }
-.t8-timeline-bar { position: absolute; top: 4px; bottom: 4px; min-width: 6px; padding: 4px 8px; border-radius: 6px; color: #152238; font-size: 11px; font-weight: 700; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.t8-timeline-track { position: relative; height: 38px; margin: 6px 0; border-radius: 8px; background: rgba(148,163,184,.13); overflow: hidden; touch-action: none; }
+.t8-timeline-bar { position: absolute; top: 4px; bottom: 4px; min-width: 8px; padding: 5px 12px; border-radius: 6px; color: #152238; font-size: 11px; font-weight: 700; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; cursor: grab; user-select: none; touch-action: none; box-shadow: 0 2px 8px rgba(15,23,42,.12); }
+.t8-timeline-bar.t8-dragging { cursor: grabbing; z-index: 4; box-shadow: 0 5px 16px rgba(15,23,42,.28); }
+.t8-timeline-bar-label { position: relative; z-index: 2; pointer-events: none; }
+.t8-timeline-handle { position: absolute; z-index: 5; top: 0; bottom: 0; width: 9px; background: rgba(255,255,255,.42); cursor: ew-resize; }
+.t8-timeline-handle:hover { background: rgba(255,255,255,.78); }
+.t8-timeline-handle-start { left: 0; border-radius: 6px 0 0 6px; }
+.t8-timeline-handle-end { right: 0; border-radius: 0 6px 6px 0; }
+.t8-timeline-word { pointer-events: none; z-index: 3; }
+#t8-timeline-drag-payload { display: none !important; }
 .t8-timeline-hint,.t8-timeline-empty { margin-top: 9px; font-size: 12px; opacity: .68; }
 .t8-footer { text-align: center; opacity: .58; font-size: 12px; padding: 14px; }
 @media (max-width: 900px) {
@@ -380,6 +391,136 @@ CSS = """
   .t8-actions { flex-direction: column !important; }
 }
 """
+
+TIMELINE_EDITOR_JS = r"""() => {
+  if (window.__t8TimelineEditorInstalled) return [];
+  window.__t8TimelineEditorInstalled = true;
+
+  const setPayload = (payload) => {
+    const host = document.querySelector('#t8-timeline-drag-payload');
+    const input = host?.querySelector('textarea, input');
+    if (!input) return;
+    const proto = input.tagName === 'TEXTAREA'
+      ? window.HTMLTextAreaElement.prototype
+      : window.HTMLInputElement.prototype;
+    const setter = Object.getOwnPropertyDescriptor(proto, 'value')?.set;
+    if (setter) setter.call(input, JSON.stringify(payload));
+    else input.value = JSON.stringify(payload);
+    input.dispatchEvent(new Event('input', { bubbles: true }));
+  };
+
+  const valuesFrom = (element, attributes) => {
+    const values = [];
+    for (const attribute of attributes) {
+      const value = Number(element.getAttribute(attribute));
+      if (Number.isFinite(value)) values.push(value);
+    }
+    return values;
+  };
+
+  document.addEventListener('pointerdown', (event) => {
+    const bar = event.target.closest?.('.t8-timeline-bar');
+    if (!bar || event.button !== 0) return;
+    const timeline = bar.closest('.t8-timeline');
+    const track = bar.closest('.t8-timeline-track');
+    if (!timeline || !track) return;
+    event.preventDefault();
+
+    const totalMs = Math.max(1, Number(timeline.dataset.totalMs) || 1);
+    const rect = track.getBoundingClientRect();
+    const originalStart = Number(bar.dataset.startMs) || 0;
+    const originalEnd = Number(bar.dataset.endMs) || originalStart + 1;
+    const duration = Math.max(1, originalEnd - originalStart);
+    const pointerStart = event.clientX;
+    const requestedMode = event.target.closest('.t8-timeline-handle-start')
+      ? 'resize_start'
+      : event.target.closest('.t8-timeline-handle-end')
+        ? 'resize_end'
+        : 'move';
+    const snapValues = [];
+    timeline.querySelectorAll('.t8-timeline-bar, .t8-timeline-word').forEach((element) => {
+      if (element === bar || (requestedMode === 'move' && bar.contains(element))) return;
+      snapValues.push(...valuesFrom(element, ['data-snap-ms', 'data-snap-start-ms', 'data-snap-end-ms']));
+    });
+    const thresholdMs = totalMs * (Number(timeline.dataset.snapThresholdPx) || 12) / Math.max(1, rect.width);
+    let currentStart = originalStart;
+    let currentEnd = originalEnd;
+    let snappedTo = null;
+    let moved = false;
+
+    const nearest = (candidate) => {
+      let best = null;
+      for (const value of snapValues) {
+        const distance = Math.abs(value - candidate);
+        if (!best || distance < best.distance) best = { value, distance };
+      }
+      return best && best.distance <= thresholdMs ? best : null;
+    };
+
+    const draw = () => {
+      bar.style.left = `${100 * currentStart / totalMs}%`;
+      bar.style.width = `${Math.max(0.4, 100 * (currentEnd - currentStart) / totalMs)}%`;
+      bar.dataset.startMs = String(Math.round(currentStart));
+      bar.dataset.endMs = String(Math.round(currentEnd));
+      bar.title = `#${bar.dataset.index} · ${Math.round(currentStart)}–${Math.round(currentEnd)}ms` +
+        (snappedTo === null ? '' : ` · 已吸附 ${Math.round(snappedTo)}ms`);
+    };
+
+    const onMove = (moveEvent) => {
+      const deltaPx = moveEvent.clientX - pointerStart;
+      if (Math.abs(deltaPx) >= 2) moved = true;
+      const deltaMs = deltaPx * totalMs / Math.max(1, rect.width);
+      snappedTo = null;
+      if (requestedMode === 'resize_start') {
+        currentStart = Math.max(0, Math.min(originalEnd - 50, originalStart + deltaMs));
+        const snap = moveEvent.altKey ? null : nearest(currentStart);
+        if (snap) { currentStart = snap.value; snappedTo = snap.value; }
+      } else if (requestedMode === 'resize_end') {
+        currentEnd = Math.min(totalMs, Math.max(originalStart + 50, originalEnd + deltaMs));
+        const snap = moveEvent.altKey ? null : nearest(currentEnd);
+        if (snap) { currentEnd = snap.value; snappedTo = snap.value; }
+      } else {
+        currentStart = Math.max(0, Math.min(totalMs - duration, originalStart + deltaMs));
+        currentEnd = currentStart + duration;
+        if (!moveEvent.altKey) {
+          const startSnap = nearest(currentStart);
+          const endSnap = nearest(currentEnd);
+          const snap = !startSnap ? endSnap : !endSnap ? startSnap
+            : startSnap.distance <= endSnap.distance ? startSnap : endSnap;
+          if (snap) {
+            const shift = snap === startSnap ? snap.value - currentStart : snap.value - currentEnd;
+            currentStart += shift;
+            currentEnd += shift;
+            snappedTo = snap.value;
+          }
+        }
+      }
+      currentStart = Math.max(0, Math.min(currentStart, currentEnd - 50));
+      currentEnd = Math.min(totalMs, Math.max(currentEnd, currentStart + 50));
+      draw();
+    };
+
+    const onUp = () => {
+      window.removeEventListener('pointermove', onMove);
+      window.removeEventListener('pointerup', onUp);
+      window.removeEventListener('pointercancel', onUp);
+      bar.classList.remove('t8-dragging');
+      setPayload({
+        index: Number(bar.dataset.index),
+        start_ms: Math.round(currentStart),
+        end_ms: Math.round(currentEnd),
+        mode: moved ? requestedMode : 'select',
+        snapped_to_ms: snappedTo === null ? null : Math.round(snappedTo),
+      });
+    };
+
+    bar.classList.add('t8-dragging');
+    window.addEventListener('pointermove', onMove);
+    window.addEventListener('pointerup', onUp, { once: true });
+    window.addEventListener('pointercancel', onUp, { once: true });
+  });
+  return [];
+}"""
 
 
 def parse_args() -> argparse.Namespace:
@@ -679,6 +820,40 @@ def build_app(
     def refresh_model_status_event():
         return json.dumps(
             {"policy": memory_policy, "runtime": lifecycle.status()},
+            ensure_ascii=False,
+            indent=2,
+        )
+
+    reference_cache_root = data_dir / "reference_condition_cache"
+
+    def _reference_cache():
+        active = getattr(tts, "reference_condition_cache", None) if tts is not None else None
+        return active or ReferenceConditionCache(reference_cache_root)
+
+    def refresh_reference_cache_event():
+        return json.dumps(
+            {
+                "cache": _reference_cache().status(),
+                "explanation": (
+                    "hits/misses 是本次已加载模型的会话统计；entries/bytes 是磁盘实时状态。"
+                    "清理只删除本整合包 reference_condition_cache 下的 safetensors。"
+                ),
+            },
+            ensure_ascii=False,
+            indent=2,
+        )
+
+    def clear_reference_cache_event():
+        cache = _reference_cache()
+        before = cache.status()
+        removed = cache.clear()
+        return json.dumps(
+            {
+                "action": "clear_reference_condition_cache",
+                "removed_entries": removed,
+                "before": before,
+                "after": cache.status(),
+            },
             ensure_ascii=False,
             indent=2,
         )
@@ -1123,6 +1298,7 @@ def build_app(
         performance_measurement = start_runtime_measurement()
         accel_disabled = False
         cache_risk_guarded = False
+        long_text_guard_reports: list[dict] = []
 
         def result_to_waveform(result):
             if not isinstance(result, tuple) or len(result) != 2:
@@ -1142,6 +1318,10 @@ def build_app(
                 if tensor.numel() and float(tensor.abs().max()) > 2.0:
                     tensor = tensor / 32768.0
             return tensor.clamp(-1, 1).contiguous(), int(sample_rate)
+
+        def result_duration_seconds(result):
+            tensor, sample_rate = result_to_waveform(result)
+            return tensor.shape[-1] / sample_rate
 
         def stream_piece_to_waveform(piece):
             if isinstance(piece, tuple) and len(piece) == 2:
@@ -1171,36 +1351,59 @@ def build_app(
             )
             with safe_gpt_acceleration(sampling_values, plan) as (disabled, guarded):
                 for block_index, chunk in enumerate(plan.chunks):
-                    inference_result = tts.infer(
-                        spk_audio_prompt=prompt_audio,
-                        text=chunk.text,
-                        output_path=None,
-                        lang=language,
-                        emo_audio_prompt=emotion_audio if emotion_mode == 1 else None,
-                        emo_alpha=float(emotion_weight),
-                        emo_vector=emo_vector,
-                        use_emo_text=emotion_mode == 3,
-                        emo_text=(emotion_text or "").strip() or None,
-                        use_random=bool(random_emotion),
-                        verbose=verbose,
-                        do_sample=bool(do_sample),
-                        temperature=float(temperature),
-                        top_p=float(top_p),
-                        top_k=int(top_k) if int(top_k) > 0 else None,
-                        num_beams=int(num_beams),
-                        repetition_penalty=float(repetition_penalty),
-                        length_penalty=float(length_penalty),
-                        max_mel_tokens=int(max_mel_tokens),
-                        max_text_tokens_per_segment=int(plan.max_tokens),
-                        interval_silence=int(segment_silence_ms),
-                        text_normalization=bool(text_normalization),
-                        duration_factor=float(factor),
-                        target_duration=native_chunk_durations[block_index],
-                        seed=seed + int(seed_offset) + block_index,
-                        diffusion_steps=diffusion_steps,
-                        inference_cfg_rate=inference_cfg_rate,
-                        cfm_temperature=cfm_temperature,
+                    def generate_with_limit(limit: int):
+                        return tts.infer(
+                            spk_audio_prompt=prompt_audio,
+                            text=chunk.text,
+                            output_path=None,
+                            lang=language,
+                            emo_audio_prompt=emotion_audio if emotion_mode == 1 else None,
+                            emo_alpha=float(emotion_weight),
+                            emo_vector=emo_vector,
+                            use_emo_text=emotion_mode == 3,
+                            emo_text=(emotion_text or "").strip() or None,
+                            use_random=bool(random_emotion),
+                            verbose=verbose,
+                            do_sample=bool(do_sample),
+                            temperature=float(temperature),
+                            top_p=float(top_p),
+                            top_k=int(top_k) if int(top_k) > 0 else None,
+                            num_beams=int(num_beams),
+                            repetition_penalty=float(repetition_penalty),
+                            length_penalty=float(length_penalty),
+                            max_mel_tokens=int(max_mel_tokens),
+                            max_text_tokens_per_segment=int(limit),
+                            interval_silence=int(segment_silence_ms),
+                            text_normalization=bool(text_normalization),
+                            duration_factor=float(factor),
+                            target_duration=native_chunk_durations[block_index],
+                            seed=seed + int(seed_offset) + block_index,
+                            diffusion_steps=diffusion_steps,
+                            inference_cfg_rate=inference_cfg_rate,
+                            cfm_temperature=cfm_temperature,
+                        )
+
+                    block_token_count = len(
+                        tts.tokenizer.encode(
+                            f"<|{str(language).lower()}|> {chunk.text}",
+                            allowed_special="all",
+                        )
                     )
+                    inference_result, guard_report = run_with_long_text_guard(
+                        generate_with_limit,
+                        result_duration_seconds,
+                        text=chunk.text,
+                        language=language,
+                        token_count=block_token_count,
+                        max_tokens=plan.max_tokens,
+                        duration_factor=factor,
+                        check_duration=native_chunk_durations[block_index] is None,
+                    )
+                    guard_report.update(
+                        speech_block=block_index + 1,
+                        seed_offset=int(seed_offset),
+                    )
+                    long_text_guard_reports.append(guard_report)
                     waveform, block_rate = result_to_waveform(inference_result)
                     if sample_rate is None:
                         sample_rate = block_rate
@@ -1290,17 +1493,28 @@ def build_app(
 
         try:
             native_requested = target_duration_mode == "native" and target_duration_seconds > 0
+            long_latin_guard_required = (
+                str(language).upper() in {"EN", "ES"}
+                and any(int(segment["token_count"]) >= 32 for segment in plan.segments)
+            )
             stream_effective = (
                 bool(stream_preview)
                 and target_duration_mode in {"off", "native"}
                 and retry_count == 0
+                and not long_latin_guard_required
             )
             stream_note = ""
             if bool(stream_preview) and not stream_effective:
-                stream_note = (
-                    "ASR 自动质检或所选兼容目标时长模式需要完成全部候选后再播放；"
-                    "本次仅输出最终音频。"
-                )
+                if long_latin_guard_required:
+                    stream_note = (
+                        "长英文/西语需要在返回前完成异常检测和自动缩短分段重试；"
+                        "本次自动关闭流式试听，仅输出校验后的最终音频。"
+                    )
+                else:
+                    stream_note = (
+                        "ASR 自动质检或所选兼容目标时长模式需要完成全部候选后再播放；"
+                        "本次仅输出最终音频。"
+                    )
             if stream_effective:
                 stream_generator = stream_infer_once(
                     duration_factor,
@@ -1497,6 +1711,13 @@ def build_app(
             f"后处理={json.dumps(postprocess_report, ensure_ascii=False)}"
         )
         metrics += f"；ASR自动质检={json.dumps(quality_report, ensure_ascii=False)}"
+        latin_guard_reports = [
+            item for item in long_text_guard_reports if item.get("enabled")
+        ]
+        if latin_guard_reports:
+            metrics += "；长英文/西语保护=" + json.dumps(
+                latin_guard_reports, ensure_ascii=False
+            )
         if runtime_note:
             metrics += "；" + runtime_note
         if stream_note:
@@ -1821,13 +2042,77 @@ def build_app(
         default_role,
         default_language,
         edited_rows,
+        generation_report,
     ):
         try:
             parsed = parse_dialogue(script_type, script, default_role, default_language)
             lines = apply_timeline_edits(parsed, edited_rows)
         except ValueError as exc:
             raise gr.Error(str(exc)) from exc
-        return render_timeline_html(lines), f"时间轴已自动刷新，共 {len(lines)} 条；编辑会用于下一次生成或单句重做。"
+        reports = timeline_reports_with_edits(lines, generation_report)
+        return render_timeline_html(lines, reports), f"时间轴已自动刷新，共 {len(lines)} 条；编辑会用于下一次生成或单句重做。"
+
+    def timeline_reports_with_edits(lines, generation_report):
+        try:
+            payload = json.loads(str(generation_report or ""))
+            source = payload.get("lines") if isinstance(payload, dict) else []
+        except (TypeError, json.JSONDecodeError):
+            source = []
+        report_map = {
+            int(item.get("index", position)): dict(item)
+            for position, item in enumerate(source or (), 1)
+            if isinstance(item, dict)
+        }
+        reports = []
+        for line in lines:
+            item = report_map.get(line.index)
+            if not item:
+                continue
+            timeline = dict(item.get("timeline") or {})
+            if line.start_ms is not None and line.end_ms is not None:
+                timeline.update(
+                    actual_start_ms=int(line.start_ms),
+                    actual_end_ms=int(line.end_ms),
+                )
+            item["timeline"] = timeline
+            reports.append(item)
+        return reports
+
+    def apply_timeline_drag_event(
+        script_type,
+        script,
+        default_role,
+        default_language,
+        edited_rows,
+        drag_payload,
+        generation_report,
+    ):
+        try:
+            parsed = parse_dialogue(script_type, script, default_role, default_language)
+            lines = apply_timeline_edits(parsed, edited_rows)
+            lines, drag = apply_timeline_drag_payload(lines, drag_payload)
+        except ValueError as exc:
+            raise gr.Error(str(exc)) from exc
+        reports = timeline_reports_with_edits(lines, generation_report)
+        snapped = drag.get("snapped_to_ms")
+        action = {
+            "move": "已平移",
+            "resize_start": "已修改左边界",
+            "resize_end": "已修改右边界",
+            "select": "已选择",
+        }[drag["mode"]]
+        status = (
+            f"{action}第 {drag['index']} 条：{drag['start_ms']}–{drag['end_ms']}ms；"
+            "已同步上方表格。可直接重新混音，或单独重做该句。"
+        )
+        if snapped is not None:
+            status += f" 已吸附到 {int(round(float(snapped)))}ms。"
+        return (
+            timeline_rows(lines),
+            render_timeline_html(lines, reports),
+            status,
+            drag["index"],
+        )
 
     def suggest_dialogue_emotions_event(
         script_type,
@@ -1903,7 +2188,7 @@ def build_app(
     def load_dialogue_task_editor_event(task_id):
         task_id = str(task_id or "").strip()
         if not task_id:
-            return tuple(gr.update() for _ in range(8))
+            return tuple(gr.update() for _ in range(9))
         try:
             task = load_task(output_dir, task_id)
             saved = task.get("settings") or {}
@@ -1925,6 +2210,15 @@ def build_app(
             dict((saved_lines.get(str(line.index)) or {}).get("report") or line.to_dict())
             for line in lines
         ]
+        report_payload = {"lines": reports}
+        report_file = Path(str(task.get("report_file") or ""))
+        if report_file.is_file():
+            try:
+                loaded_report = json.loads(report_file.read_text(encoding="utf-8-sig"))
+                if isinstance(loaded_report, dict):
+                    report_payload = loaded_report
+            except (OSError, json.JSONDecodeError):
+                pass
         return (
             task_script_type,
             task_script,
@@ -1934,6 +2228,7 @@ def build_app(
             saved.get("timeline_policy", "shift"),
             render_timeline_html(lines, reports),
             f"任务 {task_id} 已载入；编辑表格会自动刷新轨道，选中一行后可单独重做并合入。",
+            json.dumps(report_payload, ensure_ascii=False, indent=2),
         )
 
     def select_timeline_row_event(edited_rows, event: gr.SelectData):
@@ -2395,6 +2690,7 @@ def build_app(
                 int(dialogue_sentence_pause_ms),
                 int(dialogue_paragraph_pause_ms),
             )
+            line_long_text_guard_reports: list[dict] = []
 
             def infer_line(
                 factor: float,
@@ -2412,36 +2708,72 @@ def build_app(
                     )
                     with safe_gpt_acceleration(sampling_values, line_plan) as (disabled, guarded):
                         for chunk_index, chunk in enumerate(line_plan.chunks):
-                            result = tts.infer(
-                                spk_audio_prompt=profile.audio_path,
-                                text=chunk.text,
-                                output_path=None,
-                                lang=language_value,
-                                **resolved_emotion,
-                                verbose=verbose,
-                                duration_factor=float(factor),
-                                do_sample=True,
-                                temperature=0.8,
-                                top_p=0.8,
-                                top_k=30,
-                                num_beams=3,
-                                repetition_penalty=10.0,
-                                length_penalty=0.0,
-                                max_mel_tokens=1500,
-                                max_text_tokens_per_segment=int(line_plan.max_tokens),
-                                interval_silence=200,
-                                text_normalization=True,
-                                target_duration=native_chunk_durations[chunk_index],
-                                seed=(
-                                    dialogue_seed
-                                    + offset * 1000
-                                    + int(seed_offset)
-                                    + chunk_index
-                                ),
-                                diffusion_steps=dialogue_diffusion_steps,
-                                inference_cfg_rate=dialogue_inference_cfg_rate,
-                                cfm_temperature=dialogue_cfm_temperature,
+                            def generate_with_limit(limit: int):
+                                return tts.infer(
+                                    spk_audio_prompt=profile.audio_path,
+                                    text=chunk.text,
+                                    output_path=None,
+                                    lang=language_value,
+                                    **resolved_emotion,
+                                    verbose=verbose,
+                                    duration_factor=float(factor),
+                                    do_sample=True,
+                                    temperature=0.8,
+                                    top_p=0.8,
+                                    top_k=30,
+                                    num_beams=3,
+                                    repetition_penalty=10.0,
+                                    length_penalty=0.0,
+                                    max_mel_tokens=1500,
+                                    max_text_tokens_per_segment=int(limit),
+                                    interval_silence=200,
+                                    text_normalization=True,
+                                    target_duration=native_chunk_durations[chunk_index],
+                                    seed=(
+                                        dialogue_seed
+                                        + offset * 1000
+                                        + int(seed_offset)
+                                        + chunk_index
+                                    ),
+                                    diffusion_steps=dialogue_diffusion_steps,
+                                    inference_cfg_rate=dialogue_inference_cfg_rate,
+                                    cfm_temperature=dialogue_cfm_temperature,
+                                )
+
+                            def result_duration_seconds(value):
+                                if not isinstance(value, tuple) or len(value) != 2:
+                                    return 0.0
+                                result_rate, result_raw = value
+                                result_tensor = torch.as_tensor(result_raw)
+                                if result_tensor.ndim == 1:
+                                    samples = result_tensor.shape[0]
+                                elif result_tensor.ndim == 2 and result_tensor.shape[-1] == 1:
+                                    samples = result_tensor.shape[0]
+                                else:
+                                    samples = result_tensor.shape[-1]
+                                return samples / max(1, int(result_rate))
+
+                            block_token_count = len(
+                                tts.tokenizer.encode(
+                                    f"<|{str(language_value).lower()}|> {chunk.text}",
+                                    allowed_special="all",
+                                )
                             )
+                            result, guard_report = run_with_long_text_guard(
+                                generate_with_limit,
+                                result_duration_seconds,
+                                text=chunk.text,
+                                language=language_value,
+                                token_count=block_token_count,
+                                max_tokens=line_plan.max_tokens,
+                                duration_factor=factor,
+                                check_duration=native_chunk_durations[chunk_index] is None,
+                            )
+                            guard_report.update(
+                                speech_block=chunk_index + 1,
+                                seed_offset=int(seed_offset),
+                            )
+                            line_long_text_guard_reports.append(guard_report)
                             if not isinstance(result, tuple) or len(result) != 2:
                                 raise RuntimeError("IndexTTS 返回了无法识别的逐句音频。")
                             block_rate, raw = result
@@ -2554,6 +2886,11 @@ def build_app(
                 "gpt_accel_fallback": bool(accel_disabled),
                 "gpt_accel_cache_guard": bool(cache_guarded),
                 "text_plan": line_plan.to_dict(),
+                "long_text_guard": [
+                    item
+                    for item in line_long_text_guard_reports
+                    if item.get("enabled")
+                ],
                 "duration_adjustment": duration_adjustment,
                 "runtime_acceleration_fallback": runtime_note,
                 "file": str(target),
@@ -2911,7 +3248,7 @@ def build_app(
         secondary_hue="blue",
         neutral_hue="slate",
     )
-    with gr.Blocks(title=APP_TITLE, theme=theme, css=CSS) as demo:
+    with gr.Blocks(title=APP_TITLE, theme=theme, css=CSS, js=TIMELINE_EDITOR_JS) as demo:
         gr.HTML(
             f"""
             <section class="t8-header">
@@ -3650,7 +3987,7 @@ def build_app(
                 type="array",
                 interactive=True,
                 wrap=True,
-                label="可编辑时间轴（最后一列可逐句改情感；提交后自动刷新；点击一行可单独重做）",
+                label="可编辑时间轴（表格与下方可拖拽轨道双向同步；最后一列可逐句改情感）",
             )
             with gr.Accordion("上下文情感自动标注（先建议，确认后才生成）", open=True):
                 gr.Markdown(
@@ -3681,6 +4018,12 @@ def build_app(
                     interactive=False,
                 )
             dialogue_timeline_visual = gr.HTML(render_timeline_html([]))
+            dialogue_timeline_drag_payload = gr.Textbox(
+                value="",
+                elem_id="t8-timeline-drag-payload",
+                container=False,
+                interactive=True,
+            )
             with gr.Row(equal_height=True):
                 dialogue_output = gr.Audio(label="合并音频", type="filepath", scale=8)
                 dialogue_combined_download = gr.DownloadButton(
@@ -3719,8 +4062,10 @@ def build_app(
                     retry_dialogue_line_button = gr.Button("重做选中/指定句并重新合并")
                     rebuild_dialogue_timeline_button = gr.Button("按编辑时间轴重新混音（不重新生成）")
                 gr.Markdown(
-                    "操作：在时间轴表格中修改并提交单元格 → 点击该行自动填写序号 → "
-                    "点击“重做选中/指定句并重新合并”。只重新生成这一句，其他逐句 WAV 直接复用。"
+                    "操作：可直接拖动下方音频块改变位置，或拖动左右手柄改变起止时间；"
+                    "靠近其他台词边界和 ASR 逐字时间点会自动吸附，按住 Alt 可临时关闭吸附。"
+                    "每次拖动都会自动同步上方表格并选中该句；修改台词/角色/语言/逐句情感后，"
+                    "点击“重做选中/指定句并重新合并”，只重新生成这一句，其他逐句 WAV 直接复用。"
                 )
                 dialogue_task_status = gr.Markdown("尚未选择任务。")
                 new_dialogue_task_state = gr.Textbox(value="", visible=False)
@@ -3770,6 +4115,22 @@ def build_app(
                     label="模型与 CUDA 显存状态",
                     value=refresh_model_status_event(),
                     lines=12,
+                    interactive=False,
+                )
+            with gr.Accordion("参考条件缓存管理", open=True):
+                gr.Markdown(
+                    "音色和情感参考编码结果会按音频内容、模型版本、精度及参考设备隔离缓存。"
+                    "重复使用同一参考音频可跳过参考编码；清理缓存不会删除原音频或模型。"
+                )
+                with gr.Row():
+                    refresh_reference_cache_button = gr.Button("刷新参考缓存状态")
+                    clear_reference_cache_button = gr.Button(
+                        "清理参考条件缓存", variant="stop"
+                    )
+                reference_cache_status = gr.TextArea(
+                    label="参考缓存条目、容量与命中统计",
+                    value=refresh_reference_cache_event(),
+                    lines=13,
                     interactive=False,
                 )
 
@@ -3864,6 +4225,16 @@ def build_app(
         release_model_button.click(
             release_model_event,
             outputs=model_memory_status,
+            queue=False,
+        )
+        refresh_reference_cache_button.click(
+            refresh_reference_cache_event,
+            outputs=reference_cache_status,
+            queue=False,
+        )
+        clear_reference_cache_button.click(
+            clear_reference_cache_event,
+            outputs=reference_cache_status,
             queue=False,
         )
         audiocpp_probe_button.click(
@@ -4127,6 +4498,7 @@ def build_app(
                 dialogue_default_role,
                 dialogue_default_language,
                 dialogue_preview,
+                dialogue_report,
             ],
             outputs=[dialogue_timeline_visual, dialogue_status],
             queue=False,
@@ -4139,8 +4511,28 @@ def build_app(
                 dialogue_default_role,
                 dialogue_default_language,
                 dialogue_preview,
+                dialogue_report,
             ],
             outputs=[dialogue_timeline_visual, dialogue_status],
+            queue=False,
+        )
+        dialogue_timeline_drag_payload.input(
+            apply_timeline_drag_event,
+            inputs=[
+                dialogue_type,
+                dialogue_script,
+                dialogue_default_role,
+                dialogue_default_language,
+                dialogue_preview,
+                dialogue_timeline_drag_payload,
+                dialogue_report,
+            ],
+            outputs=[
+                dialogue_preview,
+                dialogue_timeline_visual,
+                dialogue_task_status,
+                retry_dialogue_line_number,
+            ],
             queue=False,
         )
         suggest_dialogue_emotion_button.click(
@@ -4382,6 +4774,7 @@ def build_app(
                 timeline_policy,
                 dialogue_timeline_visual,
                 dialogue_task_status,
+                dialogue_report,
             ],
             queue=False,
         )

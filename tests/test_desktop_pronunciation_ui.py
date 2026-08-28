@@ -161,7 +161,10 @@ def test_desktop_builds_complete_pronunciation_workspace(tmp_path, monkeypatch):
     assert "生成后逐句自动 ASR 校对" in labels
     assert "回写字幕时间" in labels
     assert "回写字幕文本" in labels
-    assert "可编辑时间轴（最后一列可逐句改情感；提交后自动刷新；点击一行可单独重做）" in labels
+    assert "可编辑时间轴（表格与下方可拖拽轨道双向同步；最后一列可逐句改情感）" in labels
+    assert "参考缓存条目、容量与命中统计" in labels
+    assert "__t8TimelineEditorInstalled" in config_text
+    assert "t8-timeline-drag-payload" in config_text
     assert "每侧上下文台词数" in labels
     assert "覆盖已有逐句情感" in labels
     assert "上下文情感建议报告 JSON" in labels

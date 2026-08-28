@@ -12,6 +12,7 @@ Windows Electron desktop integration for IndexTTS 2.5. The packaged application 
 - complete 2.5 sampling, segmentation and text-normalization controls
 - reproducible seed plus CFM diffusion-step, CFG-strength, and noise-temperature controls
 - language-aware automatic segmentation with token/pause preview
+- long English/Spanish output guards that retry a smaller segment when mel-token exhaustion or an implausible duration is detected
 - punctuation presets and explicit `<pause=0.5>` / `<pause=500ms>` silence
 - one-pass native target duration plus legacy natural, pad-only, and sample-exact modes
 - streaming playback with cancellation while speech blocks are generated
@@ -23,14 +24,15 @@ Windows Electron desktop integration for IndexTTS 2.5. The packaged application 
 - crash-safe dialogue task manifests, restart/resume, and selected-line regeneration
 - local Whisper ASR proofreading with OpenAI/faster-whisper backends, CER/WER, normalized diffs, and word timestamps
 - rewritten SRT export using original timing or the generated audio's actual timeline
-- editable millisecond timeline table, visual track preview, and no-inference re-mixing
+- editable millisecond timeline table plus draggable/resizable tracks, ASR word-boundary snapping, and no-inference re-mixing
+- reference-condition cache statistics and safe clearing for this application's own `safetensors` entries
 - bundled FlashAttention 2.8.3, Triton Windows 3.4.0.post21, and DeepSpeed 0.17.5 Windows acceleration wheels with automatic fallback
 - explicit auto/BF16/FP16/FP32 selection before model loading, plus native-BF16 fallback detection
 - optional CPU placement for Wav2Vec/CAMPPlus reference encoders and fast default-emotion condition reuse
 - no-model acceleration preflight with per-mode availability/reason, exact bundled dependency versions, refresh, and JSON diagnostic export
 
 The large model files are intentionally external. On first launch, select a complete IndexTTS 2.5 model directory.
-Version 0.17.0 is aligned to code revision `ee40fa7d` and model revision `c39ce5ba`. The launcher keeps the no-model acceleration preflight, and now adds an explicitly triggered real benchmark that sequentially measures supported modes with identical reference audio, text, and seed, then recommends a near-fastest low-complexity mode. It also provides a manual, read-only upstream update check. Single-voice generation can create up to four retained candidates and selects the best using local ASR plus technical waveform checks, or technical checks alone when Whisper is unavailable. Extracted speaker/emotion conditions are cached across model reloads in content-addressed `safetensors` files under the Electron user-data directory, isolated by official model revision, precision, and reference device. No benchmark, update check, model load, download, or acceleration mode starts automatically.
+Version 0.18.0 is aligned to code revision `ee40fa7d` and model revision `c39ce5ba`. Long English and Spanish blocks are checked for mel-token exhaustion and implausibly short or long output; a suspicious block is retried once with a smaller segment budget. The same guard applies line by line to long SRT jobs. Real-model English and Spanish WAV regressions are included, together with a Windows console-encoding fix for non-ASCII Spanish text. The launcher keeps the no-model acceleration preflight and all acceleration modes remain explicitly user-selected. Extracted speaker/emotion conditions are cached across model reloads in content-addressed `safetensors` files under the Electron user-data directory, isolated by official model revision, precision, and reference device. The UI now reports cache entries, bytes, hits, misses, and hit rate and can safely delete only its own cache entries. No benchmark, update check, model load, download, or acceleration mode starts automatically.
 The launcher validates official model file sizes, while the downloader performs full SHA-256 verification.
 This release also supports running the portable package from Windows paths containing Chinese characters.
 AAC/M4A and other compressed reference audio is decoded by the bundled PyAV runtime, without requiring a system FFmpeg installation. Streaming previews are also encoded by bundled PyAV, so Gradio no longer calls an external `ffmpeg` or `ffprobe` executable and cannot fail with `[WinError 2]` merely because those programs are absent from `PATH`.
@@ -62,9 +64,11 @@ avoid playing an obsolete first pass. Audio post-processing is optional and `off
 
 The dialogue workspace writes `task.json` after every completed line. Interrupted tasks can be resumed after restarting
 the application, and any selected line can be regenerated without repeating the completed lines before recombining the
-timeline and ZIP archive. The preview table is editable: start/end values are milliseconds, and clicking the timeline
-refresh button validates and redraws the tracks. After generation, the edited timeline can be re-mixed without running
-IndexTTS again.
+timeline and ZIP archive. The preview table is editable and synchronized with the visual tracks: drag a block to move it,
+drag either handle to resize it, and release near another line boundary or an ASR word timestamp to snap. Hold Alt while
+dragging to bypass snapping. A drag immediately updates the table and selects that line, so text, role, language, timing,
+or emotion can be changed and only that line regenerated and merged. The edited timeline can also be re-mixed without
+running IndexTTS again.
 
 ### Context-aware per-line emotion suggestions
 
@@ -162,7 +166,7 @@ npm run make
 ```
 
 This builds only `@electron-forge/maker-zip`. The unpacked application is still
-available under `desktop/out/T8star-Aix-IndexTTS-2.5-v0.17.0-win32-x64` for local testing.
+available under `desktop/out/T8star-Aix-IndexTTS-2.5-v0.18.0-win32-x64` for local testing.
 The bundled runtime contains tens of thousands of small files, so Squirrel/NuGet
 can spend a long time repeatedly rewriting a multi-gigabyte package. It is not the
 recommended user distribution. If an installer is specifically required, build it

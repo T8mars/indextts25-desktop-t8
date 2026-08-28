@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import re
+import warnings
 from dataclasses import asdict, dataclass
+from math import isfinite
 from typing import Any
 
 import torch
@@ -13,6 +15,8 @@ from indextts.utils.common import fade_out_pcm_tail
 
 
 LANGUAGE_AUTO_LIMITS = {"ZH": 120, "EN": 60, "JA": 100, "ES": 60, "AR": 80}
+LATIN_LONG_TEXT_LANGUAGES = frozenset({"EN", "ES"})
+LONG_TEXT_RETRY_MIN_TOKENS = 24
 PAUSE_PRESETS = {
     "off": (0, 0, 0),
     "natural": (0, 260, 500),
@@ -76,6 +80,123 @@ class DesktopGenerationPlan:
             "chunks": [asdict(item) for item in self.chunks],
             "segments": list(self.segments),
         }
+
+
+def latin_word_count(text: str) -> int:
+    """Count English/Spanish words without treating punctuation as speech."""
+
+    return len(re.findall(r"[^\W_]+(?:['’\-][^\W_]+)*", str(text or ""), re.UNICODE))
+
+
+def long_text_retry_limit(language: str, current_limit: int) -> int:
+    """Return a materially safer token limit for one guarded retry."""
+
+    current = max(1, int(current_limit))
+    if str(language).strip().upper() not in LATIN_LONG_TEXT_LANGUAGES:
+        return current
+    return max(
+        LONG_TEXT_RETRY_MIN_TOKENS,
+        min(current - 1, int(round(current * 2 / 3))),
+    )
+
+
+def assess_long_text_result(
+    text: str,
+    language: str,
+    token_count: int,
+    duration_seconds: float,
+    duration_factor: float = 1.0,
+    warning_messages: tuple[str, ...] | list[str] = (),
+) -> list[str]:
+    """Detect strong long-Latin collapse signals while avoiding normal speech variance."""
+
+    normalized = str(language).strip().upper()
+    if normalized not in LATIN_LONG_TEXT_LANGUAGES or int(token_count) < 32:
+        return []
+    reasons: list[str] = []
+    lowered_warnings = "\n".join(str(item).lower() for item in warning_messages)
+    if "max_mel_tokens" in lowered_warnings and (
+        "exceed" in lowered_warnings or "stopped" in lowered_warnings
+    ):
+        reasons.append("max_mel_tokens_reached")
+    seconds = float(duration_seconds)
+    if not isfinite(seconds) or seconds <= 0:
+        reasons.append("invalid_audio_duration")
+        return reasons
+    words = latin_word_count(text)
+    if words < 24:
+        return reasons
+    factor = max(0.5, min(2.0, float(duration_factor)))
+    # Even unusually fast narration rarely exceeds 7.5 words/s. The generous
+    # upper bound catches runaway decodes without rejecting dramatic pauses.
+    minimum_seconds = max(1.5, words * factor / 7.5)
+    maximum_seconds = max(20.0, words * factor / 0.65 + 6.0)
+    if seconds < minimum_seconds:
+        reasons.append("suspiciously_short_for_latin_text")
+    elif seconds > maximum_seconds:
+        reasons.append("suspiciously_long_for_latin_text")
+    return reasons
+
+
+def run_with_long_text_guard(
+    generate,
+    duration_reader,
+    *,
+    text: str,
+    language: str,
+    token_count: int,
+    max_tokens: int,
+    duration_factor: float = 1.0,
+    check_duration: bool = True,
+):
+    """Generate once and retry a suspicious long EN/ES result with smaller segments."""
+
+    def invoke(limit: int):
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always", RuntimeWarning)
+            result = generate(int(limit))
+        messages = tuple(str(item.message) for item in caught)
+        duration = float(duration_reader(result))
+        reasons = assess_long_text_result(
+            text,
+            language,
+            token_count,
+            duration if check_duration else max(duration, 10_000.0),
+            duration_factor,
+            messages,
+        )
+        if not check_duration:
+            reasons = [item for item in reasons if item == "max_mel_tokens_reached"]
+        return result, duration, messages, reasons
+
+    requested_limit = int(max_tokens)
+    first, first_duration, first_warnings, first_reasons = invoke(requested_limit)
+    retry_limit = long_text_retry_limit(language, requested_limit)
+    report = {
+        "enabled": (
+            str(language).strip().upper() in LATIN_LONG_TEXT_LANGUAGES
+            and int(token_count) >= 32
+        ),
+        "requested_limit": requested_limit,
+        "used_limit": requested_limit,
+        "retried": False,
+        "first_duration_seconds": round(first_duration, 4),
+        "first_reasons": first_reasons,
+        "first_warnings": list(first_warnings),
+    }
+    if not first_reasons or retry_limit >= requested_limit:
+        return first, report
+
+    second, second_duration, second_warnings, second_reasons = invoke(retry_limit)
+    report.update(
+        retried=True,
+        used_limit=retry_limit,
+        retry_duration_seconds=round(second_duration, 4),
+        retry_reasons=second_reasons,
+        retry_warnings=list(second_warnings),
+        recovered=not second_reasons,
+    )
+    return second, report
 
 
 def effective_segment_limit(language: str, mode: str, custom_limit: int) -> int:
@@ -328,13 +449,19 @@ def postprocess_waveform(
 __all__ = [
     "DURATION_MODES",
     "LANGUAGE_AUTO_LIMITS",
+    "LATIN_LONG_TEXT_LANGUAGES",
+    "LONG_TEXT_RETRY_MIN_TOKENS",
     "POSTPROCESS_PRESETS",
+    "assess_long_text_result",
     "apply_duration_policy",
     "allocate_native_chunk_durations",
     "build_desktop_plan",
     "concatenate_with_pauses",
     "effective_segment_limit",
     "fit_duration_factor",
+    "latin_word_count",
+    "long_text_retry_limit",
     "postprocess_waveform",
+    "run_with_long_text_guard",
     "split_speech_chunks",
 ]

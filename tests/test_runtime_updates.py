@@ -9,7 +9,12 @@ import desktop_model_download
 import desktop_webui
 import runtime_acceleration
 from desktop_presets import delete_preset, list_presets, load_preset, save_preset
-from indextts.infer_v2_5 import IndexTTS2, QwenEmotion, select_gpt_inference_dtype
+from indextts.infer_v2_5 import (
+    IndexTTS2,
+    QwenEmotion,
+    _console_text,
+    select_gpt_inference_dtype,
+)
 from indextts.utils import common
 from indextts.utils import model_download
 from indextts.gpt import model_v2
@@ -68,6 +73,11 @@ def test_qwen_emotion_accepts_label_style_outputs():
     redirected = emotion.convert({"高兴": "自然"})
     assert redirected["happy"] == 0.0
     assert redirected["calm"] == 1.0
+
+
+def test_console_logging_cannot_crash_on_spanish_under_legacy_windows_encoding(monkeypatch):
+    monkeypatch.setattr("indextts.infer_v2_5.sys.stdout", SimpleNamespace(encoding="ascii"))
+    assert _console_text("pequeño") == r"peque\xf1o"
 
 
 def test_qwen_emotion_can_be_loaded_lazily_once(monkeypatch, tmp_path):

@@ -213,6 +213,8 @@ if (
   !desktopSource.includes("ASR 自动校对当前结果") ||
   !desktopSource.includes("ASR 自动校对与字幕自动回写") ||
   !desktopSource.includes("可编辑时间轴") ||
+  !desktopSource.includes("t8-timeline-drag-payload") ||
+  !desktopSource.includes("按住 Alt 可临时关闭吸附") ||
   !desktopSource.includes("按编辑时间轴重新混音") ||
   !desktopSource.includes("角色音色库") ||
   !desktopSource.includes("该角色默认情感模式") ||
@@ -226,6 +228,8 @@ if (
   !desktopSource.includes("追加候选数量") ||
   !desktopSource.includes("全部候选音频") ||
   !desktopSource.includes("模型与显存生命周期") ||
+  !desktopSource.includes("参考条件缓存管理") ||
+  !desktopSource.includes("run_with_long_text_guard") ||
   !desktopSource.includes("实验 audio.cpp 后端") ||
   !desktopSource.includes("select_runtime_policy") ||
   !desktopSource.includes("--precision") ||
