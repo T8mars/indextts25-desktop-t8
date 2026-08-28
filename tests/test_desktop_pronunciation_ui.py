@@ -135,6 +135,8 @@ def test_desktop_builds_complete_pronunciation_workspace(tmp_path, monkeypatch):
     assert "文本归一化" in labels
     assert "预设名称" in labels
     assert "已保存预设" in labels
+    assert "使用已保存音色库（免重复上传）" in labels
+    assert "音色参考音频（音色库自动载入，或手动上传/录音）" in labels
     assert "角色音色参考" in labels
     assert "该角色默认情感模式" in labels
     assert "该角色情感参考音频" in labels
@@ -177,6 +179,7 @@ def test_desktop_builds_complete_pronunciation_workspace(tmp_path, monkeypatch):
     assert "じょうず" in config_text
     assert "添加/更新到表格" in config_text
     assert "载入 / 试听 / 编辑" in config_text
+    assert "刷新音色库" in config_text
     assert "生成全部台词" in config_text
     assert "可选语言" in config_text
     assert "无单位；小于 1 更短，大于 1 更长" in config_text
@@ -242,6 +245,75 @@ def test_desktop_builds_complete_pronunciation_workspace(tmp_path, monkeypatch):
     assert "未发现" in differences
     assert json.loads(report)["passed"] is True
     assert "t8-waveform" in alignment
+
+
+def test_single_generation_can_reuse_saved_voice_without_uploading(tmp_path):
+    output_dir = tmp_path / "outputs"
+    data_dir = tmp_path / "user-data"
+    output_dir.mkdir()
+    data_dir.mkdir()
+    source = tmp_path / "narrator.wav"
+    source.write_bytes(b"saved voice")
+    saved = VoiceLibrary(data_dir).save("旁白", source)
+
+    demo = build_app(_FakeTTS(), output_dir, data_dir, verbose=False)
+    load_saved_voice = next(
+        block.fn
+        for block in demo.fns.values()
+        if getattr(block.fn, "__name__", "") == "load_single_voice_event"
+    )
+    refresh_saved_voices = next(
+        block.fn
+        for block in demo.fns.values()
+        if getattr(block.fn, "__name__", "") == "refresh_single_voice_event"
+    )
+
+    audio_path, status = load_saved_voice("旁白")
+    assert Path(audio_path) == Path(saved.audio_path)
+    assert "可直接生成" in status
+    assert "不会覆盖本页当前的语言、情感或生成参数" in status
+
+    selector_update, refreshed_audio, refresh_status = refresh_saved_voices("旁白")
+    assert selector_update["value"] == "旁白"
+    assert Path(refreshed_audio) == Path(saved.audio_path)
+    assert "共 1 个角色" in refresh_status
+
+    save_saved_voice = next(
+        block.fn
+        for block in demo.fns.values()
+        if getattr(block.fn, "__name__", "") == "save_voice_event"
+    )
+    second_source = tmp_path / "role-b.wav"
+    second_source.write_bytes(b"second saved voice")
+    save_result = save_saved_voice(
+        "角色B",
+        str(second_source),
+        "ZH",
+        0,
+        None,
+        "",
+        0.65,
+        False,
+        *([0.0] * 8),
+        "",
+        None,
+        False,
+    )
+    assert len(save_result) == 8
+    assert save_result[3]["value"] == "角色B"
+    assert Path(save_result[4]).is_file()
+    assert "已同步“角色B”" in save_result[5]
+
+    delete_saved_voice = next(
+        block.fn
+        for block in demo.fns.values()
+        if getattr(block.fn, "__name__", "") == "delete_voice_event"
+    )
+    delete_result = delete_saved_voice("角色B", "角色B")
+    assert len(delete_result) == 8
+    assert delete_result[3]["value"] is None
+    assert delete_result[4] is None
+    assert "请重新选择或上传参考音频" in delete_result[5]
 
 
 def test_desktop_context_emotion_suggestions_fill_timeline_without_synthesis(tmp_path):

@@ -1,10 +1,10 @@
 # T8star-Aix · IndexTTS 2.5 Desktop
 
 这是基于官方 IndexTTS 2.5 制作的 Windows Electron 桌面整合版源码仓库，当前桌面版本为
-**0.18.0**。完整功能、开发和打包说明见 [Desktop README](desktop/README.md)。
+**0.18.1**。完整功能、开发和打包说明见 [Desktop README](desktop/README.md)。
 
-> 0.18.0 为长英文、西班牙语和长 SRT 增加异常检测与自动缩短分段重试；桌面时间轴可直接
-> 拖动、缩放并吸附 ASR 时间点；同时可查看和安全清理音色/情感参考条件缓存。
+> 0.18.1 在“语音生成”页新增已保存角色音色下拉框：选择角色即自动载入音色参考，
+> 不再需要每次重复上传。临时音色仍可上传、拖入或录制，且不会覆盖当前情感和生成参数。
 
 - 官方开源项目：[index-tts/index-tts](https://github.com/index-tts/index-tts)（感谢官方团队开源）
 - T8star-Aix ComfyUI 节点：[T8mars/comfyui-indextts25-t8](https://github.com/T8mars/comfyui-indextts25-t8)

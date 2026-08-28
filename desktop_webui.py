@@ -86,7 +86,7 @@ from runtime_metrics import (
 
 
 APP_TITLE = "T8star-Aix · IndexTTS 2.5"
-DESKTOP_VERSION = "0.18.0"
+DESKTOP_VERSION = "0.18.1"
 MODEL_MANIFEST = json.loads(
     (Path(__file__).resolve().parent / "desktop_model_manifest.json").read_text(encoding="utf-8")
 )
@@ -1199,7 +1199,7 @@ def build_app(
     ):
         ensure_model()
         if not prompt_audio:
-            raise gr.Error("请先上传或录制音色参考音频。")
+            raise gr.Error("请先从已保存音色库选择角色，或上传/录制音色参考音频。")
         text = (text or "").strip()
         if not text:
             raise gr.Error("请输入需要合成的文本。")
@@ -1923,6 +1923,45 @@ def build_app(
     def voice_choices():
         return [item.name for item in voice_library.list()]
 
+    def load_single_voice_event(name):
+        """Load a persisted voice into the regular single-generation audio input."""
+
+        if not name:
+            return gr.update(), (
+                "未选择已保存音色；仍可在下方上传、拖入或录制参考音频。"
+            )
+        try:
+            profile = voice_library.get(name)
+        except KeyError as exc:
+            raise gr.Error(f"载入已保存音色失败：{exc}") from exc
+        return (
+            profile.audio_path,
+            f"已载入“{profile.name}”的音色参考，可直接生成。"
+            "这里只复用音色音频，不会覆盖本页当前的语言、情感或生成参数。",
+        )
+
+    def refresh_single_voice_event(selected):
+        choices = voice_choices()
+        current = str(selected or "").strip()
+        if current and current in choices:
+            profile = voice_library.get(current)
+            return (
+                gr.update(choices=choices, value=current),
+                profile.audio_path,
+                f"音色库已刷新，共 {len(choices)} 个角色；已重新载入“{profile.name}”。",
+            )
+        if current:
+            return (
+                gr.update(choices=choices, value=None),
+                None,
+                f"音色库已刷新，共 {len(choices)} 个角色；原选择已不存在，请重新选择。",
+            )
+        return (
+            gr.update(choices=choices, value=None),
+            gr.update(),
+            f"音色库已刷新，共 {len(choices)} 个角色。请选择一个角色，或继续上传参考音频。",
+        )
+
     def save_voice_event(
         name,
         audio,
@@ -1965,6 +2004,9 @@ def build_app(
             voice_rows(),
             gr.update(choices=choices, value=profile.name),
             gr.update(choices=choices),
+            gr.update(choices=choices, value=profile.name),
+            profile.audio_path,
+            f"已同步“{profile.name}”到语音生成页，可直接复用其音色参考。",
             False,
             f"已保存角色音色：{profile.name}。参考音频已复制到用户数据目录。",
         )
@@ -1991,7 +2033,7 @@ def build_app(
             f"已载入：{profile.name}。可直接试听；修改后勾选“更新所选角色”即可覆盖或改名。",
         )
 
-    def delete_voice_event(name):
+    def delete_voice_event(name, single_selected=None):
         if not name:
             raise gr.Error("请先选择要删除的角色。")
         try:
@@ -1999,10 +2041,23 @@ def build_app(
         except KeyError as exc:
             raise gr.Error(str(exc)) from exc
         choices = voice_choices()
+        deleted_single_selection = (
+            str(single_selected or "").strip().casefold() == removed.name.casefold()
+        )
         return (
             voice_rows(),
             gr.update(choices=choices, value=None),
             gr.update(choices=choices),
+            gr.update(
+                choices=choices,
+                value=None if deleted_single_selection else single_selected,
+            ),
+            None if deleted_single_selection else gr.update(),
+            (
+                f"已删除当前单句音色“{removed.name}”，请重新选择或上传参考音频。"
+                if deleted_single_selection
+                else f"音色库已更新，共 {len(choices)} 个角色。"
+            ),
             False,
             f"已删除角色音色：{removed.name}",
         )
@@ -2293,7 +2348,7 @@ def build_app(
 
     def inspect_reference_event(audio_path, auto_prepare, maximum_seconds, padding_ms):
         if not audio_path:
-            raise gr.Error("请先上传或录制音色参考音频。")
+            raise gr.Error("请先从已保存音色库选择角色，或上传/录制音色参考音频。")
         try:
             waveform, sample_rate = torchaudio.load(str(audio_path))
             if bool(auto_prepare):
@@ -3266,12 +3321,33 @@ def build_app(
 
         with gr.Tab("语音生成"):
             with gr.Row(elem_classes=["t8-primary-grid"]):
-                prompt_audio = gr.Audio(
-                    label="音色参考音频",
-                    sources=["upload", "microphone"],
-                    type="filepath",
-                    elem_classes=["t8-prompt-audio"],
-                )
+                with gr.Column(scale=1):
+                    gr.Markdown(
+                        "**已有角色不用重复上传：** 从音色库选择后会自动填入下方参考音频；"
+                        "需要临时音色时仍可上传、拖入或录制。"
+                    )
+                    with gr.Row():
+                        single_voice_select = gr.Dropdown(
+                            choices=voice_choices(),
+                            value=None,
+                            label="使用已保存音色库（免重复上传）",
+                            info="选中即载入该角色保存的音色参考；不会覆盖本页情感和生成参数。",
+                            scale=3,
+                        )
+                        refresh_single_voice_button = gr.Button(
+                            "刷新音色库",
+                            min_width=120,
+                            scale=0,
+                        )
+                    single_voice_status = gr.Markdown(
+                        "尚未选择已保存音色；也可以直接使用下方上传/录音。"
+                    )
+                    prompt_audio = gr.Audio(
+                        label="音色参考音频（音色库自动载入，或手动上传/录音）",
+                        sources=["upload", "microphone"],
+                        type="filepath",
+                        elem_classes=["t8-prompt-audio"],
+                    )
                 with gr.Column(scale=2):
                     text = gr.TextArea(
                         label="目标文本",
@@ -4303,6 +4379,18 @@ def build_app(
             outputs=[prompt_audio, reference_quality_report, reference_waveform],
             queue=False,
         )
+        single_voice_select.change(
+            load_single_voice_event,
+            inputs=single_voice_select,
+            outputs=[prompt_audio, single_voice_status],
+            queue=False,
+        )
+        refresh_single_voice_button.click(
+            refresh_single_voice_event,
+            inputs=single_voice_select,
+            outputs=[single_voice_select, prompt_audio, single_voice_status],
+            queue=False,
+        )
         dictionary_editor_components = [
             dictionary_entry_term,
             dictionary_entry_language,
@@ -4417,6 +4505,9 @@ def build_app(
                 voice_table,
                 delete_voice_select,
                 dialogue_default_role,
+                single_voice_select,
+                prompt_audio,
+                single_voice_status,
                 voice_update_selected,
                 voice_status,
             ],
@@ -4443,11 +4534,14 @@ def build_app(
         )
         delete_voice_button.click(
             delete_voice_event,
-            inputs=[delete_voice_select],
+            inputs=[delete_voice_select, single_voice_select],
             outputs=[
                 voice_table,
                 delete_voice_select,
                 dialogue_default_role,
+                single_voice_select,
+                prompt_audio,
+                single_voice_status,
                 voice_update_selected,
                 voice_status,
             ],

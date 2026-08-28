@@ -217,6 +217,8 @@ if (
   !desktopSource.includes("按住 Alt 可临时关闭吸附") ||
   !desktopSource.includes("按编辑时间轴重新混音") ||
   !desktopSource.includes("角色音色库") ||
+  !desktopSource.includes("使用已保存音色库（免重复上传）") ||
+  !desktopSource.includes("load_single_voice_event") ||
   !desktopSource.includes("该角色默认情感模式") ||
   !desktopSource.includes("profile_emotion_kwargs") ||
   !desktopSource.includes("line_emotion_kwargs") ||
