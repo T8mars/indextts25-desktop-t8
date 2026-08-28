@@ -1,4 +1,5 @@
 const { app, BrowserWindow, dialog, ipcMain, shell } = require("electron");
+const crypto = require("node:crypto");
 const fs = require("node:fs");
 const https = require("node:https");
 const net = require("node:net");
@@ -7,15 +8,23 @@ const path = require("node:path");
 const { spawn } = require("node:child_process");
 const { createDiagnosticReport } = require("./diagnostic_report");
 const {
+  compareVersions,
+  createDownloadTask,
+  extractAndVerifyUpdate,
+  normalizeChannel,
+  resolveDesktopUpdate,
+  verifyPayloadFiles
+} = require("./update_manager");
+const {
   hardwareSummary,
   recommendRuntimeProfile,
   resolveRuntimeProfile
 } = require("./runtime_profiles");
 
 const APP_TITLE = "T8star-Aix · IndexTTS 2.5";
-const COMFY_NODE_VERSION = "0.15.0";
+const COMFY_NODE_VERSION = "0.18.0";
 const MODEL_URLS = {
-  huggingface: "https://huggingface.co/IndexTeam/IndexTTS-2.5",
+  huggingface: "https://huggingface.co/t8star/IndexTTS-2.5-Comfy",
   modelscope: "https://modelscope.cn/models/IndexTeam/IndexTTS-2.5"
 };
 let modelManifestCache = null;
@@ -26,6 +35,8 @@ let downloadProcess = null;
 let cancelledDownloadProcess = null;
 let benchmarkProcess = null;
 let benchmarkCancelled = false;
+let updateDownloadTask = null;
+let preparedDesktopUpdate = null;
 let activePort = null;
 let state = {
   phase: "idle",
@@ -46,6 +57,10 @@ let state = {
   benchmarkReport: null,
   updateBusy: false,
   updateReport: null,
+  updateDownload: null,
+  updateReady: false,
+  autoCheckUpdates: true,
+  updateChannel: "stable",
   serviceUrl: ""
 };
 
@@ -78,22 +93,17 @@ function fetchText(url, timeoutMs = 15000) {
   });
 }
 
-function compareVersions(left, right) {
-  const a = String(left || "0").split(".").map((part) => Number.parseInt(part, 10) || 0);
-  const b = String(right || "0").split(".").map((part) => Number.parseInt(part, 10) || 0);
-  for (let index = 0; index < Math.max(a.length, b.length); index += 1) {
-    if ((a[index] || 0) !== (b[index] || 0)) return (a[index] || 0) > (b[index] || 0) ? 1 : -1;
-  }
-  return 0;
-}
-
 async function checkForUpdates() {
   if (state.updateBusy) return state;
-  updateState({ updateBusy: true, message: "正在检查官方代码、模型与节点版本…" });
+  updateState({ updateBusy: true, message: "正在检查桌面程序、官方代码、模型与节点版本…" });
   const manifest = modelManifest();
   const sources = await Promise.allSettled([
+    resolveDesktopUpdate({
+      currentVersion: app.getVersion(),
+      channel: state.updateChannel || "stable"
+    }),
     fetchText("https://api.github.com/repos/index-tts/index-tts/commits/main"),
-    fetchText("https://huggingface.co/api/models/IndexTeam/IndexTTS-2.5"),
+    fetchText("https://huggingface.co/api/models/t8star/IndexTTS-2.5-Comfy"),
     fetchText("https://raw.githubusercontent.com/T8mars/comfyui-indextts25-t8/main/pyproject.toml")
   ]);
   const errors = [];
@@ -107,19 +117,35 @@ async function checkForUpdates() {
       return {};
     }
   };
-  const upstream = readJson(sources[0], "官方代码");
-  const model = readJson(sources[1], "官方模型");
+  let desktop = {
+    current: app.getVersion(),
+    latest: "",
+    channel: state.updateChannel || "stable",
+    updateAvailable: false,
+    manualOnly: true,
+    releaseUrl: "https://github.com/T8mars/indextts25-desktop-t8/releases/latest",
+    manifest: null
+  };
+  if (sources[0].status === "fulfilled") desktop = sources[0].value;
+  else errors.push(`桌面程序：${sources[0].reason.message || sources[0].reason}`);
+  desktop.portableInstallSupported = portableUpdateSupported();
+  if (!desktop.portableInstallSupported) desktop.manualOnly = true;
+  if (desktop.updateAvailable && desktop.manifestError) {
+    errors.push(`桌面更新安全校验：${desktop.manifestError}已禁用程序内自动安装。`);
+  }
+  const upstream = readJson(sources[1], "官方代码");
+  const model = readJson(sources[2], "T8star-Aix 模型仓库");
   let remoteNodeVersion = "";
-  if (sources[2].status === "fulfilled") {
-    remoteNodeVersion = sources[2].value.match(/^version\s*=\s*["']([^"']+)["']/m)?.[1] || "";
+  if (sources[3].status === "fulfilled") {
+    remoteNodeVersion = sources[3].value.match(/^version\s*=\s*["']([^"']+)["']/m)?.[1] || "";
   } else {
-    errors.push(`节点仓库：${sources[2].reason.message || sources[2].reason}`);
+    errors.push(`节点仓库：${sources[3].reason.message || sources[3].reason}`);
   }
   const codeRevision = String(upstream.sha || "");
   const modelRevision = String(model.sha || "");
   const report = {
     checkedAt: new Date().toISOString(),
-    desktop: { current: app.getVersion() },
+    desktop,
     node: {
       bundled: COMFY_NODE_VERSION,
       latest: remoteNodeVersion,
@@ -137,13 +163,19 @@ async function checkForUpdates() {
     },
     errors
   };
-  const updates = [report.node, report.officialCode, report.officialModel].filter((item) => item.updateAvailable).length;
-  report.summary = errors.length === 3
+  const updates = [report.desktop, report.node, report.officialCode, report.officialModel]
+    .filter((item) => item.updateAvailable).length;
+  report.summary = errors.length === 4
     ? "检查失败，请确认网络后重试。"
+    : report.desktop.updateAvailable && report.desktop.manualOnly
+      ? `发现 Desktop ${report.desktop.latest}；当前版本需要打开 Release 页面手动更新。`
+      : report.desktop.updateAvailable
+        ? `发现 Desktop ${report.desktop.latest}，可在启动器内下载并安全安装。`
     : updates
-      ? `发现 ${updates} 项新版本；这里只提示，不会自动下载或覆盖。`
+      ? `发现 ${updates} 项上游或节点更新；不会自动覆盖模型和运行库。`
       : "当前未发现新版本。";
   updateState({ updateBusy: false, updateReport: report, message: report.summary });
+  writeSettings({ ...readSettings(), lastUpdateCheck: report.checkedAt });
   appendLog(`Update check: ${JSON.stringify(report)}`);
   return state;
 }
@@ -204,6 +236,279 @@ function commandLineModelDirectory() {
 function writeSettings(nextSettings) {
   fs.mkdirSync(path.dirname(settingsPath()), { recursive: true });
   fs.writeFileSync(settingsPath(), JSON.stringify(nextSettings, null, 2), "utf8");
+}
+
+function updatesDirectory() {
+  return path.join(userDataDirectory(), "updates");
+}
+
+function updateResultPath() {
+  return path.join(updatesDirectory(), "last-result.json");
+}
+
+function updateHelperPath() {
+  return app.isPackaged
+    ? path.join(process.resourcesPath, "portable-update-helper.ps1")
+    : path.join(projectRoot(), "desktop", "scripts", "portable-update-helper.ps1");
+}
+
+function safeUpdateVersion(value) {
+  const version = String(value || "").trim();
+  if (!/^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/.test(version)) {
+    throw new Error("桌面更新版本号无效。");
+  }
+  return version;
+}
+
+function readLastUpdateResult() {
+  try {
+    const result = JSON.parse(fs.readFileSync(updateResultPath(), "utf8"));
+    if (result.status === "installed") return `Desktop ${result.version} 已更新并通过启动检查。`;
+    if (result.status === "rolled-back") return `Desktop ${result.version} 更新失败，已自动回滚。`;
+    if (result.status === "failed") return `上次桌面更新失败：${result.message || "未知原因"}`;
+  } catch {
+    // No previous update result is normal.
+  }
+  return "";
+}
+
+function commandLineValue(name) {
+  const index = process.argv.indexOf(name);
+  return index >= 0 && process.argv[index + 1] ? process.argv[index + 1] : "";
+}
+
+function markUpdateHealthyIfRequested() {
+  const token = String(commandLineValue("--update-token") || "");
+  const markerArgument = String(commandLineValue("--update-health-marker") || "");
+  if (!token || !markerArgument) return;
+  if (!/^[a-f0-9-]{16,64}$/.test(token)) {
+    appendLog("Rejected invalid update health token.");
+    return;
+  }
+  const root = path.resolve(updatesDirectory());
+  const marker = path.resolve(markerArgument);
+  if (!marker.startsWith(`${root}${path.sep}`)) {
+    appendLog("Rejected update health marker outside the updater data directory.");
+    return;
+  }
+  fs.mkdirSync(path.dirname(marker), { recursive: true });
+  fs.writeFileSync(marker, `${token}\n`, "utf8");
+  appendLog("Portable update startup health marker written.");
+}
+
+function updateInstallRoot() {
+  return path.dirname(process.execPath);
+}
+
+function portableUpdateSupported() {
+  if (!app.isPackaged || process.platform !== "win32" || process.windowsStore) return false;
+  const normalized = updateInstallRoot().toLowerCase();
+  if (/(^|[\\/])app-\d+\.\d+\.\d+/.test(normalized)) return false;
+  try {
+    fs.accessSync(updateInstallRoot(), fs.constants.W_OK);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function updateDownloadState(patch) {
+  updateState({ updateDownload: { ...(state.updateDownload || {}), ...patch } });
+}
+
+async function downloadDesktopUpdate() {
+  if (updateDownloadTask) return state;
+  if (!state.updateReport?.desktop) await checkForUpdates();
+  const desktopUpdate = state.updateReport?.desktop;
+  if (!desktopUpdate?.updateAvailable) throw new Error("当前没有可下载的桌面更新。");
+  if (desktopUpdate.manualOnly || !desktopUpdate.manifest?.portableApp) {
+    if (desktopUpdate.releaseUrl) await shell.openExternal(desktopUpdate.releaseUrl);
+    throw new Error("该版本需要从 Release 页面下载完整包后手动更新。");
+  }
+  const targetVersion = safeUpdateVersion(desktopUpdate.latest);
+  const packageInfo = desktopUpdate.manifest.portableApp;
+  const stagingDirectory = path.join(updatesDirectory(), `v${targetVersion}`);
+  const archivePath = path.join(stagingDirectory, packageInfo.assetName);
+  fs.mkdirSync(stagingDirectory, { recursive: true });
+  let lastProgressAt = 0;
+  updateState({
+    updateReady: false,
+    updateDownload: {
+      status: "downloading",
+      version: targetVersion,
+      received: 0,
+      total: packageInfo.size,
+      percent: 0,
+      message: `正在下载 Desktop ${targetVersion}…`
+    },
+    message: `正在下载 Desktop ${targetVersion} 更新包…`
+  });
+  updateDownloadTask = createDownloadTask({
+    url: packageInfo.url,
+    destination: archivePath,
+    expectedSize: packageInfo.size,
+    expectedSha256: packageInfo.sha256,
+    onProgress: ({ received, total }) => {
+      const now = Date.now();
+      if (now - lastProgressAt < 200 && received < total) return;
+      lastProgressAt = now;
+      const percent = total ? Math.min(100, Math.round(received * 1000 / total) / 10) : 0;
+      updateDownloadState({ received, total, percent, message: `正在下载 Desktop ${targetVersion}：${percent}%` });
+    }
+  });
+  try {
+    await updateDownloadTask.promise;
+    updateDownloadState({ status: "verifying", percent: 100, message: "下载完成，正在解压并逐文件校验…" });
+    const payloadRoot = await extractAndVerifyUpdate(
+      archivePath,
+      stagingDirectory,
+      packageInfo.files
+    );
+    preparedDesktopUpdate = {
+      targetVersion,
+      stagingDirectory,
+      archivePath,
+      payloadRoot,
+      files: packageInfo.files,
+      releaseUrl: desktopUpdate.releaseUrl
+    };
+    fs.writeFileSync(
+      path.join(stagingDirectory, "prepared-update.json"),
+      JSON.stringify(preparedDesktopUpdate, null, 2),
+      "utf8"
+    );
+    updateState({
+      updateReady: true,
+      updateDownload: {
+        status: "ready",
+        version: targetVersion,
+        received: packageInfo.size,
+        total: packageInfo.size,
+        percent: 100,
+        message: "更新已校验，可以退出并安装。"
+      },
+      message: `Desktop ${targetVersion} 已下载并通过校验。`
+    });
+  } catch (error) {
+    updateState({
+      updateReady: false,
+      updateDownload: {
+        ...(state.updateDownload || {}),
+        status: /取消/.test(error.message) ? "cancelled" : "error",
+        message: error.message
+      },
+      message: `桌面更新未准备完成：${error.message}`
+    });
+    appendLog(`Desktop update download failed: ${error.stack || error.message}`);
+  } finally {
+    updateDownloadTask = null;
+  }
+  return state;
+}
+
+function cancelDesktopUpdate() {
+  if (updateDownloadTask) updateDownloadTask.cancel();
+  updateDownloadState({ status: "cancelling", message: "正在取消更新下载；已下载部分会保留以便续传。" });
+  return state;
+}
+
+async function installDesktopUpdate() {
+  if (!preparedDesktopUpdate || !state.updateReady) throw new Error("没有已校验的桌面更新。");
+  if (!portableUpdateSupported()) {
+    if (preparedDesktopUpdate.releaseUrl) await shell.openExternal(preparedDesktopUpdate.releaseUrl);
+    throw new Error("当前安装目录不可写或不是便携版，请从 Release 页面手动更新。");
+  }
+  if ((pythonProcess && pythonProcess.exitCode === null) || (downloadProcess && downloadProcess.exitCode === null)) {
+    throw new Error("请先停止推理服务并等待模型下载结束，再安装桌面更新。");
+  }
+  await verifyPayloadFiles(preparedDesktopUpdate.payloadRoot, preparedDesktopUpdate.files);
+  const confirmation = await dialog.showMessageBox(mainWindow, {
+    type: "question",
+    buttons: ["退出并安装", "取消"],
+    defaultId: 0,
+    cancelId: 1,
+    title: `安装 Desktop ${preparedDesktopUpdate.targetVersion}`,
+    message: "程序将退出、替换已声明的程序文件并重新启动。",
+    detail: "模型、音色库、预设、生成记录和用户设置不会被覆盖；若新版本未通过启动检查会自动回滚。"
+  });
+  if (confirmation.response !== 0) return state;
+
+  const token = crypto.randomUUID().toLowerCase();
+  const backupRoot = path.join(
+    updatesDirectory(),
+    "backups",
+    `${app.getVersion()}-to-${preparedDesktopUpdate.targetVersion}-${token}`
+  );
+  const healthMarker = path.join(preparedDesktopUpdate.stagingDirectory, `health-${token}.txt`);
+  const plan = {
+    schemaVersion: 1,
+    parentPid: process.pid,
+    currentVersion: app.getVersion(),
+    targetVersion: preparedDesktopUpdate.targetVersion,
+    installRoot: updateInstallRoot(),
+    updatesRoot: updatesDirectory(),
+    payloadRoot: preparedDesktopUpdate.payloadRoot,
+    backupRoot,
+    executablePath: process.execPath,
+    healthMarker,
+    healthToken: token,
+    resultPath: updateResultPath(),
+    files: preparedDesktopUpdate.files
+  };
+  const planPath = path.join(preparedDesktopUpdate.stagingDirectory, "apply-plan.json");
+  fs.writeFileSync(planPath, JSON.stringify(plan, null, 2), "utf8");
+  const helperPath = updateHelperPath();
+  if (!fs.existsSync(helperPath)) throw new Error(`便携更新助手缺失：${helperPath}`);
+  const detachedHelperPath = path.join(preparedDesktopUpdate.stagingDirectory, "portable-update-helper.ps1");
+  fs.copyFileSync(helperPath, detachedHelperPath);
+  const powershell = path.join(
+    process.env.SystemRoot || "C:\\Windows",
+    "System32", "WindowsPowerShell", "v1.0", "powershell.exe"
+  );
+  const helper = spawn(powershell, [
+    "-NoProfile",
+    "-NonInteractive",
+    "-ExecutionPolicy", "Bypass",
+    "-File", detachedHelperPath,
+    "-PlanPath", planPath
+  ], {
+    detached: true,
+    windowsHide: true,
+    stdio: "ignore"
+  });
+  helper.unref();
+  appendLog(`Portable update helper launched for Desktop ${preparedDesktopUpdate.targetVersion}.`);
+  app.quitting = true;
+  app.quit();
+  return state;
+}
+
+function setUpdatePreferences(options) {
+  const next = {
+    ...readSettings(),
+    autoCheckUpdates: options?.autoCheckUpdates !== false,
+    updateChannel: normalizeChannel(options?.updateChannel)
+  };
+  writeSettings(next);
+  updateState({
+    autoCheckUpdates: next.autoCheckUpdates,
+    updateChannel: next.updateChannel,
+    message: `更新设置已保存：${next.autoCheckUpdates ? "自动检查" : "仅手动检查"} / ${next.updateChannel}`
+  });
+  return state;
+}
+
+function scheduleAutomaticUpdateCheck() {
+  if (!state.autoCheckUpdates) return;
+  const settings = readSettings();
+  const lastChecked = Date.parse(settings.lastUpdateCheck || "");
+  if (Number.isFinite(lastChecked) && Date.now() - lastChecked < 24 * 60 * 60 * 1000) return;
+  setTimeout(() => {
+    checkForUpdates().catch((error) => {
+      appendLog(`Automatic desktop update check failed: ${error.message}`);
+      updateState({ updateBusy: false, message: `自动检查更新失败：${error.message}` });
+    });
+  }, 5000);
 }
 
 function validateModelDirectory(modelDir) {
@@ -930,7 +1235,8 @@ function registerIpcHandlers() {
     return state;
   });
 
-  ipcMain.handle("desktop:check-updates", async () => {
+  ipcMain.handle("desktop:check-updates", async (event) => {
+    assertTrustedSender(event);
     try {
       return await checkForUpdates();
     } catch (error) {
@@ -940,11 +1246,45 @@ function registerIpcHandlers() {
   });
 
   ipcMain.handle("desktop:open-update-page", async (event, target) => {
+    assertTrustedSender(event);
     const urls = {
+      desktop: state.updateReport?.desktop?.releaseUrl || "https://github.com/T8mars/indextts25-desktop-t8/releases/latest",
       official: "https://github.com/index-tts/index-tts",
       node: "https://github.com/T8mars/comfyui-indextts25-t8"
     };
     if (urls[target]) await shell.openExternal(urls[target]);
+  });
+
+  ipcMain.handle("desktop:download-update", async (event) => {
+    assertTrustedSender(event);
+    try {
+      return await downloadDesktopUpdate();
+    } catch (error) {
+      appendLog(`Desktop update request failed: ${error.stack || error.message}`);
+      updateState({ message: `桌面更新失败：${error.message}` });
+      return state;
+    }
+  });
+
+  ipcMain.handle("desktop:cancel-update", (event) => {
+    assertTrustedSender(event);
+    return cancelDesktopUpdate();
+  });
+
+  ipcMain.handle("desktop:install-update", async (event) => {
+    assertTrustedSender(event);
+    try {
+      return await installDesktopUpdate();
+    } catch (error) {
+      appendLog(`Desktop update install failed: ${error.stack || error.message}`);
+      updateState({ message: `无法安装桌面更新：${error.message}` });
+      return state;
+    }
+  });
+
+  ipcMain.handle("desktop:set-update-preferences", (event, options) => {
+    assertTrustedSender(event);
+    return setUpdatePreferences(options);
   });
 
   ipcMain.handle("desktop:download-model", async (event, source) => {
@@ -1008,7 +1348,11 @@ function createWindow() {
       (activePort && targetUrl.startsWith(`http://127.0.0.1:${activePort}`));
     if (!allowedLocal) event.preventDefault();
   });
-  mainWindow.once("ready-to-show", () => mainWindow.show());
+  mainWindow.webContents.once("did-finish-load", () => markUpdateHealthyIfRequested());
+  mainWindow.once("ready-to-show", () => {
+    mainWindow.show();
+    scheduleAutomaticUpdateCheck();
+  });
   mainWindow.on("closed", () => {
     mainWindow = null;
   });
@@ -1031,6 +1375,10 @@ if (!singleInstance) {
     let modelDir = commandLineModelDirectory() || settings.modelDir || "";
     if (!app.isPackaged && !modelDir) modelDir = path.join(projectRoot(), "checkpoints");
     const validation = validateModelDirectory(modelDir);
+    const previousUpdateMessage = readLastUpdateResult();
+    const rollbackMessage = process.argv.includes("--update-rollback")
+      ? "新版本未通过启动检查，已恢复到旧版本。"
+      : "";
     state = {
       ...state,
       modelDir,
@@ -1049,8 +1397,13 @@ if (!singleInstance) {
       benchmarkReport: null,
       updateBusy: false,
       updateReport: null,
+      updateDownload: null,
+      updateReady: false,
+      autoCheckUpdates: settings.autoCheckUpdates !== false,
+      updateChannel: normalizeChannel(settings.updateChannel),
       phase: validation.valid ? "idle" : "model-required",
-      message: validation.valid ? "模型校验通过，可以启动" : "请选择完整的 IndexTTS 2.5 模型目录"
+      message: rollbackMessage || previousUpdateMessage
+        || (validation.valid ? "模型校验通过，可以启动" : "请选择完整的 IndexTTS 2.5 模型目录")
     };
     registerIpcHandlers();
     createWindow();
@@ -1067,6 +1420,7 @@ if (!singleInstance) {
 
 app.on("before-quit", () => {
   app.quitting = true;
+  if (updateDownloadTask) updateDownloadTask.cancel();
   cancelModelDownload();
   cancelRuntimeBenchmark();
   stopPythonService();

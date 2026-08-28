@@ -13,6 +13,8 @@ MANIFEST_PATH = Path(__file__).resolve().parent / "desktop_model_manifest.json"
 MODEL_MANIFEST = json.loads(MANIFEST_PATH.read_text(encoding="utf-8"))
 REPO_ID = MODEL_MANIFEST["modelRepository"]
 MODEL_REVISION = MODEL_MANIFEST["modelRevision"]
+MODELSCOPE_REPO_ID = MODEL_MANIFEST.get("modelScopeRepository", "IndexTeam/IndexTTS-2.5")
+MODELSCOPE_REVISION = MODEL_MANIFEST.get("modelScopeRevision", "master")
 MODEL_FILES = MODEL_MANIFEST["files"]
 
 
@@ -47,11 +49,16 @@ def inspect_model_files(target: Path, verify_hashes: bool = False) -> tuple[list
     return missing, mismatched
 
 
-def _file_source(relative_path: str) -> tuple[str, str]:
+def _file_source(relative_path: str, source: str) -> tuple[str, str]:
     metadata = MODEL_FILES[relative_path]
+    if source == "modelscope":
+        return (
+            str(metadata.get("modelScopeRepository", MODELSCOPE_REPO_ID)),
+            str(metadata.get("modelScopeRevision", MODELSCOPE_REVISION)),
+        )
     return (
-        str(metadata.get("repository", REPO_ID)),
-        str(metadata.get("revision", MODEL_REVISION)),
+        str(metadata.get("huggingFaceRepository", REPO_ID)),
+        str(metadata.get("huggingFaceRevision", MODEL_REVISION)),
     )
 
 
@@ -62,7 +69,7 @@ def download_huggingface(
 
     snapshot_download(repo_id=REPO_ID, revision=MODEL_REVISION, local_dir=str(target))
     for relative_path in [*missing_files, *mismatched_files]:
-        repository, revision = _file_source(relative_path)
+        repository, revision = _file_source(relative_path, "huggingface")
         if repository == REPO_ID and relative_path in missing_files:
             continue
         action = "Refreshing" if relative_path in mismatched_files else "Fetching supplemental"
@@ -80,7 +87,9 @@ def download_modelscope(target: Path, required_files: list[str]) -> None:
     from modelscope.hub.file_download import model_file_download
     from modelscope.hub.snapshot_download import snapshot_download
 
-    downloaded = Path(snapshot_download(model_id=REPO_ID, revision=MODEL_REVISION)).resolve()
+    downloaded = Path(
+        snapshot_download(model_id=MODELSCOPE_REPO_ID, revision=MODELSCOPE_REVISION)
+    ).resolve()
     target.mkdir(parents=True, exist_ok=True)
     for source in downloaded.rglob("*"):
         relative_path = source.relative_to(downloaded)
@@ -91,12 +100,12 @@ def download_modelscope(target: Path, required_files: list[str]) -> None:
             destination.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(source, destination)
     for relative_path in required_files:
-        repository, _revision = _file_source(relative_path)
-        if repository == REPO_ID:
+        repository, revision = _file_source(relative_path, "modelscope")
+        if repository == MODELSCOPE_REPO_ID:
             continue
         print(f">> Fetching supplemental {relative_path} from {repository}", flush=True)
         source = Path(
-            model_file_download(model_id=repository, file_path=relative_path)
+            model_file_download(model_id=repository, file_path=relative_path, revision=revision)
         ).resolve()
         destination = target / relative_path
         destination.parent.mkdir(parents=True, exist_ok=True)

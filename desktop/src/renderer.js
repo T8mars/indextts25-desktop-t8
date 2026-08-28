@@ -20,10 +20,19 @@ const elements = {
   benchmarkSummary: document.querySelector("#benchmarkSummary"),
   benchmarkResults: document.querySelector("#benchmarkResults"),
   checkUpdatesButton: document.querySelector("#checkUpdatesButton"),
+  openDesktopReleaseButton: document.querySelector("#openDesktopReleaseButton"),
   openOfficialButton: document.querySelector("#openOfficialButton"),
   openNodeRepositoryButton: document.querySelector("#openNodeRepositoryButton"),
+  autoCheckUpdates: document.querySelector("#autoCheckUpdates"),
+  updateChannel: document.querySelector("#updateChannel"),
   updateSummary: document.querySelector("#updateSummary"),
   updateResults: document.querySelector("#updateResults"),
+  updateProgressPanel: document.querySelector("#updateProgressPanel"),
+  updateProgress: document.querySelector("#updateProgress"),
+  updateProgressText: document.querySelector("#updateProgressText"),
+  downloadUpdateButton: document.querySelector("#downloadUpdateButton"),
+  cancelUpdateButton: document.querySelector("#cancelUpdateButton"),
+  installUpdateButton: document.querySelector("#installUpdateButton"),
   missingFiles: document.querySelector("#missingFiles"),
   chooseModelButton: document.querySelector("#chooseModelButton"),
   startButton: document.querySelector("#startButton"),
@@ -176,12 +185,27 @@ function renderBenchmark(report, busy, modelValid) {
 function renderUpdateReport(report, busy) {
   elements.checkUpdatesButton.disabled = Boolean(busy);
   elements.updateResults.replaceChildren();
+  elements.autoCheckUpdates.checked = currentState.autoCheckUpdates !== false;
+  elements.updateChannel.value = currentState.updateChannel || "stable";
+  const download = currentState.updateDownload;
+  const downloading = ["downloading", "verifying", "cancelling"].includes(download?.status);
+  elements.updateProgressPanel.hidden = !download;
+  elements.updateProgress.value = Number(download?.percent || 0);
+  elements.updateProgressText.textContent = download?.message || "尚未下载。";
+  elements.cancelUpdateButton.hidden = !downloading;
+  elements.installUpdateButton.hidden = !currentState.updateReady;
+  elements.downloadUpdateButton.hidden = !report?.desktop?.updateAvailable || currentState.updateReady;
+  elements.downloadUpdateButton.disabled = Boolean(busy) || downloading;
+  elements.downloadUpdateButton.textContent = report?.desktop?.manualOnly
+    ? "打开 Release 手动更新"
+    : "下载并校验更新";
   if (!report) {
     elements.updateSummary.textContent = busy ? "正在联网检查…" : "尚未检查。";
     return;
   }
   elements.updateSummary.textContent = report.summary || "检查完成。";
   const rows = [
+    ["桌面程序", report.desktop?.current, report.desktop?.latest, report.desktop?.updateAvailable],
     ["ComfyUI 节点", report.node?.bundled, report.node?.latest, report.node?.updateAvailable],
     ["官方代码", report.officialCode?.pinned, report.officialCode?.latest, report.officialCode?.updateAvailable],
     ["官方模型", report.officialModel?.pinned, report.officialModel?.latest, report.officialModel?.updateAvailable]
@@ -193,7 +217,10 @@ function renderUpdateReport(report, busy) {
     title.textContent = `${available ? "↑" : "✓"} ${label}`;
     const detail = document.createElement("span");
     const shorten = (value) => String(value || "未知").length > 16 ? String(value).slice(0, 12) : String(value || "未知");
-    detail.textContent = `当前 ${shorten(current)} · 最新 ${shorten(latest)}`;
+    const signatureNote = label === "桌面程序" && report.desktop?.updateAvailable
+      ? report.desktop?.signatureVerified ? " · 签名有效" : " · 仅手动更新"
+      : "";
+    detail.textContent = `当前 ${shorten(current)} · 最新 ${shorten(latest)}${signatureNote}`;
     item.append(title, detail);
     elements.updateResults.appendChild(item);
   }
@@ -313,12 +340,37 @@ elements.applyBenchmarkButton.addEventListener("click", async () => {
 });
 
 elements.checkUpdatesButton.addEventListener("click", async () => {
-  appendLog("正在检查官方代码、模型和节点版本；不会自动更新…");
+  appendLog("正在检查桌面程序、官方代码、模型和节点版本；不会自动下载…");
   renderState(await window.desktopApi.checkUpdates());
 });
 
+elements.openDesktopReleaseButton.addEventListener("click", () => window.desktopApi.openUpdatePage("desktop"));
 elements.openOfficialButton.addEventListener("click", () => window.desktopApi.openUpdatePage("official"));
 elements.openNodeRepositoryButton.addEventListener("click", () => window.desktopApi.openUpdatePage("node"));
+
+async function saveUpdatePreferences() {
+  renderState(await window.desktopApi.setUpdatePreferences({
+    autoCheckUpdates: elements.autoCheckUpdates.checked,
+    updateChannel: elements.updateChannel.value
+  }));
+}
+
+elements.autoCheckUpdates.addEventListener("change", saveUpdatePreferences);
+elements.updateChannel.addEventListener("change", saveUpdatePreferences);
+
+elements.downloadUpdateButton.addEventListener("click", async () => {
+  appendLog("准备下载桌面更新；下载后会先校验，不会立即退出或安装…");
+  renderState(await window.desktopApi.downloadUpdate());
+});
+
+elements.cancelUpdateButton.addEventListener("click", async () => {
+  renderState(await window.desktopApi.cancelUpdate());
+});
+
+elements.installUpdateButton.addEventListener("click", async () => {
+  appendLog("准备退出并安装已校验的桌面更新…");
+  renderState(await window.desktopApi.installUpdate());
+});
 
 elements.downloadModelscopeButton.addEventListener("click", async () => {
   appendLog("准备从 ModelScope 下载外置模型…");

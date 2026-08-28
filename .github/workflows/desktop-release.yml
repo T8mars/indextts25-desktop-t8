@@ -1,0 +1,107 @@
+name: Build signed Desktop update
+
+on:
+  workflow_dispatch:
+    inputs:
+      publish:
+        description: Upload the signed update assets to the matching GitHub Release
+        required: true
+        default: false
+        type: boolean
+      summary:
+        description: Short update summary shown by the launcher
+        required: false
+        default: ""
+        type: string
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: desktop-release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build-update:
+    runs-on: windows-latest
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v7
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: desktop/package-lock.json
+
+      - name: Install desktop dependencies
+        working-directory: desktop
+        run: npm ci --ignore-scripts --no-audit --no-fund
+
+      - name: Run desktop updater and launcher tests
+        working-directory: desktop
+        run: |
+          npm run test:updates
+          npm run test:launcher
+          npm run test:profiles
+          npm run test:diagnostics
+          npm run test:prune
+
+      - name: Validate tag and signing secret
+        shell: pwsh
+        env:
+          T8_UPDATE_PRIVATE_KEY_BASE64: ${{ secrets.T8_UPDATE_PRIVATE_KEY_BASE64 }}
+        run: |
+          $version = node -p "require('./desktop/package.json').version"
+          if ('${{ github.ref_type }}' -eq 'tag' -and '${{ github.ref_name }}' -ne "v$version") {
+            throw "Tag ${{ github.ref_name }} does not match Desktop package version v$version."
+          }
+          if ([string]::IsNullOrWhiteSpace($env:T8_UPDATE_PRIVATE_KEY_BASE64)) {
+            throw 'Repository secret T8_UPDATE_PRIVATE_KEY_BASE64 is required to sign automatic updates.'
+          }
+
+      - name: Build and sign source-only app update
+        working-directory: desktop
+        env:
+          T8_UPDATE_PRIVATE_KEY_BASE64: ${{ secrets.T8_UPDATE_PRIVATE_KEY_BASE64 }}
+          UPDATE_SUMMARY: ${{ inputs.summary }}
+        shell: pwsh
+        run: |
+          $arguments = @('scripts/build-update-package.js', '--source')
+          if (-not [string]::IsNullOrWhiteSpace($env:UPDATE_SUMMARY)) {
+            $arguments += @('--summary', $env:UPDATE_SUMMARY)
+          }
+          node @arguments
+
+      - name: Upload signed update workflow artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: desktop-signed-update
+          path: |
+            desktop/out/update-v*/desktop-app-update-*.zip
+            desktop/out/update-v*/desktop-update-manifest.json
+            desktop/out/update-v*/desktop-update-manifest.sig
+          if-no-files-found: error
+
+      - name: Create or update GitHub Release
+        if: github.ref_type == 'tag' || inputs.publish == true
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $version = node -p "require('./desktop/package.json').version"
+          $tag = "v$version"
+          $output = "desktop/out/update-v$version"
+          gh release view $tag *> $null
+          if ($LASTEXITCODE -ne 0) {
+            gh release create $tag --title "T8star-Aix IndexTTS 2.5 Desktop $version" --generate-notes
+          }
+          gh release upload $tag `
+            "$output/desktop-app-update-v$version-win32-x64.zip" `
+            "$output/desktop-update-manifest.json" `
+            "$output/desktop-update-manifest.sig" `
+            --clobber

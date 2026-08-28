@@ -29,9 +29,14 @@ const packagedPreloadSource = asar.extractFile(appAsarPath, "src/preload.js").to
 const packagedRendererSource = asar.extractFile(appAsarPath, "src/renderer.js").toString("utf8");
 const packagedDiagnosticSource = asar.extractFile(appAsarPath, "src/diagnostic_report.js").toString("utf8");
 const packagedProfileSource = asar.extractFile(appAsarPath, "src/runtime_profiles.js").toString("utf8");
+const packagedUpdateSource = asar.extractFile(appAsarPath, "src/update_manager.js").toString("utf8");
 const packagedPackage = JSON.parse(asar.extractFile(appAsarPath, "package.json").toString("utf8"));
 if (packagedPackage.version !== sourcePackage.version) {
   console.error(`Packaged Desktop version drift: ${packagedPackage.version} != ${sourcePackage.version}`);
+  process.exit(1);
+}
+if (packagedPackage.dependencies?.yauzl !== "3.4.0") {
+  console.error("Packaged desktop updater is missing the pinned yauzl runtime dependency.");
   process.exit(1);
 }
 if (
@@ -41,12 +46,17 @@ if (
   !packagedMainSource.includes('ipcMain.handle("desktop:export-diagnostics"') ||
   !packagedMainSource.includes('ipcMain.handle("desktop:run-runtime-benchmark"') ||
   !packagedMainSource.includes('ipcMain.handle("desktop:check-updates"') ||
+  !packagedMainSource.includes('ipcMain.handle("desktop:download-update"') ||
+  !packagedMainSource.includes('ipcMain.handle("desktop:install-update"') ||
   !packagedMainSource.includes("checkForUpdates") ||
+  !packagedMainSource.includes("markUpdateHealthyIfRequested") ||
   !packagedMainSource.includes("Hardware probe only (model not loaded)") ||
   !packagedPreloadSource.includes("refreshDiagnostics") ||
   !packagedPreloadSource.includes("exportDiagnostics") ||
   !packagedPreloadSource.includes("runRuntimeBenchmark") ||
   !packagedPreloadSource.includes("checkUpdates") ||
+  !packagedPreloadSource.includes("downloadUpdate") ||
+  !packagedPreloadSource.includes("installUpdate") ||
   !packagedRendererSource.includes("renderAccelerationDiagnostics") ||
   !packagedRendererSource.includes("renderBenchmark") ||
   !packagedRendererSource.includes("renderUpdateReport") ||
@@ -60,6 +70,10 @@ if (
   !packagedHtmlSource.includes('id="diagnosticsGrid"') ||
   !packagedHtmlSource.includes('id="runBenchmarkButton"') ||
   !packagedHtmlSource.includes('id="checkUpdatesButton"') ||
+  !packagedHtmlSource.includes('id="downloadUpdateButton"') ||
+  !packagedHtmlSource.includes('id="installUpdateButton"') ||
+  !packagedUpdateSource.includes("verifyManifestSignature") ||
+  !packagedUpdateSource.includes("verifyPayloadFiles") ||
   !["low_vram", "balanced", "max_speed", "compatibility"].every((name) =>
     packagedProfileSource.includes(`${name}:`)
   )
@@ -89,11 +103,17 @@ if (manifest.codeRevision !== "ee40fa7d6c6b8a2c7f06105f9f1e65775b74868c") {
   process.exit(1);
 }
 if (
-  manifest.files?.["bpe.model"]?.repository !== "IndexTeam/IndexTTS-2" ||
+  manifest.modelRepository !== "t8star/IndexTTS-2.5-Comfy" ||
+  manifest.modelRevision !== "14166a7401f9f87f53770a1784390e8c0e9da15a" ||
+  manifest.files?.["bpe.model"]?.modelScopeRepository !== "IndexTeam/IndexTTS-2" ||
   manifest.files?.["bpe.model"]?.sha256 !==
     "b2a5ce8090d32da3642cc4f81fdc996376bc6dd3f4cd5e3d165f71120d9f2bc8"
 ) {
-  console.error("Packaged model manifest is missing the pinned shared bpe.model tokenizer.");
+  console.error("Packaged model manifest is missing the complete pinned Hugging Face mirror or ModelScope fallback.");
+  process.exit(1);
+}
+if (!fs.existsSync(path.join(packagedRoot, "portable-update-helper.ps1"))) {
+  console.error("Packaged portable update helper is missing.");
   process.exit(1);
 }
 const accelerationManifestPath = path.join(packagedRoot, "desktop_acceleration_manifest.json");

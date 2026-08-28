@@ -59,6 +59,7 @@ module.exports = {
       path.join(projectRoot, "desktop_model_download.py"),
       path.join(projectRoot, "desktop_model_manifest.json"),
       path.join(projectRoot, "desktop_acceleration_manifest.json"),
+      path.join(__dirname, "scripts", "portable-update-helper.ps1"),
       path.join(projectRoot, "LICENSE"),
       path.join(projectRoot, "LICENSE_ZH.txt"),
       path.join(projectRoot, "DISCLAIMER")

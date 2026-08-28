@@ -30,9 +30,10 @@ Windows Electron desktop integration for IndexTTS 2.5. The packaged application 
 - explicit auto/BF16/FP16/FP32 selection before model loading, plus native-BF16 fallback detection
 - optional CPU placement for Wav2Vec/CAMPPlus reference encoders and fast default-emotion condition reuse
 - no-model acceleration preflight with per-mode availability/reason, exact bundled dependency versions, refresh, and JSON diagnostic export
+- signed GitHub Release app-layer updates with resumable download, exact-file verification, explicit install confirmation, and automatic rollback
 
 The large model files are intentionally external. On first launch, select a complete IndexTTS 2.5 model directory.
-Version 0.18.1 is aligned to code revision `ee40fa7d` and model revision `c39ce5ba`. The single-generation page can now load a named role's persisted timbre reference directly from `角色音色库`; selecting a role immediately fills the regular reference-audio input, while upload, drag-and-drop, and recording remain available for temporary voices. This shortcut does not overwrite the page's current language, emotion, or generation settings. Long English and Spanish blocks are checked for mel-token exhaustion and implausibly short or long output; a suspicious block is retried once with a smaller segment budget. The same guard applies line by line to long SRT jobs. Real-model English and Spanish WAV regressions are included, together with a Windows console-encoding fix for non-ASCII Spanish text. The launcher keeps the no-model acceleration preflight and all acceleration modes remain explicitly user-selected. Extracted speaker/emotion conditions are cached across model reloads in content-addressed `safetensors` files under the Electron user-data directory, isolated by official model revision, precision, and reference device. The UI now reports cache entries, bytes, hits, misses, and hit rate and can safely delete only its own cache entries. No benchmark, update check, model load, download, or acceleration mode starts automatically.
+Version 0.19.0 is aligned to code revision `ee40fa7d` and the complete mirrored model revision `14166a74`. It adds a stable/beta GitHub Release checker and signed app-layer updates. Automatic checks are read-only; download and install remain explicit user actions. A downloaded ZIP is verified by size, SHA-256, Ed25519 signature, and an exact per-file manifest before the portable app exits. A detached helper backs up only declared application files, relaunches the update, and restores the previous files if the new launcher does not report healthy startup. Models, voices, presets, generated audio, and user settings are outside the replacement set. The model remains a separate Hugging Face download from `t8star/IndexTTS-2.5-Comfy`; all required files are pinned and hash-checked. No benchmark, model load, model download, update download, install, or acceleration mode starts automatically.
 The launcher validates official model file sizes, while the downloader performs full SHA-256 verification.
 This release also supports running the portable package from Windows paths containing Chinese characters.
 AAC/M4A and other compressed reference audio is decoded by the bundled PyAV runtime, without requiring a system FFmpeg installation. Streaming previews are also encoded by bundled PyAV, so Gradio no longer calls an external `ffmpeg` or `ffprobe` executable and cannot fail with `[WinError 2]` merely because those programs are absent from `PATH`.
@@ -127,6 +128,29 @@ separated by spaces. Annotate the complete word when a polyphonic character is i
 `<要求|YAO4 QIU2>` rather than `<要|YAO4>求` (the latter is the unreliable form reported in upstream issue #792).
 Repeated names and polyphones can instead be stored in the persistent pronunciation table.
 
+## Desktop updates and external models
+
+The launcher checks the stable GitHub Release channel once per day by default; beta is opt-in. A check never downloads
+or installs anything. An automatic portable update is offered only when the Release contains all three assets:
+
+- `desktop-app-update-v<version>-win32-x64.zip`
+- `desktop-update-manifest.json`
+- `desktop-update-manifest.sig`
+
+The embedded Ed25519 public key verifies the canonical manifest before any package URL or replacement list is trusted.
+The updater then verifies the GitHub asset size, ZIP SHA-256, exact extracted file set, and every file hash. The user must
+click both download and install. Only `resources/app.asar`, IndexTTS/application source, manifests, launcher assets, and
+the update helper are replaceable. Python/CUDA dependencies, external checkpoints, user data, voices, presets, and output
+files are not part of the incremental ZIP. Read-only or Squirrel installs are sent to the Release page for manual update.
+
+Model weights are distributed independently at
+[`t8star/IndexTTS-2.5-Comfy`](https://huggingface.co/t8star/IndexTTS-2.5-Comfy), pinned to revision
+`14166a7401f9f87f53770a1784390e8c0e9da15a`. Click `Hugging Face 一键下载模型（推荐）` in the launcher.
+When no model directory is selected, choosing a parent folder creates `<parent>\IndexTTS-2.5`; an already selected
+incomplete folder is synchronized in place. The Hugging Face cache is kept below that model directory so interrupted
+downloads can resume. All 20 required files are size- and SHA-256-verified before the Start button is enabled.
+ModelScope remains an explicit fallback and no model is silently overwritten by the desktop update checker.
+
 ## Development
 
 ```powershell
@@ -152,6 +176,7 @@ or through the `T8STAR_INDEXTTS_MODEL_DIR` environment variable.
 cd desktop
 npm run package
 npm run verify:runtime
+npm run build:update
 ```
 
 Electron Forge copies the managed CPython runtime and `.venv/Lib/site-packages` into the packaged application's `resources` directory. It does not copy `checkpoints`.
@@ -168,7 +193,7 @@ npm run make
 ```
 
 This builds only `@electron-forge/maker-zip`. The unpacked application is still
-available under `desktop/out/T8star-Aix-IndexTTS-2.5-v0.18.1-win32-x64` for local testing.
+available under `desktop/out/T8star-Aix-IndexTTS-2.5-v0.19.0-win32-x64` for local testing.
 The bundled runtime contains tens of thousands of small files, so Squirrel/NuGet
 can spend a long time repeatedly rewriting a multi-gigabyte package. It is not the
 recommended user distribution. If an installer is specifically required, build it
@@ -180,3 +205,11 @@ npm run make:installer
 
 Neither distribution includes `checkpoints`; users select or download the complete
 IndexTTS 2.5 model directory from the launcher.
+
+`npm run build:update` reads the verified packaged resources, builds an app-layer ZIP, writes its exact manifest, and
+signs it with `T8_UPDATE_PRIVATE_KEY_BASE64`, `T8_UPDATE_PRIVATE_KEY_FILE`, or the private key passed with
+`--private-key`. The private key must never be committed. `.github/workflows/desktop-release.yml` can alternatively
+build the same source-only patch on `windows-latest`; configure the repository secret
+`T8_UPDATE_PRIVATE_KEY_BASE64` before creating a `v<package version>` tag. The full multi-gigabyte portable archive is
+kept on the external distribution mirror because it exceeds GitHub Releases' per-file limit; its URL and SHA-256 can be
+placed in `desktop_release_config.json` when available.

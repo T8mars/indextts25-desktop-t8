@@ -9,6 +9,10 @@ const htmlSource = fs.readFileSync(path.join(desktopRoot, "src", "index.html"), 
 const profileSource = fs.readFileSync(path.join(desktopRoot, "src", "runtime_profiles.js"), "utf8");
 const diagnosticSource = fs.readFileSync(path.join(desktopRoot, "src", "diagnostic_report.js"), "utf8");
 const forgeSource = fs.readFileSync(path.join(desktopRoot, "forge.config.js"), "utf8");
+const releaseWorkflowSource = fs.readFileSync(
+  path.join(projectRoot, ".github", "workflows", "desktop-release.yml"),
+  "utf8"
+);
 const webuiSource = fs.readFileSync(path.join(projectRoot, "desktop_webui.py"), "utf8");
 const desktopVersion = JSON.parse(
   fs.readFileSync(path.join(desktopRoot, "package.json"), "utf8")
@@ -25,9 +29,10 @@ const nodeVersion = nodePyproject.match(/^version\s*=\s*"([^"]+)"/m)?.[1];
 assert.deepEqual(modelManifest.files["bpe.model"], {
   size: 475997,
   sha256: "b2a5ce8090d32da3642cc4f81fdc996376bc6dd3f4cd5e3d165f71120d9f2bc8",
-  repository: "IndexTeam/IndexTTS-2",
-  revision: "740dcaff396282ffb241903d150ac011cd4b1ede",
+  modelScopeRepository: "IndexTeam/IndexTTS-2",
 });
+assert.equal(modelManifest.modelRepository, "t8star/IndexTTS-2.5-Comfy");
+assert.match(modelManifest.modelRevision, /^[a-f0-9]{40}$/);
 
 assert.doesNotMatch(
   mainSource,
@@ -59,7 +64,14 @@ for (const profileControl of [
   "cancelBenchmarkButton",
   "applyBenchmarkButton",
   "checkUpdatesButton",
+  "openDesktopReleaseButton",
+  "autoCheckUpdates",
+  "updateChannel",
   "updateResults",
+  "updateProgress",
+  "downloadUpdateButton",
+  "cancelUpdateButton",
+  "installUpdateButton",
 ]) {
   assert.ok(htmlSource.includes(`id="${profileControl}"`), `Launcher must expose ${profileControl}.`);
 }
@@ -71,6 +83,13 @@ assert.match(mainSource, /ipcMain\.handle\("desktop:refresh-diagnostics"/);
 assert.match(mainSource, /ipcMain\.handle\("desktop:export-diagnostics"/);
 assert.match(mainSource, /ipcMain\.handle\("desktop:run-runtime-benchmark"/);
 assert.match(mainSource, /ipcMain\.handle\("desktop:check-updates"/);
+assert.match(mainSource, /ipcMain\.handle\("desktop:download-update"/);
+assert.match(mainSource, /ipcMain\.handle\("desktop:install-update"/);
+assert.match(mainSource, /resolveDesktopUpdate/);
+assert.match(mainSource, /markUpdateHealthyIfRequested/);
+assert.match(releaseWorkflowSource, /T8_UPDATE_PRIVATE_KEY_BASE64/);
+assert.match(releaseWorkflowSource, /desktop-update-manifest\.sig/);
+assert.match(releaseWorkflowSource, /desktop-app-update-/);
 assert.match(mainSource, /fetchText\("https:\/\/api\.github\.com\/repos\/index-tts\/index-tts\/commits\/main"/);
 assert.match(mainSource, /Hardware probe only \(model not loaded\)/);
 assert.match(mainSource, /probe_acceleration/);

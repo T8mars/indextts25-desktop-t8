@@ -37,7 +37,10 @@ desktop.ini
 /examples/*.wav
 /tests/sample_prompt.wav
 .memsearch
-.github
+.github/*
+!.github/workflows/
+.github/workflows/*
+!.github/workflows/desktop-release.yml
 
 # Local audits, test sandboxes, and generated user data.
 /.accel-wheel-audit/

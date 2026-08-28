@@ -135,17 +135,21 @@ def test_config_download_uses_the_requested_official_model_version(monkeypatch, 
     assert calls[0][:2] == ("IndexTeam/IndexTTS-2.5", "config.yaml")
 
 
-def test_desktop_manifest_pins_the_shared_bpe_tokenizer():
+def test_desktop_manifest_uses_the_complete_huggingface_mirror_with_modelscope_fallback():
     metadata = desktop_model_download.MODEL_FILES["bpe.model"]
     assert metadata == {
         "size": 475997,
         "sha256": "b2a5ce8090d32da3642cc4f81fdc996376bc6dd3f4cd5e3d165f71120d9f2bc8",
-        "repository": "IndexTeam/IndexTTS-2",
-        "revision": "740dcaff396282ffb241903d150ac011cd4b1ede",
+        "modelScopeRepository": "IndexTeam/IndexTTS-2",
     }
-    assert desktop_model_download._file_source("bpe.model") == (
+    assert desktop_model_download.REPO_ID == "t8star/IndexTTS-2.5-Comfy"
+    assert desktop_model_download._file_source("bpe.model", "huggingface") == (
+        "t8star/IndexTTS-2.5-Comfy",
+        desktop_model_download.MODEL_REVISION,
+    )
+    assert desktop_model_download._file_source("bpe.model", "modelscope") == (
         "IndexTeam/IndexTTS-2",
-        "740dcaff396282ffb241903d150ac011cd4b1ede",
+        desktop_model_download.MODELSCOPE_REVISION,
     )
 
 

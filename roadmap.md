@@ -1,14 +1,23 @@
 # T8star-Aix IndexTTS 2.5 开发路线图
 
 本文档记录桌面整合包与 ComfyUI 节点的共同开发范围、依赖政策和验收标准。当前公开基线为
-**Desktop 0.18.1 / ComfyUI Node 0.18.0**。
+**Desktop 0.19.0 / ComfyUI Node 0.18.0**。
 
 | 发行物 | 当前版本 | 本版主要内容 |
 | --- | --- | --- |
-| Windows Electron 整合包 | 0.18.1 | 单句生成复用已保存角色音色，无需重复上传 |
+| Windows Electron 整合包 | 0.19.0 | 签名增量更新、断点续传、启动失败自动回滚 |
 | ComfyUI V3 节点 | 0.18.0 | 长文本/SRT 防截断与参考缓存统计/清理 |
 | 固定官方核心 | `ee40fa7d` | 未发现必须更换的 revision |
-| 固定官方模型 | `c39ce5ba` | 权重不改，仅沿用完整模型目录 |
+| 固定模型镜像 | `14166a74` | Hugging Face 独立下载，20 个必需文件全部校验 |
+
+## v0.19.0
+
+- [x] GitHub Releases 提供小型应用层增量包，不重复分发 Python、CUDA 运行库和模型。
+- [x] Ed25519 验证清单，并校验 Release 资产大小、ZIP SHA-256 与逐文件 SHA-256。
+- [x] 下载支持断点续传；安装前再次校验，启动健康检查失败则自动恢复备份。
+- [x] 启动器提供 stable/beta 通道、每日只读检查、手动下载/安装和清晰的签名状态。
+- [x] 模型与程序分离，固定到 `t8star/IndexTTS-2.5-Comfy@14166a74`，下载后完整校验。
+- [x] Windows 源码增量包可由 GitHub Actions 构建、签名并上传到对应 Release。
 
 ## v0.18.1
 

@@ -90,6 +90,10 @@ indextts = "indextts.cli:main"
 requires = ["hatchling >= 1.27.0"]
 build-backend = "hatchling.build"
 
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+norecursedirs = ["desktop/out", "outputs", ".venv", ".python", "data", "failed-artifacts"]
+
 [tool.uv]
 # Use Tencent mirror for PyPI (faster in China).
 index-url = "https://mirrors.cloud.tencent.com/pypi/simple"
