@@ -9,7 +9,7 @@ import desktop_model_download
 import desktop_webui
 import runtime_acceleration
 from desktop_presets import delete_preset, list_presets, load_preset, save_preset
-from indextts.infer_v2_5 import QwenEmotion, select_gpt_inference_dtype
+from indextts.infer_v2_5 import IndexTTS2, QwenEmotion, select_gpt_inference_dtype
 from indextts.utils import common
 from indextts.utils import model_download
 from indextts.gpt import model_v2
@@ -68,6 +68,26 @@ def test_qwen_emotion_accepts_label_style_outputs():
     redirected = emotion.convert({"高兴": "自然"})
     assert redirected["happy"] == 0.0
     assert redirected["calm"] == 1.0
+
+
+def test_qwen_emotion_can_be_loaded_lazily_once(monkeypatch, tmp_path):
+    created = []
+
+    class FakeQwenEmotion:
+        def __init__(self, model_dir):
+            created.append(model_dir)
+
+    monkeypatch.setattr("indextts.infer_v2_5.QwenEmotion", FakeQwenEmotion)
+    model = IndexTTS2.__new__(IndexTTS2)
+    model.model_dir = str(tmp_path)
+    model.cfg = SimpleNamespace(qwen_emo_path="qwen")
+    model.qwen_emo = None
+
+    first = model.ensure_qwen_emotion()
+    second = model.ensure_qwen_emotion()
+
+    assert first is second
+    assert created == [str(tmp_path / "qwen")]
 
 
 def test_pcm_save_normalizes_before_torchaudio(monkeypatch, tmp_path):

@@ -1,7 +1,10 @@
 # T8star-Aix · IndexTTS 2.5 Desktop
 
 这是基于官方 IndexTTS 2.5 制作的 Windows Electron 桌面整合版源码仓库，当前桌面版本为
-**0.16.0**。完整功能、开发和打包说明见 [Desktop README](desktop/README.md)。
+**0.17.0**。完整功能、开发和打包说明见 [Desktop README](desktop/README.md)。
+
+> 0.17.0 新增“上下文逐句情感建议”。它结合目标台词本身与前后文生成八维情感建议，
+> 只填入可编辑时间轴，用户确认并点击生成前不会合成音频。
 
 - 官方开源项目：[index-tts/index-tts](https://github.com/index-tts/index-tts)（感谢官方团队开源）
 - T8star-Aix ComfyUI 节点：[T8mars/comfyui-indextts25-t8](https://github.com/T8mars/comfyui-indextts25-t8)

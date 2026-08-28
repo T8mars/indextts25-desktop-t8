@@ -59,6 +59,31 @@ class _CapturingTTS(_FakeTTS):
         return super().infer(stream_return=stream_return, **kwargs)
 
 
+class _FakeQwenEmotion:
+    @staticmethod
+    def inference(prompt):
+        assert str(prompt).strip()
+        return {
+            "happy": 0.0,
+            "angry": 0.9,
+            "sad": 0.0,
+            "afraid": 0.0,
+            "disgusted": 0.0,
+            "melancholic": 0.0,
+            "surprised": 0.3,
+            "calm": 0.0,
+        }
+
+
+class _EmotionSuggestTTS(_CapturingTTS):
+    def __init__(self):
+        super().__init__()
+        self.qwen_emo = None
+
+    def ensure_qwen_emotion(self):
+        self.qwen_emo = _FakeQwenEmotion()
+
+
 def test_desktop_builds_complete_pronunciation_workspace(tmp_path, monkeypatch):
     output_dir = tmp_path / "outputs"
     data_dir = tmp_path / "user-data"
@@ -137,6 +162,9 @@ def test_desktop_builds_complete_pronunciation_workspace(tmp_path, monkeypatch):
     assert "回写字幕时间" in labels
     assert "回写字幕文本" in labels
     assert "可编辑时间轴（最后一列可逐句改情感；提交后自动刷新；点击一行可单独重做）" in labels
+    assert "每侧上下文台词数" in labels
+    assert "覆盖已有逐句情感" in labels
+    assert "上下文情感建议报告 JSON" in labels
     assert "本次启动环境与加速诊断" in labels
     assert pronunciation_accordion["props"]["open"] is True
     assert "一键填入中文示例" in values
@@ -154,6 +182,8 @@ def test_desktop_builds_complete_pronunciation_workspace(tmp_path, monkeypatch):
     assert "载入 SRT 真实示例" in config_text
     assert "时间设置看不懂？展开查看 2 秒字幕实例与推荐配置" in config_text
     assert "模型第一次生成了 **2.3 秒**" in config_text
+    assert "上下文情感自动标注（先建议，确认后才生成）" in config_text
+    assert "分析上下文并填入建议" in config_text
     assert len([item for item in config["dependencies"] if item.get("cancels")]) == 2
     assert pronunciation_dictionary_path(data_dir) == data_dir / "pronunciation_dictionary.yaml"
 
@@ -209,6 +239,46 @@ def test_desktop_builds_complete_pronunciation_workspace(tmp_path, monkeypatch):
     assert "未发现" in differences
     assert json.loads(report)["passed"] is True
     assert "t8-waveform" in alignment
+
+
+def test_desktop_context_emotion_suggestions_fill_timeline_without_synthesis(tmp_path):
+    output_dir = tmp_path / "outputs"
+    data_dir = tmp_path / "user-data"
+    output_dir.mkdir()
+    data_dir.mkdir()
+    tts = _EmotionSuggestTTS()
+    demo = build_app(tts, output_dir, data_dir, verbose=False)
+    suggest = next(
+        block.fn
+        for block in demo.fns.values()
+        if getattr(block.fn, "__name__", "") == "suggest_dialogue_emotions_event"
+    )
+    script = "角色A|先等等。|ZH|1.0\n角色B|你竟然骗了我！|ZH|1.0"
+    rows, timeline_html, status, report_json = suggest(
+        "batch",
+        script,
+        "角色A",
+        "ZH",
+        [],
+        1,
+        False,
+        progress=lambda *_args, **_kwargs: None,
+    )
+
+    assert len(rows) == 2
+    first_override = json.loads(rows[0][7])
+    assert first_override["mode"] == "vector"
+    assert first_override["vector"][1] == pytest.approx(0.6)
+    assert first_override["vector"][6] == pytest.approx(0.2)
+    assert "尚未生成音频" in status
+    assert "总时长" in timeline_html
+    report = json.loads(report_json)
+    assert report["classified_count"] == 2
+    assert report["requires_user_confirmation"] is True
+    assert report["started_synthesis"] is False
+    assert report["temporary_qwen_released"] is True
+    assert tts.qwen_emo is None
+    assert tts.calls == []
 
 
 def test_saved_role_emotion_modes_resolve_to_isolated_inference_arguments(tmp_path):

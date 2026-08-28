@@ -190,7 +190,7 @@ if (!modelDownloadSource.includes("_VERSION_TO_REPO") || !modelDownloadSource.in
 
 const desktopSource = fs.readFileSync(path.join(packagedRoot, "desktop_webui.py"), "utf8");
 const voiceLibrarySource = fs.readFileSync(path.join(packagedRoot, "desktop_voice_library.py"), "utf8");
-for (const moduleName of ["desktop_presets.py", "desktop_voice_library.py", "desktop_generation_controls.py", "desktop_model_lifecycle.py", "desktop_streaming_audio.py", "desktop_tasks.py", "desktop_runtime_benchmark.py", "audio_quality.py", "audiocpp_backend.py", "candidate_quality.py", "speech_review.py", "timeline_tools.py", "dialogue_runtime.py", "runtime_acceleration.py", "runtime_benchmark.py", "runtime_metrics.py"]) {
+for (const moduleName of ["desktop_presets.py", "desktop_voice_library.py", "desktop_generation_controls.py", "desktop_model_lifecycle.py", "desktop_streaming_audio.py", "desktop_tasks.py", "desktop_runtime_benchmark.py", "audio_quality.py", "audiocpp_backend.py", "candidate_quality.py", "speech_review.py", "timeline_tools.py", "context_emotion.py", "dialogue_runtime.py", "runtime_acceleration.py", "runtime_benchmark.py", "runtime_metrics.py"]) {
   if (!fs.existsSync(path.join(packagedRoot, moduleName))) {
     console.error(`Packaged desktop runtime module is missing: ${moduleName}`);
     process.exit(1);
@@ -260,6 +260,7 @@ const check = spawnSync(pythonExe, [
     "from desktop_tasks import task_choices",
     "from speech_review import ASR_BACKENDS, asr_available, review_transcript",
     "from timeline_tools import rewrite_srt",
+    "from context_emotion import suggest_context_emotions",
     "from dialogue_runtime import DialogueLine",
     "from runtime_metrics import finish_runtime_measurement, format_runtime_metrics, start_runtime_measurement",
     "from runtime_acceleration import probe_acceleration",

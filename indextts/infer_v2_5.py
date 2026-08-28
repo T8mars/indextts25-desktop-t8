@@ -326,6 +326,14 @@ class IndexTTS2:
         self.gr_progress = None
         self.model_version = self.cfg.version if hasattr(self.cfg, "version") else None
 
+    def ensure_qwen_emotion(self):
+        """Load the text-to-emotion helper only when an explicit feature needs it."""
+        if self.qwen_emo is None:
+            self.qwen_emo = QwenEmotion(
+                os.path.join(self.model_dir, self.cfg.qwen_emo_path)
+            )
+        return self.qwen_emo
+
     @torch.no_grad()
     def get_emb(self, input_features, attention_mask):
         vq_emb = self.semantic_model(

@@ -19,6 +19,7 @@ Windows Electron desktop integration for IndexTTS 2.5. The packaged application 
 - persistent character voice library
 - multi-role batch/JSON dialogue and SRT dubbing with timeline reports
 - per-line emotion overrides for the same role (text description, eight-dimensional vector, speaker-following, or role-default inheritance)
+- context-aware per-line emotion suggestions that fill the editable timeline without starting synthesis
 - crash-safe dialogue task manifests, restart/resume, and selected-line regeneration
 - local Whisper ASR proofreading with OpenAI/faster-whisper backends, CER/WER, normalized diffs, and word timestamps
 - rewritten SRT export using original timing or the generated audio's actual timeline
@@ -29,7 +30,7 @@ Windows Electron desktop integration for IndexTTS 2.5. The packaged application 
 - no-model acceleration preflight with per-mode availability/reason, exact bundled dependency versions, refresh, and JSON diagnostic export
 
 The large model files are intentionally external. On first launch, select a complete IndexTTS 2.5 model directory.
-Version 0.16.0 is aligned to code revision `ee40fa7d` and model revision `c39ce5ba`. The launcher keeps the no-model acceleration preflight, and now adds an explicitly triggered real benchmark that sequentially measures supported modes with identical reference audio, text, and seed, then recommends a near-fastest low-complexity mode. It also provides a manual, read-only upstream update check. Single-voice generation can create up to four retained candidates and selects the best using local ASR plus technical waveform checks, or technical checks alone when Whisper is unavailable. Extracted speaker/emotion conditions are cached across model reloads in content-addressed `safetensors` files under the Electron user-data directory, isolated by official model revision, precision, and reference device. No benchmark, update check, model load, download, or acceleration mode starts automatically.
+Version 0.17.0 is aligned to code revision `ee40fa7d` and model revision `c39ce5ba`. The launcher keeps the no-model acceleration preflight, and now adds an explicitly triggered real benchmark that sequentially measures supported modes with identical reference audio, text, and seed, then recommends a near-fastest low-complexity mode. It also provides a manual, read-only upstream update check. Single-voice generation can create up to four retained candidates and selects the best using local ASR plus technical waveform checks, or technical checks alone when Whisper is unavailable. Extracted speaker/emotion conditions are cached across model reloads in content-addressed `safetensors` files under the Electron user-data directory, isolated by official model revision, precision, and reference device. No benchmark, update check, model load, download, or acceleration mode starts automatically.
 The launcher validates official model file sizes, while the downloader performs full SHA-256 verification.
 This release also supports running the portable package from Windows paths containing Chinese characters.
 AAC/M4A and other compressed reference audio is decoded by the bundled PyAV runtime, without requiring a system FFmpeg installation. Streaming previews are also encoded by bundled PyAV, so Gradio no longer calls an external `ffmpeg` or `ffprobe` executable and cannot fail with `[WinError 2]` merely because those programs are absent from `PATH`.
@@ -64,6 +65,17 @@ the application, and any selected line can be regenerated without repeating the 
 timeline and ZIP archive. The preview table is editable: start/end values are milliseconds, and clicking the timeline
 refresh button validates and redraws the tracks. After generation, the edited timeline can be re-mixed without running
 IndexTTS again.
+
+### Context-aware per-line emotion suggestions
+
+Desktop 0.17.0 adds an expanded `上下文情感自动标注` section below the editable dialogue table. Choose how
+many previous and following lines to include (default: two per side), then click `分析上下文并填入建议`. Local
+QwenEmotion evaluates the target line while the prompt keeps previous/target/following roles separate. The result is
+written to the table's last column as an editable eight-dimensional vector plus strength. Existing manual `text:` or
+`vector:` values are preserved unless `覆盖已有逐句情感` is enabled.
+
+This action never starts TTS. Review, change, or clear every suggestion first; synthesis begins only when the user later
+clicks `生成全部台词`. Temporarily loaded QwenEmotion is released again after analysis when it was not already active.
 
 ## ASR proofreading and subtitle rewrite
 
@@ -150,7 +162,7 @@ npm run make
 ```
 
 This builds only `@electron-forge/maker-zip`. The unpacked application is still
-available under `desktop/out/T8star-Aix-IndexTTS-2.5-v0.16.0-win32-x64` for local testing.
+available under `desktop/out/T8star-Aix-IndexTTS-2.5-v0.17.0-win32-x64` for local testing.
 The bundled runtime contains tens of thousands of small files, so Squirrel/NuGet
 can spend a long time repeatedly rewriting a multi-gigabyte package. It is not the
 recommended user distribution. If an installer is specifically required, build it

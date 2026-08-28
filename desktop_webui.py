@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import gc
 import json
 import threading
 import time
@@ -18,6 +19,7 @@ import torchaudio
 
 from audio_quality import analyze_reference_audio, prepare_reference_audio, waveform_html
 from candidate_quality import combined_candidate_score, select_best_candidate, technical_audio_review
+from context_emotion import suggest_context_emotions
 from audiocpp_backend import (
     AUDIOCPP_MODEL_REPOSITORY,
     AUDIOCPP_REPOSITORY,
@@ -81,7 +83,7 @@ from runtime_metrics import (
 
 
 APP_TITLE = "T8star-Aix · IndexTTS 2.5"
-DESKTOP_VERSION = "0.16.0"
+DESKTOP_VERSION = "0.17.0"
 MODEL_MANIFEST = json.loads(
     (Path(__file__).resolve().parent / "desktop_model_manifest.json").read_text(encoding="utf-8")
 )
@@ -1826,6 +1828,77 @@ def build_app(
         except ValueError as exc:
             raise gr.Error(str(exc)) from exc
         return render_timeline_html(lines), f"时间轴已自动刷新，共 {len(lines)} 条；编辑会用于下一次生成或单句重做。"
+
+    def suggest_dialogue_emotions_event(
+        script_type,
+        script,
+        default_role,
+        default_language,
+        edited_rows,
+        context_window,
+        overwrite_existing,
+        progress=gr.Progress(),
+    ):
+        """Write suggestions into the editable table without starting synthesis."""
+
+        try:
+            parsed = parse_dialogue(script_type, script, default_role, default_language)
+            lines = apply_timeline_edits(parsed, edited_rows)
+        except ValueError as exc:
+            raise gr.Error(str(exc)) from exc
+        ensure_model()
+        had_qwen = getattr(tts, "qwen_emo", None) is not None
+        released_temporary_qwen = False
+        try:
+            tts.ensure_qwen_emotion()
+            if getattr(tts, "qwen_emo", None) is None:
+                raise RuntimeError("QwenEmotion 加载后仍不可用。")
+
+            def update_progress(position, total, line):
+                if line is None:
+                    progress(1.0, desc="上下文情感分析完成，等待用户确认")
+                    return
+                progress(
+                    (position, max(1, total)),
+                    desc=f"分析第 {getattr(line, 'index', position + 1)} 条情感：{getattr(line, 'role', '')}",
+                )
+
+            suggested, report = suggest_context_emotions(
+                lines,
+                tts.qwen_emo.inference,
+                context_window=int(context_window),
+                overwrite_existing=bool(overwrite_existing),
+                progress=update_progress,
+            )
+        except Exception as exc:
+            raise gr.Error(
+                "上下文情感分析失败："
+                f"{type(exc).__name__}: {exc}。可切换到显存更充足的模式后重试，"
+                "或继续在时间轴最后一列手工填写 text:/vector:。"
+            ) from exc
+        finally:
+            if not had_qwen and getattr(tts, "qwen_emo", None) is not None:
+                tts.qwen_emo = None
+                gc.collect()
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+                released_temporary_qwen = True
+        report["temporary_qwen_released"] = released_temporary_qwen
+        report["instruction"] = (
+            "建议已写入可编辑时间轴最后一列；请逐行确认、修改或清空，"
+            "只有点击“生成全部台词”后才会开始合成。"
+        )
+        status = (
+            f"已分析 {report['classified_count']} 条上下文情感，"
+            f"保留 {report['preserved_count']} 条已有人工设置。"
+            " 建议仅写入表格，尚未生成音频；请确认后再点击生成。"
+        )
+        return (
+            timeline_rows(suggested),
+            render_timeline_html(suggested),
+            status,
+            json.dumps(report, ensure_ascii=False, indent=2),
+        )
 
     def load_dialogue_task_editor_event(task_id):
         task_id = str(task_id or "").strip()
@@ -3579,6 +3652,34 @@ def build_app(
                 wrap=True,
                 label="可编辑时间轴（最后一列可逐句改情感；提交后自动刷新；点击一行可单独重做）",
             )
+            with gr.Accordion("上下文情感自动标注（先建议，确认后才生成）", open=True):
+                gr.Markdown(
+                    "使用本地 QwenEmotion 读取目标台词及前后文，为每句建议八维情感向量和强度。"
+                    "结果只写入上方表格最后一列，**不会自动合成音频**；请逐行检查后再点击生成。"
+                )
+                with gr.Row():
+                    dialogue_emotion_context_window = gr.Slider(
+                        0,
+                        5,
+                        value=2,
+                        step=1,
+                        label="每侧上下文台词数",
+                        info="2 表示参考前 2 句和后 2 句；不会混用其他角色的情感",
+                    )
+                    dialogue_emotion_overwrite = gr.Checkbox(
+                        value=False,
+                        label="覆盖已有逐句情感",
+                        info="默认关闭：保留你已经手工填写的 text:/vector:",
+                    )
+                    suggest_dialogue_emotion_button = gr.Button(
+                        "分析上下文并填入建议",
+                        variant="secondary",
+                    )
+                dialogue_emotion_report = gr.TextArea(
+                    label="上下文情感建议报告 JSON",
+                    lines=8,
+                    interactive=False,
+                )
             dialogue_timeline_visual = gr.HTML(render_timeline_html([]))
             with gr.Row(equal_height=True):
                 dialogue_output = gr.Audio(label="合并音频", type="filepath", scale=8)
@@ -4041,6 +4142,25 @@ def build_app(
             ],
             outputs=[dialogue_timeline_visual, dialogue_status],
             queue=False,
+        )
+        suggest_dialogue_emotion_button.click(
+            suggest_dialogue_emotions_event,
+            inputs=[
+                dialogue_type,
+                dialogue_script,
+                dialogue_default_role,
+                dialogue_default_language,
+                dialogue_preview,
+                dialogue_emotion_context_window,
+                dialogue_emotion_overwrite,
+            ],
+            outputs=[
+                dialogue_preview,
+                dialogue_timeline_visual,
+                dialogue_status,
+                dialogue_emotion_report,
+            ],
+            concurrency_limit=1,
         )
         preset_select.change(
             lambda value: value or "", inputs=preset_select, outputs=preset_name, queue=False

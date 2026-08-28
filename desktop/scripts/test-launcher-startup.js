@@ -8,6 +8,7 @@ const mainSource = fs.readFileSync(path.join(desktopRoot, "src", "main.js"), "ut
 const htmlSource = fs.readFileSync(path.join(desktopRoot, "src", "index.html"), "utf8");
 const profileSource = fs.readFileSync(path.join(desktopRoot, "src", "runtime_profiles.js"), "utf8");
 const diagnosticSource = fs.readFileSync(path.join(desktopRoot, "src", "diagnostic_report.js"), "utf8");
+const forgeSource = fs.readFileSync(path.join(desktopRoot, "forge.config.js"), "utf8");
 const webuiSource = fs.readFileSync(path.join(projectRoot, "desktop_webui.py"), "utf8");
 const desktopVersion = JSON.parse(
   fs.readFileSync(path.join(desktopRoot, "package.json"), "utf8")
@@ -81,6 +82,14 @@ assert.ok(nodeVersion, "The ComfyUI node version must be readable from pyproject
 assert.ok(
   webuiSource.includes(`DESKTOP_VERSION = "${desktopVersion}"`),
   "The Python WebUI version must match the Electron package version."
+);
+assert.ok(
+  forgeSource.includes('path.join(projectRoot, "context_emotion.py")'),
+  "The packaged desktop runtime must include the context-emotion helper."
+);
+assert.ok(
+  webuiSource.includes("上下文情感自动标注（先建议，确认后才生成）"),
+  "The desktop WebUI must expose the confirmation-first context emotion flow."
 );
 for (const expected of [
   `DESKTOP ${desktopVersion}`,

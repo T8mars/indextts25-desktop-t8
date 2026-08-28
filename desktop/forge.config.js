@@ -48,6 +48,7 @@ module.exports = {
       path.join(projectRoot, "audiocpp_backend.py"),
       path.join(projectRoot, "speech_review.py"),
       path.join(projectRoot, "timeline_tools.py"),
+      path.join(projectRoot, "context_emotion.py"),
       path.join(projectRoot, "desktop_presets.py"),
       path.join(projectRoot, "desktop_voice_library.py"),
       path.join(projectRoot, "dialogue_runtime.py"),
