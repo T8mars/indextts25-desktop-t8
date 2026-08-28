@@ -29,7 +29,8 @@ function createDiagnosticReport({
       valid: Boolean(state.modelValid),
       missingFiles: [...(state.missingFiles || [])],
       codeRevision: manifest.codeRevision,
-      modelRevision: manifest.modelRevision
+      modelRevision: manifest.modelRevision,
+      bundleVersion: manifest.bundleVersion || state.modelBundleVersion || ""
     },
     selectedRuntime: {
       profile: state.runtimeProfile,

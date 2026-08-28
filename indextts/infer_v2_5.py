@@ -225,7 +225,9 @@ class IndexTTS2:
         w2v_bert_dir = os.path.join(self.model_dir, "hf_cache", "w2v-bert-2.0")
         if not os.path.isdir(w2v_bert_dir):
             from indextts.utils.model_download import ensure_models_available
-            aux_paths = ensure_models_available(self.model_dir)
+            aux_paths = ensure_models_available(
+                self.model_dir, include_legacy_semantic_codec=False
+            )
             w2v_bert_dir = aux_paths["w2v_bert"]
         self.extract_features = SeamlessM4TFeatureExtractor.from_pretrained(w2v_bert_dir, local_files_only=True)
         self.semantic_model = Wav2Vec2BertModel.from_pretrained(w2v_bert_dir, local_files_only=True)
@@ -269,7 +271,9 @@ class IndexTTS2:
         campplus_ckpt_path = os.path.join(self.model_dir, "hf_cache", "campplus_cn_common.bin")
         if not os.path.isfile(campplus_ckpt_path):
             from indextts.utils.model_download import ensure_models_available
-            aux_paths = ensure_models_available(self.model_dir)
+            aux_paths = ensure_models_available(
+                self.model_dir, include_legacy_semantic_codec=False
+            )
             campplus_ckpt_path = aux_paths["campplus"]
         campplus_model = CAMPPlus(feat_dim=80, embedding_size=192)
         campplus_model.load_state_dict(torch.load(campplus_ckpt_path, map_location="cpu"))
@@ -280,7 +284,9 @@ class IndexTTS2:
         bigvgan_dir = os.path.join(self.model_dir, "hf_cache", "bigvgan")
         if not os.path.isdir(bigvgan_dir):
             from indextts.utils.model_download import ensure_models_available
-            aux_paths = ensure_models_available(self.model_dir)
+            aux_paths = ensure_models_available(
+                self.model_dir, include_legacy_semantic_codec=False
+            )
             bigvgan_dir = aux_paths["bigvgan"]
         self.bigvgan = bigvgan.BigVGAN.from_pretrained(bigvgan_dir, use_cuda_kernel=self.use_cuda_kernel)
         self.bigvgan = self.bigvgan.to(self.device)

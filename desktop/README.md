@@ -33,7 +33,7 @@ Windows Electron desktop integration for IndexTTS 2.5. The packaged application 
 - signed GitHub Release app-layer updates with resumable download, exact-file verification, explicit install confirmation, and automatic rollback
 
 The large model files are intentionally external. On first launch, select a complete IndexTTS 2.5 model directory.
-Version 0.19.0 is aligned to code revision `ee40fa7d` and the complete mirrored model revision `14166a74`. It adds a stable/beta GitHub Release checker and signed app-layer updates. Automatic checks are read-only; download and install remain explicit user actions. A downloaded ZIP is verified by size, SHA-256, Ed25519 signature, and an exact per-file manifest before the portable app exits. A detached helper backs up only declared application files, relaunches the update, and restores the previous files if the new launcher does not report healthy startup. Models, voices, presets, generated audio, and user settings are outside the replacement set. The model remains a separate Hugging Face download from `t8star/IndexTTS-2.5-Comfy`; all required files are pinned and hash-checked. No benchmark, model load, model download, update download, install, or acceleration mode starts automatically.
+Version 0.19.1 is aligned to code revision `ee40fa7d` and model bundle `1.0.0` at revision `14166a74`. It provides separate signed update channels: GitHub Releases for the app layer and Hugging Face for the complete external model bundle. Automatic checks are read-only; download and install remain explicit user actions. App updates and model manifests are verified with Ed25519 before their file paths, hashes, or revisions are trusted. Model downloads resume in place and verify all 26 main and auxiliary files. No benchmark, model load, model download, update download, install, or acceleration mode starts automatically.
 The launcher validates official model file sizes, while the downloader performs full SHA-256 verification.
 This release also supports running the portable package from Windows paths containing Chinese characters.
 AAC/M4A and other compressed reference audio is decoded by the bundled PyAV runtime, without requiring a system FFmpeg installation. Streaming previews are also encoded by bundled PyAV, so Gradio no longer calls an external `ffmpeg` or `ffprobe` executable and cannot fail with `[WinError 2]` merely because those programs are absent from `PATH`.
@@ -145,10 +145,13 @@ files are not part of the incremental ZIP. Read-only or Squirrel installs are se
 
 Model weights are distributed independently at
 [`t8star/IndexTTS-2.5-Comfy`](https://huggingface.co/t8star/IndexTTS-2.5-Comfy), pinned to revision
-`14166a7401f9f87f53770a1784390e8c0e9da15a`. Click `Hugging Face 一键下载模型（推荐）` in the launcher.
+`14166a7401f9f87f53770a1784390e8c0e9da15a`. The repository publishes signed `model-bundle.json` and
+`model-bundle.sig` metadata independently from desktop releases. Click `Hugging Face 自动下载／修复完整模型（推荐）`
+in the launcher.
 When no model directory is selected, choosing a parent folder creates `<parent>\IndexTTS-2.5`; an already selected
 incomplete folder is synchronized in place. The Hugging Face cache is kept below that model directory so interrupted
-downloads can resume. All 20 required files are size- and SHA-256-verified before the Start button is enabled.
+downloads can resume. All 26 required main and auxiliary files are size- and SHA-256-verified before the Start button
+is enabled. Updating only the Hugging Face README does not trigger a model update; the signed bundle version must change.
 ModelScope remains an explicit fallback and no model is silently overwritten by the desktop update checker.
 
 ## Development
@@ -193,7 +196,7 @@ npm run make
 ```
 
 This builds only `@electron-forge/maker-zip`. The unpacked application is still
-available under `desktop/out/T8star-Aix-IndexTTS-2.5-v0.19.0-win32-x64` for local testing.
+available under `desktop/out/T8star-Aix-IndexTTS-2.5-v0.19.1-win32-x64` for local testing.
 The bundled runtime contains tens of thousands of small files, so Squirrel/NuGet
 can spend a long time repeatedly rewriting a multi-gigabyte package. It is not the
 recommended user distribution. If an installer is specifically required, build it

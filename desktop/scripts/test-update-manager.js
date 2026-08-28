@@ -12,9 +12,12 @@ const {
   createDownloadTask,
   extractAndVerifyUpdate,
   resolveDesktopUpdate,
+  resolveModelBundleUpdate,
   safeRelativePath,
+  validateModelBundleManifest,
   validateUpdateManifest,
   verifyManifestSignature,
+  verifyModelBundleSignature,
   verifyPayloadFiles
 } = require("../src/update_manager");
 
@@ -126,7 +129,8 @@ async function main() {
     },
     model: {
       repository: "t8star/IndexTTS-2.5-Comfy",
-      revision: "14166a7401f9f87f53770a1784390e8c0e9da15a"
+      revision: "14166a7401f9f87f53770a1784390e8c0e9da15a",
+      bundleVersion: "1.0.0"
     },
     runtime: {
       version: "py310-torch280-cu128-1",
@@ -168,6 +172,7 @@ async function main() {
   assert.equal(resolved.manualOnly, false);
   assert.equal(resolved.signatureVerified, true);
   assert.equal(resolved.manifest.model.repository, "t8star/IndexTTS-2.5-Comfy");
+  assert.equal(resolved.manifest.model.bundleVersion, "1.0.0");
 
   const untrusted = await resolveDesktopUpdate({
     currentVersion: "0.18.1",
@@ -177,6 +182,54 @@ async function main() {
   });
   assert.equal(untrusted.manualOnly, true);
   assert.match(untrusted.manifestError, /验证失败/);
+
+  const remoteModelManifest = {
+    schemaVersion: 1,
+    bundleVersion: "1.0.0",
+    publishedAt: "2026-08-29T00:00:00Z",
+    minimumDesktopVersion: "0.19.1",
+    minimumNodeVersion: "0.18.0",
+    totalSize: 8,
+    codeRepository: "index-tts/index-tts",
+    codeRevision: "e".repeat(40),
+    modelRepository: "t8star/IndexTTS-2.5-Comfy",
+    modelRevision: "1".repeat(40),
+    files: {
+      "config.yaml": { size: 3, sha256: digest("cfg") },
+      "hf_cache/test.bin": { size: 5, sha256: digest("model") }
+    }
+  };
+  assert.equal(validateModelBundleManifest(remoteModelManifest).totalSize, 8);
+  const modelSignature = crypto.sign(
+    null,
+    Buffer.from(canonicalJson(remoteModelManifest), "utf8"),
+    signingKeys.privateKey
+  ).toString("base64");
+  assert.equal(
+    verifyModelBundleSignature(remoteModelManifest, modelSignature, signingKeys.publicKey),
+    true
+  );
+  const modelUpdate = await resolveModelBundleUpdate({
+    currentVersion: "0.9.0",
+    desktopVersion: "0.19.1",
+    fetchJson: async () => remoteModelManifest,
+    fetchText: async () => modelSignature,
+    publicKey: signingKeys.publicKey
+  });
+  assert.equal(modelUpdate.updateAvailable, true);
+  assert.equal(modelUpdate.compatible, true);
+  assert.equal(modelUpdate.signatureVerified, true);
+  assert.equal(modelUpdate.revision, "1".repeat(40));
+  await assert.rejects(
+    resolveModelBundleUpdate({
+      currentVersion: "1.0.0",
+      desktopVersion: "0.19.1",
+      fetchJson: async () => ({ ...remoteModelManifest, totalSize: 9 }),
+      fetchText: async () => modelSignature,
+      publicKey: signingKeys.publicKey
+    }),
+    /签名验证失败/
+  );
 
   const temporary = fs.mkdtempSync(path.join(os.tmpdir(), "t8-update-manager-"));
   try {

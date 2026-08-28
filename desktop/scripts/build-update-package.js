@@ -211,7 +211,10 @@ async function main() {
     },
     model: {
       repository: model.modelRepository,
-      revision: model.modelRevision
+      revision: model.modelRevision,
+      bundleVersion: model.bundleVersion,
+      manifestUrl: "https://huggingface.co/t8star/IndexTTS-2.5-Comfy/resolve/main/model-bundle.json",
+      signatureUrl: "https://huggingface.co/t8star/IndexTTS-2.5-Comfy/resolve/main/model-bundle.sig"
     },
     runtime: runtime ? {
       version: runtime.runtimeVersion,

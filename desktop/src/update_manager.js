@@ -11,6 +11,10 @@ const MAX_GITHUB_ASSET_BYTES = 2 * 1024 * 1024 * 1024;
 const USER_AGENT = "T8star-Aix-IndexTTS25-Desktop-Updater";
 const UPDATE_MANIFEST_ASSET = "desktop-update-manifest.json";
 const UPDATE_SIGNATURE_ASSET = "desktop-update-manifest.sig";
+const MODEL_BUNDLE_REPOSITORY = "t8star/IndexTTS-2.5-Comfy";
+const MODEL_BUNDLE_BASE_URL = `https://huggingface.co/${MODEL_BUNDLE_REPOSITORY}/resolve/main`;
+const MODEL_BUNDLE_MANIFEST_URL = `${MODEL_BUNDLE_BASE_URL}/model-bundle.json`;
+const MODEL_BUNDLE_SIGNATURE_URL = `${MODEL_BUNDLE_BASE_URL}/model-bundle.sig`;
 const UPDATE_PUBLIC_KEY_PEM = `-----BEGIN PUBLIC KEY-----
 MCowBQYDK2VwAyEARXizEmHovIcMTdi3Ki/tO9EEMAXh11hLVKepFy66ANI=
 -----END PUBLIC KEY-----
@@ -94,21 +98,92 @@ function canonicalJson(value) {
   return JSON.stringify(value);
 }
 
-function verifyManifestSignature(manifest, signatureText, publicKey = UPDATE_PUBLIC_KEY_PEM) {
+function verifySignedManifest(
+  manifest,
+  signatureText,
+  publicKey = UPDATE_PUBLIC_KEY_PEM,
+  label = "清单"
+) {
   const encoded = String(signatureText || "").trim();
   if (!/^[A-Za-z0-9+/]+={0,2}$/.test(encoded)) {
-    throw new Error("桌面更新清单签名格式无效。");
+    throw new Error(`${label}签名格式无效。`);
   }
   const signature = Buffer.from(encoded, "base64");
-  if (signature.length !== 64) throw new Error("桌面更新清单签名长度无效。");
+  if (signature.length !== 64) throw new Error(`${label}签名长度无效。`);
   const valid = crypto.verify(
     null,
     Buffer.from(canonicalJson(manifest), "utf8"),
     publicKey,
     signature
   );
-  if (!valid) throw new Error("桌面更新清单签名验证失败。");
+  if (!valid) throw new Error(`${label}签名验证失败。`);
   return true;
+}
+
+function verifyManifestSignature(manifest, signatureText, publicKey = UPDATE_PUBLIC_KEY_PEM) {
+  return verifySignedManifest(manifest, signatureText, publicKey, "桌面更新清单");
+}
+
+function verifyModelBundleSignature(manifest, signatureText, publicKey = UPDATE_PUBLIC_KEY_PEM) {
+  return verifySignedManifest(manifest, signatureText, publicKey, "模型清单");
+}
+
+function validateModelBundleManifest(rawManifest) {
+  if (!rawManifest || typeof rawManifest !== "object") throw new Error("模型清单不是 JSON 对象。");
+  if (rawManifest.schemaVersion !== 1) throw new Error("不支持的模型清单版本。");
+  const bundleVersion = normalizeVersion(rawManifest.bundleVersion);
+  if (!isSemver(bundleVersion)) throw new Error("模型包版本号无效。");
+  const repository = String(rawManifest.modelRepository || "").trim();
+  if (repository !== MODEL_BUNDLE_REPOSITORY) {
+    throw new Error(`模型清单仓库必须是 ${MODEL_BUNDLE_REPOSITORY}。`);
+  }
+  const revision = String(rawManifest.modelRevision || "").trim().toLowerCase();
+  if (!/^[a-f0-9]{40}$/.test(revision)) throw new Error("模型清单缺少固定的 Git 提交版本。");
+  const minimumDesktopVersion = normalizeVersion(rawManifest.minimumDesktopVersion || "0.19.1");
+  const minimumNodeVersion = normalizeVersion(rawManifest.minimumNodeVersion || "0.18.0");
+  if (!isSemver(minimumDesktopVersion) || !isSemver(minimumNodeVersion)) {
+    throw new Error("模型清单最低兼容版本无效。");
+  }
+  if (!rawManifest.files || typeof rawManifest.files !== "object" || Array.isArray(rawManifest.files)) {
+    throw new Error("模型清单没有文件列表。");
+  }
+  const files = {};
+  const seen = new Set();
+  let totalSize = 0;
+  for (const [rawPath, rawMetadata] of Object.entries(rawManifest.files)) {
+    const relativePath = safeRelativePath(rawPath);
+    const key = relativePath.toLowerCase();
+    if (seen.has(key)) throw new Error(`模型清单存在重复文件路径：${relativePath}`);
+    seen.add(key);
+    const size = Number(rawMetadata?.size);
+    if (!Number.isSafeInteger(size) || size < 0) throw new Error(`模型文件大小无效：${relativePath}`);
+    const metadata = {
+      size,
+      sha256: assertSha256(rawMetadata?.sha256, `模型文件 ${relativePath}`)
+    };
+    for (const field of ["group", "sourceRepository", "sourceRevision", "modelScopeRepository", "modelScopeRevision"]) {
+      if (rawMetadata?.[field]) metadata[field] = String(rawMetadata[field]);
+    }
+    files[relativePath] = metadata;
+    totalSize += size;
+  }
+  if (!Object.keys(files).length) throw new Error("模型清单文件列表为空。");
+  if (Number(rawManifest.totalSize) !== totalSize) throw new Error("模型清单总大小与文件列表不一致。");
+  return {
+    schemaVersion: 1,
+    bundleVersion,
+    publishedAt: String(rawManifest.publishedAt || ""),
+    minimumDesktopVersion,
+    minimumNodeVersion,
+    totalSize,
+    codeRepository: String(rawManifest.codeRepository || "index-tts/index-tts"),
+    codeRevision: String(rawManifest.codeRevision || ""),
+    modelRepository: repository,
+    modelRevision: revision,
+    modelScopeRepository: String(rawManifest.modelScopeRepository || "IndexTeam/IndexTTS-2.5"),
+    modelScopeRevision: String(rawManifest.modelScopeRevision || "master"),
+    files
+  };
 }
 
 function validateUpdateManifest(rawManifest, release) {
@@ -162,8 +237,20 @@ function validateUpdateManifest(rawManifest, release) {
 
   const model = rawManifest.model && typeof rawManifest.model === "object" ? {
     repository: String(rawManifest.model.repository || ""),
-    revision: String(rawManifest.model.revision || "")
+    revision: String(rawManifest.model.revision || ""),
+    bundleVersion: normalizeVersion(rawManifest.model.bundleVersion || "0.0.0"),
+    manifestUrl: String(rawManifest.model.manifestUrl || MODEL_BUNDLE_MANIFEST_URL),
+    signatureUrl: String(rawManifest.model.signatureUrl || MODEL_BUNDLE_SIGNATURE_URL)
   } : null;
+  if (model) {
+    if (model.repository !== MODEL_BUNDLE_REPOSITORY || !/^[a-f0-9]{40}$/.test(model.revision)) {
+      throw new Error("桌面更新清单中的模型仓库或固定版本无效。");
+    }
+    if (!isSemver(model.bundleVersion)) throw new Error("桌面更新清单中的模型包版本无效。");
+    if (model.manifestUrl !== MODEL_BUNDLE_MANIFEST_URL || model.signatureUrl !== MODEL_BUNDLE_SIGNATURE_URL) {
+      throw new Error("桌面更新清单中的模型清单地址无效。");
+    }
+  }
   const runtime = rawManifest.runtime && typeof rawManifest.runtime === "object" ? {
     version: String(rawManifest.runtime.version || ""),
     repository: String(rawManifest.runtime.repository || ""),
@@ -308,6 +395,37 @@ async function resolveDesktopUpdate({
     manifest,
     signatureVerified,
     manifestError
+  };
+}
+
+async function resolveModelBundleUpdate({
+  currentVersion,
+  desktopVersion,
+  fetchJson = requestJson,
+  fetchText = requestText,
+  publicKey = UPDATE_PUBLIC_KEY_PEM
+} = {}) {
+  const [rawManifest, signatureText] = await Promise.all([
+    fetchJson(MODEL_BUNDLE_MANIFEST_URL),
+    fetchText(MODEL_BUNDLE_SIGNATURE_URL)
+  ]);
+  verifyModelBundleSignature(rawManifest, signatureText, publicKey);
+  const manifest = validateModelBundleManifest(rawManifest);
+  const installedVersion = normalizeVersion(currentVersion || "0.0.0");
+  const currentDesktopVersion = normalizeVersion(desktopVersion || "0.0.0");
+  const compatible = compareVersions(currentDesktopVersion, manifest.minimumDesktopVersion) >= 0;
+  return {
+    current: installedVersion,
+    latest: manifest.bundleVersion,
+    revision: manifest.modelRevision,
+    updateAvailable: compareVersions(manifest.bundleVersion, installedVersion) > 0,
+    compatible,
+    minimumDesktopVersion: manifest.minimumDesktopVersion,
+    manifest,
+    signedManifest: rawManifest,
+    signature: String(signatureText || "").trim(),
+    signatureVerified: true,
+    repositoryUrl: `https://huggingface.co/${manifest.modelRepository}`
   };
 }
 
@@ -533,6 +651,9 @@ async function extractAndVerifyUpdate(archivePath, stagingDirectory, expectedFil
 module.exports = {
   DESKTOP_REPOSITORY,
   MAX_GITHUB_ASSET_BYTES,
+  MODEL_BUNDLE_MANIFEST_URL,
+  MODEL_BUNDLE_REPOSITORY,
+  MODEL_BUNDLE_SIGNATURE_URL,
   RELEASE_API,
   UPDATE_MANIFEST_ASSET,
   UPDATE_PUBLIC_KEY_PEM,
@@ -546,9 +667,13 @@ module.exports = {
   normalizeChannel,
   requestJson,
   resolveDesktopUpdate,
+  resolveModelBundleUpdate,
   safeRelativePath,
   sha256File,
+  validateModelBundleManifest,
   validateUpdateManifest,
   verifyManifestSignature,
+  verifyModelBundleSignature,
+  verifySignedManifest,
   verifyPayloadFiles
 };

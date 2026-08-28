@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import json
 import sys
 from types import SimpleNamespace
 
+import pytest
 import torch
 
 import desktop_model_download
@@ -151,6 +153,39 @@ def test_desktop_manifest_uses_the_complete_huggingface_mirror_with_modelscope_f
         "IndexTeam/IndexTTS-2",
         desktop_model_download.MODELSCOPE_REVISION,
     )
+    assert desktop_model_download.MODEL_MANIFEST["bundleVersion"] == "1.0.0"
+    assert desktop_model_download.MODEL_MANIFEST["totalSize"] == sum(
+        metadata["size"] for metadata in desktop_model_download.MODEL_FILES.values()
+    )
+    assert len(desktop_model_download.MODEL_FILES) == 26
+    assert {
+        relative
+        for relative, metadata in desktop_model_download.MODEL_FILES.items()
+        if metadata.get("group") == "auxiliary"
+    } == {
+        "hf_cache/w2v-bert-2.0/config.json",
+        "hf_cache/w2v-bert-2.0/model.safetensors",
+        "hf_cache/w2v-bert-2.0/preprocessor_config.json",
+        "hf_cache/campplus_cn_common.bin",
+        "hf_cache/bigvgan/config.json",
+        "hf_cache/bigvgan/bigvgan_generator.pt",
+    }
+
+
+@pytest.mark.parametrize("relative_path", ["../escape.bin", "C:/escape.bin", "aux:data.bin", "CON.txt"])
+def test_external_model_manifest_rejects_unsafe_windows_paths(tmp_path, relative_path):
+    manifest = {
+        "schemaVersion": 1,
+        "bundleVersion": "1.0.1",
+        "modelRepository": "t8star/IndexTTS-2.5-Comfy",
+        "modelRevision": "1" * 40,
+        "totalSize": 1,
+        "files": {relative_path: {"size": 1, "sha256": "2" * 64}},
+    }
+    path = tmp_path / "model-bundle.json"
+    path.write_text(json.dumps(manifest), encoding="utf-8")
+    with pytest.raises(ValueError, match="path"):
+        desktop_model_download.load_manifest(path)
 
 
 def test_acceleration_preflight_reports_versions_without_loading_a_model():

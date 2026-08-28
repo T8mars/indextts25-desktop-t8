@@ -32,9 +32,20 @@ HF_TO_MODELSCOPE_REPO_MAP = {
 
 # Default BigVGAN repo (also in config.yaml, but needed for pre-download)
 _BIGVGAN_REPO = "nvidia/bigvgan_v2_22khz_80band_256x"
+_AUXILIARY_REVISIONS = {
+    "facebook/w2v-bert-2.0": "da985ba0987f70aaeb84a80f2851cfac8c697a7b",
+    "funasr/campplus": "e4b6ede7ce16997aff4ae69fbca1f0175e2afede",
+    _BIGVGAN_REPO: "633ff708ed5b74903e86ff1298cf4a98e921c513",
+}
 
 
-def _download_single_file(repo_id: str, filename: str, local_path: str) -> str:
+def _download_single_file(
+    repo_id: str,
+    filename: str,
+    local_path: str,
+    *,
+    revision: str | None = None,
+) -> str:
     """Download a single file from a HF/ModelScope repo to a specific local path."""
     from indextts.utils.examples_downloader import _download_file
 
@@ -52,9 +63,11 @@ def _download_single_file(repo_id: str, filename: str, local_path: str) -> str:
             except Exception:
                 pass
         # Fallback to hf-mirror.com
-        url = f"https://hf-mirror.com/{repo_id}/resolve/main/{filename}"
+        resolved_revision = revision or "main"
+        url = f"https://hf-mirror.com/{repo_id}/resolve/{resolved_revision}/{filename}"
     else:
-        url = f"https://huggingface.co/{repo_id}/resolve/main/{filename}"
+        resolved_revision = revision or "main"
+        url = f"https://huggingface.co/{repo_id}/resolve/{resolved_revision}/{filename}"
 
     print(f">> Downloading {repo_id}/{filename} from {url} ...")
     _download_file(url, local_path, timeout=300)
@@ -82,7 +95,12 @@ def ensure_config_available(model_dir: str, version: str = "2.5") -> None:
     print(">> config.yaml downloaded.")
 
 
-def ensure_models_available(model_dir: str, bigvgan_repo: str = _BIGVGAN_REPO) -> dict:
+def ensure_models_available(
+    model_dir: str,
+    bigvgan_repo: str = _BIGVGAN_REPO,
+    *,
+    include_legacy_semantic_codec: bool = True,
+) -> dict:
     """
     Download all auxiliary models to ``{model_dir}/hf_cache/`` if missing.
 
@@ -100,32 +118,57 @@ def ensure_models_available(model_dir: str, bigvgan_repo: str = _BIGVGAN_REPO) -
 
     # 1. w2v-bert-2.0 (full repo — needed by SeamlessM4T and Wav2Vec2BertModel)
     w2v_dir = os.path.join(cache_dir, "w2v-bert-2.0")
-    if not os.path.isdir(w2v_dir) or not os.listdir(w2v_dir):
+    w2v_required = ("config.json", "model.safetensors", "preprocessor_config.json")
+    if not all(os.path.isfile(os.path.join(w2v_dir, name)) for name in w2v_required):
         print(f">> Downloading w2v-bert-2.0 to {w2v_dir}...")
-        snapshot_download("facebook/w2v-bert-2.0", local_dir=w2v_dir)
+        snapshot_download(
+            "facebook/w2v-bert-2.0",
+            local_dir=w2v_dir,
+            revision=_AUXILIARY_REVISIONS["facebook/w2v-bert-2.0"],
+            allow_patterns=list(w2v_required),
+        )
     paths["w2v_bert"] = w2v_dir
 
     # 2. MaskGCT semantic codec
     maskgct_path = os.path.join(cache_dir, "semantic_codec_model.safetensors")
-    if not os.path.isfile(maskgct_path):
+    if include_legacy_semantic_codec and not os.path.isfile(maskgct_path):
         print(f">> Downloading MaskGCT semantic codec to {maskgct_path}...")
         _download_single_file("amphion/MaskGCT", "semantic_codec/model.safetensors", maskgct_path)
-    paths["semantic_codec"] = maskgct_path
+    if include_legacy_semantic_codec:
+        paths["semantic_codec"] = maskgct_path
 
     # 3. CAMPPlus speaker embedding model
     campplus_path = os.path.join(cache_dir, "campplus_cn_common.bin")
     if not os.path.isfile(campplus_path):
         print(f">> Downloading CAMPPlus to {campplus_path}...")
-        _download_single_file("funasr/campplus", "campplus_cn_common.bin", campplus_path)
+        _download_single_file(
+            "funasr/campplus",
+            "campplus_cn_common.bin",
+            campplus_path,
+            revision=_AUXILIARY_REVISIONS["funasr/campplus"],
+        )
     paths["campplus"] = campplus_path
 
     # 4. BigVGAN vocoder (config + weights)
     bigvgan_dir = os.path.join(cache_dir, "bigvgan")
-    if not os.path.isdir(bigvgan_dir) or not os.path.isfile(os.path.join(bigvgan_dir, "config.json")):
+    if not all(
+        os.path.isfile(os.path.join(bigvgan_dir, name))
+        for name in ("config.json", "bigvgan_generator.pt")
+    ):
         print(f">> Downloading BigVGAN to {bigvgan_dir}...")
         os.makedirs(bigvgan_dir, exist_ok=True)
-        _download_single_file(bigvgan_repo, "config.json", os.path.join(bigvgan_dir, "config.json"))
-        _download_single_file(bigvgan_repo, "bigvgan_generator.pt", os.path.join(bigvgan_dir, "bigvgan_generator.pt"))
+        _download_single_file(
+            bigvgan_repo,
+            "config.json",
+            os.path.join(bigvgan_dir, "config.json"),
+            revision=_AUXILIARY_REVISIONS.get(bigvgan_repo),
+        )
+        _download_single_file(
+            bigvgan_repo,
+            "bigvgan_generator.pt",
+            os.path.join(bigvgan_dir, "bigvgan_generator.pt"),
+            revision=_AUXILIARY_REVISIONS.get(bigvgan_repo),
+        )
     paths["bigvgan"] = bigvgan_dir
 
     print(">> All auxiliary models ready.")

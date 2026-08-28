@@ -31,6 +31,7 @@ const elements = {
   updateProgress: document.querySelector("#updateProgress"),
   updateProgressText: document.querySelector("#updateProgressText"),
   downloadUpdateButton: document.querySelector("#downloadUpdateButton"),
+  updateModelButton: document.querySelector("#updateModelButton"),
   cancelUpdateButton: document.querySelector("#cancelUpdateButton"),
   installUpdateButton: document.querySelector("#installUpdateButton"),
   missingFiles: document.querySelector("#missingFiles"),
@@ -199,6 +200,11 @@ function renderUpdateReport(report, busy) {
   elements.downloadUpdateButton.textContent = report?.desktop?.manualOnly
     ? "打开 Release 手动更新"
     : "下载并校验更新";
+  elements.updateModelButton.hidden = !report?.officialModel?.updateAvailable;
+  elements.updateModelButton.disabled = Boolean(busy) || currentState.phase === "downloading";
+  elements.updateModelButton.textContent = report?.officialModel?.latest
+    ? `下载模型包 ${report.officialModel.latest}`
+    : "下载并更新模型";
   if (!report) {
     elements.updateSummary.textContent = busy ? "正在联网检查…" : "尚未检查。";
     return;
@@ -208,7 +214,7 @@ function renderUpdateReport(report, busy) {
     ["桌面程序", report.desktop?.current, report.desktop?.latest, report.desktop?.updateAvailable],
     ["ComfyUI 节点", report.node?.bundled, report.node?.latest, report.node?.updateAvailable],
     ["官方代码", report.officialCode?.pinned, report.officialCode?.latest, report.officialCode?.updateAvailable],
-    ["官方模型", report.officialModel?.pinned, report.officialModel?.latest, report.officialModel?.updateAvailable]
+    ["T8star 模型包", report.officialModel?.pinned, report.officialModel?.latest, report.officialModel?.updateAvailable]
   ];
   for (const [label, current, latest, available] of rows) {
     const item = document.createElement("div");
@@ -361,6 +367,11 @@ elements.updateChannel.addEventListener("change", saveUpdatePreferences);
 elements.downloadUpdateButton.addEventListener("click", async () => {
   appendLog("准备下载桌面更新；下载后会先校验，不会立即退出或安装…");
   renderState(await window.desktopApi.downloadUpdate());
+});
+
+elements.updateModelButton.addEventListener("click", async () => {
+  appendLog("准备从 Hugging Face 自动下载并校验最新模型包…");
+  renderState(await window.desktopApi.downloadModel("huggingface"));
 });
 
 elements.cancelUpdateButton.addEventListener("click", async () => {

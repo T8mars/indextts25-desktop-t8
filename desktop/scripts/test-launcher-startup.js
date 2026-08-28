@@ -1,6 +1,10 @@
 const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const path = require("node:path");
+const {
+  validateModelBundleManifest,
+  verifyModelBundleSignature
+} = require("../src/update_manager");
 
 const desktopRoot = path.resolve(__dirname, "..");
 const projectRoot = path.resolve(desktopRoot, "..");
@@ -20,6 +24,10 @@ const desktopVersion = JSON.parse(
 const modelManifest = JSON.parse(
   fs.readFileSync(path.join(projectRoot, "desktop_model_manifest.json"), "utf8")
 );
+const modelSignature = fs.readFileSync(
+  path.join(projectRoot, "model-bundle.sig"),
+  "ascii"
+);
 const nodePyproject = fs.readFileSync(
   path.join(projectRoot, "comfyui-indextts25-T8", "pyproject.toml"),
   "utf8"
@@ -33,6 +41,9 @@ assert.deepEqual(modelManifest.files["bpe.model"], {
 });
 assert.equal(modelManifest.modelRepository, "t8star/IndexTTS-2.5-Comfy");
 assert.match(modelManifest.modelRevision, /^[a-f0-9]{40}$/);
+assert.equal(validateModelBundleManifest(modelManifest).bundleVersion, "1.0.0");
+assert.equal(Object.keys(modelManifest.files).length, 26);
+assert.equal(verifyModelBundleSignature(modelManifest, modelSignature), true);
 
 assert.doesNotMatch(
   mainSource,
@@ -70,6 +81,7 @@ for (const profileControl of [
   "updateResults",
   "updateProgress",
   "downloadUpdateButton",
+  "updateModelButton",
   "cancelUpdateButton",
   "installUpdateButton",
 ]) {
@@ -91,6 +103,8 @@ assert.match(releaseWorkflowSource, /T8_UPDATE_PRIVATE_KEY_BASE64/);
 assert.match(releaseWorkflowSource, /desktop-update-manifest\.sig/);
 assert.match(releaseWorkflowSource, /desktop-app-update-/);
 assert.match(mainSource, /fetchText\("https:\/\/api\.github\.com\/repos\/index-tts\/index-tts\/commits\/main"/);
+assert.match(mainSource, /resolveModelBundleUpdate/);
+assert.doesNotMatch(mainSource, /huggingface\.co\/api\/models\/t8star\/IndexTTS-2\.5-Comfy/);
 assert.match(mainSource, /Hardware probe only \(model not loaded\)/);
 assert.match(mainSource, /probe_acceleration/);
 assert.match(diagnosticSource, /预检只检查硬件、依赖与工具链，不加载 IndexTTS 模型/);

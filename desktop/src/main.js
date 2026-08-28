@@ -13,6 +13,9 @@ const {
   extractAndVerifyUpdate,
   normalizeChannel,
   resolveDesktopUpdate,
+  resolveModelBundleUpdate,
+  validateModelBundleManifest,
+  verifyModelBundleSignature,
   verifyPayloadFiles
 } = require("./update_manager");
 const {
@@ -37,6 +40,7 @@ let benchmarkProcess = null;
 let benchmarkCancelled = false;
 let updateDownloadTask = null;
 let preparedDesktopUpdate = null;
+let activeModelDownloadBundle = null;
 let activePort = null;
 let state = {
   phase: "idle",
@@ -59,6 +63,7 @@ let state = {
   updateReport: null,
   updateDownload: null,
   updateReady: false,
+  modelBundleVersion: "",
   autoCheckUpdates: true,
   updateChannel: "stable",
   serviceUrl: ""
@@ -97,13 +102,17 @@ async function checkForUpdates() {
   if (state.updateBusy) return state;
   updateState({ updateBusy: true, message: "正在检查桌面程序、官方代码、模型与节点版本…" });
   const manifest = modelManifest();
+  const installedManifest = modelManifestForDirectory(state.modelDir);
   const sources = await Promise.allSettled([
     resolveDesktopUpdate({
       currentVersion: app.getVersion(),
       channel: state.updateChannel || "stable"
     }),
     fetchText("https://api.github.com/repos/index-tts/index-tts/commits/main"),
-    fetchText("https://huggingface.co/api/models/t8star/IndexTTS-2.5-Comfy"),
+    resolveModelBundleUpdate({
+      currentVersion: installedManifest.bundleVersion,
+      desktopVersion: app.getVersion()
+    }),
     fetchText("https://raw.githubusercontent.com/T8mars/comfyui-indextts25-t8/main/pyproject.toml")
   ]);
   const errors = [];
@@ -134,7 +143,17 @@ async function checkForUpdates() {
     errors.push(`桌面更新安全校验：${desktop.manifestError}已禁用程序内自动安装。`);
   }
   const upstream = readJson(sources[1], "官方代码");
-  const model = readJson(sources[2], "T8star-Aix 模型仓库");
+  let modelBundle = null;
+  if (sources[2].status === "fulfilled") {
+    modelBundle = sources[2].value;
+    if (!modelBundle.compatible) {
+      errors.push(
+        `模型包 ${modelBundle.latest} 需要 Desktop ${modelBundle.minimumDesktopVersion} 或更高版本。`
+      );
+    }
+  } else {
+    errors.push(`T8star-Aix 模型仓库：${sources[2].reason.message || sources[2].reason}`);
+  }
   let remoteNodeVersion = "";
   if (sources[3].status === "fulfilled") {
     remoteNodeVersion = sources[3].value.match(/^version\s*=\s*["']([^"']+)["']/m)?.[1] || "";
@@ -142,7 +161,6 @@ async function checkForUpdates() {
     errors.push(`节点仓库：${sources[3].reason.message || sources[3].reason}`);
   }
   const codeRevision = String(upstream.sha || "");
-  const modelRevision = String(model.sha || "");
   const report = {
     checkedAt: new Date().toISOString(),
     desktop,
@@ -157,9 +175,14 @@ async function checkForUpdates() {
       updateAvailable: Boolean(codeRevision && !codeRevision.startsWith(String(manifest.codeRevision || "")) && !String(manifest.codeRevision || "").startsWith(codeRevision))
     },
     officialModel: {
-      pinned: String(manifest.modelRevision || ""),
-      latest: modelRevision,
-      updateAvailable: Boolean(modelRevision && modelRevision !== String(manifest.modelRevision || ""))
+      pinned: String(installedManifest.bundleVersion || "0.0.0"),
+      revision: String(installedManifest.modelRevision || manifest.modelRevision || ""),
+      latest: String(modelBundle?.latest || ""),
+      latestRevision: String(modelBundle?.revision || ""),
+      updateAvailable: Boolean(modelBundle?.updateAvailable && modelBundle?.compatible),
+      compatible: modelBundle?.compatible !== false,
+      signatureVerified: Boolean(modelBundle?.signatureVerified),
+      repositoryUrl: modelBundle?.repositoryUrl || MODEL_URLS.huggingface
     },
     errors
   };
@@ -192,6 +215,71 @@ function modelManifest() {
   );
   modelManifestCache = JSON.parse(fs.readFileSync(manifestPath, "utf8"));
   return modelManifestCache;
+}
+
+const INSTALLED_MODEL_MANIFEST = ".t8star-model-bundle.json";
+const INSTALLED_MODEL_SIGNATURE = ".t8star-model-bundle.sig";
+
+function modelManifestForDirectory(modelDir) {
+  const bundled = modelManifest();
+  if (!modelDir || !fs.existsSync(modelDir)) return bundled;
+  const manifestPath = path.join(modelDir, INSTALLED_MODEL_MANIFEST);
+  const signaturePath = path.join(modelDir, INSTALLED_MODEL_SIGNATURE);
+  if (!fs.existsSync(manifestPath) || !fs.existsSync(signaturePath)) return bundled;
+  try {
+    const rawManifest = JSON.parse(fs.readFileSync(manifestPath, "utf8"));
+    const signature = fs.readFileSync(signaturePath, "ascii");
+    verifyModelBundleSignature(rawManifest, signature);
+    const installed = validateModelBundleManifest(rawManifest);
+    if (compareVersions(app.getVersion(), installed.minimumDesktopVersion) < 0) return bundled;
+    return compareVersions(installed.bundleVersion, bundled.bundleVersion) >= 0 ? installed : bundled;
+  } catch (error) {
+    appendLog(`Ignoring invalid installed model bundle metadata: ${error.message}`);
+    return bundled;
+  }
+}
+
+function modelBundleCacheDirectory(bundleVersion) {
+  return path.join(updatesDirectory(), "model-bundles", String(bundleVersion));
+}
+
+async function resolveLatestModelBundle() {
+  const installed = modelManifestForDirectory(state.modelDir);
+  const resolved = await resolveModelBundleUpdate({
+    currentVersion: installed.bundleVersion,
+    desktopVersion: app.getVersion()
+  });
+  if (!resolved.signatureVerified) throw new Error("远程模型清单没有通过签名校验。");
+  if (!resolved.compatible) {
+    throw new Error(
+      `模型包 ${resolved.latest} 需要 Desktop ${resolved.minimumDesktopVersion} 或更高版本。`
+    );
+  }
+  const directory = modelBundleCacheDirectory(resolved.latest);
+  fs.mkdirSync(directory, { recursive: true });
+  const manifestPath = path.join(directory, "model-bundle.json");
+  const signaturePath = path.join(directory, "model-bundle.sig");
+  fs.writeFileSync(manifestPath, `${JSON.stringify(resolved.signedManifest, null, 2)}\n`, "utf8");
+  fs.writeFileSync(signaturePath, `${resolved.signature}\n`, "ascii");
+  verifyModelBundleSignature(
+    JSON.parse(fs.readFileSync(manifestPath, "utf8")),
+    fs.readFileSync(signaturePath, "ascii")
+  );
+  return { ...resolved, manifestPath, signaturePath };
+}
+
+function installModelBundleMetadata(modelDir, bundle) {
+  if (!bundle?.signedManifest || !bundle?.signature) return;
+  verifyModelBundleSignature(bundle.signedManifest, bundle.signature);
+  validateModelBundleManifest(bundle.signedManifest);
+  const manifestPath = path.join(modelDir, INSTALLED_MODEL_MANIFEST);
+  const signaturePath = path.join(modelDir, INSTALLED_MODEL_SIGNATURE);
+  const temporaryManifest = `${manifestPath}.tmp`;
+  const temporarySignature = `${signaturePath}.tmp`;
+  fs.writeFileSync(temporaryManifest, `${JSON.stringify(bundle.signedManifest, null, 2)}\n`, "utf8");
+  fs.writeFileSync(temporarySignature, `${bundle.signature}\n`, "ascii");
+  fs.renameSync(temporaryManifest, manifestPath);
+  fs.renameSync(temporarySignature, signaturePath);
 }
 
 function settingsPath() {
@@ -511,13 +599,14 @@ function scheduleAutomaticUpdateCheck() {
   }, 5000);
 }
 
-function validateModelDirectory(modelDir) {
+function validateModelDirectory(modelDir, manifestOverride = null) {
   if (!modelDir || !fs.existsSync(modelDir)) {
-    return { valid: false, missingFiles: ["模型目录不存在"] };
+    return { valid: false, missingFiles: ["模型目录不存在"], manifest: modelManifest() };
   }
 
+  const manifest = manifestOverride || modelManifestForDirectory(modelDir);
   const missingFiles = [];
-  for (const [relativePath, metadata] of Object.entries(modelManifest().files)) {
+  for (const [relativePath, metadata] of Object.entries(manifest.files)) {
     const localPath = path.join(modelDir, ...relativePath.split("/"));
     if (!fs.existsSync(localPath)) {
       missingFiles.push(relativePath);
@@ -528,7 +617,7 @@ function validateModelDirectory(modelDir) {
     }
   }
 
-  return { valid: missingFiles.length === 0, missingFiles };
+  return { valid: missingFiles.length === 0, missingFiles, manifest };
 }
 
 function updateState(patch) {
@@ -620,7 +709,7 @@ async function probeRuntimeHardware() {
 }
 
 function buildDiagnosticReport() {
-  const manifest = modelManifest();
+  const manifest = modelManifestForDirectory(state.modelDir);
   return createDiagnosticReport({
     appName: APP_TITLE,
     appVersion: app.getVersion(),
@@ -887,8 +976,9 @@ async function startPythonService() {
   });
   appendLog(`Starting bundled Python: ${runtime.pythonExe}`);
   appendLog(`Model directory: ${state.modelDir}`);
-  appendLog(`Code revision: ${modelManifest().codeRevision}`);
-  appendLog(`Model revision: ${modelManifest().modelRevision}`);
+  appendLog(`Code revision: ${validation.manifest.codeRevision}`);
+  appendLog(`Model bundle: ${validation.manifest.bundleVersion}`);
+  appendLog(`Model revision: ${validation.manifest.modelRevision}`);
   appendLog(`Optional acceleration mode: ${state.accelerationMode || "off"}`);
   appendLog(`Precision mode: ${state.precisionMode || "auto"}`);
   appendLog(`Reference encoders: ${state.referenceDevice || "auto"}`);
@@ -979,6 +1069,12 @@ async function downloadExternalModel(source) {
   const scriptPath = path.join(runtime.backendRoot, "desktop_model_download.py");
   const pythonPathParts = [runtime.backendRoot, runtime.sitePackages];
   if (process.env.PYTHONPATH) pythonPathParts.push(process.env.PYTHONPATH);
+  let selectedBundle = null;
+  if (source === "huggingface") {
+    updateState({ phase: "downloading", message: "正在验证 Hugging Face 模型清单签名…" });
+    selectedBundle = await resolveLatestModelBundle();
+  }
+  activeModelDownloadBundle = selectedBundle;
 
   updateState({
     phase: "downloading",
@@ -988,9 +1084,11 @@ async function downloadExternalModel(source) {
     missingFiles: []
   });
   appendLog(`Downloading external model from ${source} to ${target}`);
-  downloadProcess = spawn(runtime.pythonExe, [
-    "-u", scriptPath, "--target", target, "--source", source
-  ], {
+  const downloadArguments = ["-u", scriptPath, "--target", target, "--source", source];
+  if (selectedBundle?.manifestPath) {
+    downloadArguments.push("--manifest", selectedBundle.manifestPath);
+  }
+  downloadProcess = spawn(runtime.pythonExe, downloadArguments, {
     cwd: runtime.backendRoot,
     windowsHide: true,
     env: {
@@ -1023,15 +1121,19 @@ async function downloadExternalModel(source) {
   const wasCancelled = cancelledDownloadProcess === processRef;
   if (wasCancelled) cancelledDownloadProcess = null;
 
-  const validation = validateModelDirectory(target);
+  const completedBundle = activeModelDownloadBundle;
+  activeModelDownloadBundle = null;
+  const validation = validateModelDirectory(target, completedBundle?.manifest || null);
   if (exitCode === 0 && validation.valid) {
+    installModelBundleMetadata(target, completedBundle);
     writeSettings({ ...readSettings(), modelDir: target });
     updateState({
       phase: "idle",
-      message: "IndexTTS 2.5 模型下载完成，可以启动",
+      message: `IndexTTS 2.5 模型包 ${validation.manifest.bundleVersion} 下载完成，可以启动`,
       modelDir: target,
       modelValid: true,
-      missingFiles: []
+      missingFiles: [],
+      modelBundleVersion: validation.manifest.bundleVersion
     });
   } else {
     updateState({
@@ -1050,6 +1152,7 @@ function cancelModelDownload() {
   const processRef = downloadProcess;
   downloadProcess = null;
   cancelledDownloadProcess = processRef;
+  activeModelDownloadBundle = null;
   processRef.kill();
   updateState({ phase: "error", message: "正在取消模型下载，可稍后继续断点下载" });
 }
@@ -1100,6 +1203,7 @@ function registerIpcHandlers() {
       modelDir,
       modelValid: validation.valid,
       missingFiles: validation.missingFiles,
+      modelBundleVersion: validation.manifest.bundleVersion,
       phase: validation.valid ? "idle" : "model-required",
       message: validation.valid ? "模型校验通过，可以启动" : "该目录不是完整的 IndexTTS 2.5 模型"
     });
@@ -1384,6 +1488,7 @@ if (!singleInstance) {
       modelDir,
       modelValid: validation.valid,
       missingFiles: validation.missingFiles,
+      modelBundleVersion: validation.manifest.bundleVersion,
       accelerationMode: settings.accelerationMode || "off",
       precisionMode: settings.precisionMode || "auto",
       referenceDevice: settings.referenceDevice || "auto",

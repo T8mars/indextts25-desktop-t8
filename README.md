@@ -1,11 +1,11 @@
 # T8star-Aix · IndexTTS 2.5 Desktop
 
 这是基于官方 IndexTTS 2.5 制作的 Windows Electron 桌面整合版源码仓库，当前桌面版本为
-**0.19.0**。完整功能、开发和打包说明见 [Desktop README](desktop/README.md)。
+**0.19.1**。完整功能、开发和打包说明见 [Desktop README](desktop/README.md)。
 
-> 0.19.0 新增签名桌面自动更新：程序在 GitHub Releases 检查小型增量包，
+> 0.19.1 提供签名桌面与模型双通道更新：程序在 GitHub Releases 检查小型增量包，
 > 用 Ed25519、SHA-256 和逐文件清单校验，安装失败自动回滚。约 10GB 模型不进入程序更新包，
-> 由启动器从 Hugging Face `t8star/IndexTTS-2.5-Comfy` 独立下载并完整校验。
+> 由启动器从 Hugging Face `t8star/IndexTTS-2.5-Comfy` 按独立签名模型清单自动下载、续传、修复并完整校验。
 
 - 官方开源项目：[index-tts/index-tts](https://github.com/index-tts/index-tts)（感谢官方团队开源）
 - T8star-Aix ComfyUI 节点：[T8mars/comfyui-indextts25-t8](https://github.com/T8mars/comfyui-indextts25-t8)
@@ -17,7 +17,7 @@
 
 仓库不包含约 10 GB 的模型权重、Python 虚拟环境、Electron 构建产物、用户数据或生成音频。
 运行便携版时，可在启动器中选择完整的 IndexTTS 2.5 模型目录，也可点击
-“Hugging Face 一键下载模型”；选择父目录后会创建 `IndexTTS-2.5` 子目录。源码开发环境与打包步骤见上方
+“Hugging Face 自动下载／修复完整模型”；选择父目录后会创建 `IndexTTS-2.5` 子目录。源码开发环境与打包步骤见上方
 Desktop README。本整合版并非 IndexTTS 官方发行版，模型与基础推理代码的权利和许可归原项目所有。
 
 ---
