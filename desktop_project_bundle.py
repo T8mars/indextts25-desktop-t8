@@ -10,6 +10,7 @@ import tempfile
 import time
 import uuid
 import zipfile
+from contextlib import nullcontext
 from pathlib import Path, PurePosixPath
 from typing import Any
 
@@ -21,6 +22,8 @@ PROJECT_SCHEMA_VERSION = 1
 PROJECT_SUFFIX = ".indextts-project.zip"
 MAX_PROJECT_BYTES = 50 * 1024**3
 MAX_PROJECT_FILES = 20_000
+MAX_PROJECT_MANIFEST_BYTES = 4 * 1024**2
+PROJECT_DISK_RESERVE_BYTES = 512 * 1024**2
 
 
 def _sha256(path: Path) -> str:
@@ -33,11 +36,7 @@ def _sha256(path: Path) -> str:
 
 def _safe_member(value: str) -> PurePosixPath:
     candidate = PurePosixPath(str(value).replace("\\", "/"))
-    if (
-        not value
-        or candidate.is_absolute()
-        or any(part in {"", ".", ".."} for part in candidate.parts)
-    ):
+    if not value or candidate.is_absolute() or any(part in {"", ".", ".."} for part in candidate.parts):
         raise ValueError(f"工程包包含不安全路径：{value}")
     return candidate
 
@@ -227,10 +226,7 @@ def _rewrite_task_roles(task: dict[str, Any], mapping: dict[str, str]) -> None:
     for line in script.splitlines():
         bracket = re.match(r"^(\s*)\[([^\]|]+)(\|[^\]]+)?\](.*)$", line)
         if bracket:
-            line = (
-                f"{bracket.group(1)}[{role_name(bracket.group(2))}"
-                f"{bracket.group(3) or ''}]{bracket.group(4)}"
-            )
+            line = f"{bracket.group(1)}[{role_name(bracket.group(2))}{bracket.group(3) or ''}]{bracket.group(4)}"
         elif "|" in line:
             prefix, remainder = line.split("|", 1)
             if prefix.strip().casefold() in normalized:
@@ -240,10 +236,7 @@ def _rewrite_task_roles(task: dict[str, Any], mapping: dict[str, str]) -> None:
         else:
             colon = re.match(r"^(\s*)([^：:]+)([：:])(.*)$", line)
             if colon and colon.group(2).strip().casefold() in normalized:
-                line = (
-                    f"{colon.group(1)}{role_name(colon.group(2).strip())}"
-                    f"{colon.group(3)}{colon.group(4)}"
-                )
+                line = f"{colon.group(1)}{role_name(colon.group(2).strip())}{colon.group(3)}{colon.group(4)}"
         rewritten_lines.append(line)
     task["script"] = "\n".join(rewritten_lines)
 
@@ -260,38 +253,65 @@ def import_project(
     if not archive_path.is_file():
         raise FileNotFoundError(f"工程包不存在：{archive_path}")
     output_root.mkdir(parents=True, exist_ok=True)
-    with zipfile.ZipFile(archive_path) as archive:
+    try:
+        archive_context = zipfile.ZipFile(archive_path)
+    except zipfile.BadZipFile as exc:
+        raise ValueError("工程包不是有效的 ZIP 文件。") from exc
+    with archive_context as archive:
         members = archive.infolist()
         if len(members) > MAX_PROJECT_FILES:
             raise ValueError("工程包文件数量超过安全限制。")
         total_size = sum(max(0, int(item.file_size)) for item in members)
         if total_size > MAX_PROJECT_BYTES:
             raise ValueError("工程包解压后超过 50GB 安全限制。")
-        for item in members:
-            _safe_member(item.filename)
+        if shutil.disk_usage(output_root).free < total_size + PROJECT_DISK_RESERVE_BYTES:
+            raise ValueError("工程包解压空间不足，已保留至少 512 MiB 安全空间。")
+        normalized_names = [_safe_member(item.filename).as_posix() for item in members if not item.is_dir()]
+        if len(normalized_names) != len(set(normalized_names)):
+            raise ValueError("工程包包含重复文件名。")
         try:
-            manifest = json.loads(archive.read("project.json").decode("utf-8"))
+            manifest_info = archive.getinfo("project.json")
+            if manifest_info.file_size > MAX_PROJECT_MANIFEST_BYTES:
+                raise ValueError("工程包 project.json 超过 4 MiB。")
+            manifest = json.loads(archive.read(manifest_info).decode("utf-8"))
         except (KeyError, UnicodeDecodeError, json.JSONDecodeError) as exc:
             raise ValueError("工程包 project.json 缺失或损坏。") from exc
-        if manifest.get("schemaVersion") != PROJECT_SCHEMA_VERSION:
+        if not isinstance(manifest, dict) or manifest.get("schemaVersion") != PROJECT_SCHEMA_VERSION:
             raise ValueError("不支持的工程包版本。")
         file_manifest = manifest.get("files")
         task = manifest.get("task")
         if not isinstance(file_manifest, dict) or not isinstance(task, dict):
             raise ValueError("工程包清单内容无效。")
         for archive_name, metadata in file_manifest.items():
-            _safe_member(archive_name)
+            normalized = _safe_member(archive_name).as_posix()
+            if normalized != archive_name or not isinstance(metadata, dict):
+                raise ValueError(f"工程包清单条目无效：{archive_name}")
             try:
                 info = archive.getinfo(archive_name)
             except KeyError as exc:
                 raise ValueError(f"工程包缺少文件：{archive_name}") from exc
             if info.file_size != int(metadata.get("size", -1)):
                 raise ValueError(f"工程包文件大小不匹配：{archive_name}")
+            expected_hash = str(metadata.get("sha256") or "").lower()
+            if not re.fullmatch(r"[0-9a-f]{64}", expected_hash):
+                raise ValueError(f"工程包文件缺少有效 SHA-256：{archive_name}")
 
-        with tempfile.TemporaryDirectory(prefix="t8_project_import_") as temporary:
+        expected_names = {"project.json", *file_manifest.keys()}
+        actual_names = set(normalized_names)
+        if actual_names != expected_names:
+            extra = sorted(actual_names - expected_names)
+            missing = sorted(expected_names - actual_names)
+            detail = []
+            if extra:
+                detail.append("未列入清单：" + "、".join(extra[:5]))
+            if missing:
+                detail.append("缺少：" + "、".join(missing[:5]))
+            raise ValueError("工程包文件清单不一致（" + "; ".join(detail) + "）。")
+
+        with tempfile.TemporaryDirectory(prefix=".t8_project_import_", dir=output_root) as temporary:
             temporary_root = Path(temporary).resolve()
-            archive.extractall(temporary_root)
             for archive_name, metadata in file_manifest.items():
+                archive.extract(archive_name, temporary_root)
                 path = (temporary_root / archive_name).resolve()
                 if temporary_root not in path.parents or not path.is_file():
                     raise ValueError(f"工程包文件路径无效：{archive_name}")
@@ -300,87 +320,111 @@ def import_project(
 
             new_task_id = _new_task_id(output_root)
             session_dir = (output_root / new_task_id).resolve()
-            session_dir.mkdir(parents=True)
+            combined_target = (output_root / f"{new_task_id}.wav").resolve()
+            staging_output = temporary_root / "publish"
+            staged_session = staging_output / new_task_id
+            staged_session.mkdir(parents=True)
             task_source = temporary_root / "task"
             if task_source.is_dir():
                 for path in task_source.rglob("*"):
                     if not path.is_file() or path.name == "task.json":
                         continue
-                    destination = (session_dir / path.relative_to(task_source)).resolve()
-                    if session_dir not in destination.parents:
+                    destination = (staged_session / path.relative_to(task_source)).resolve()
+                    if staged_session.resolve() not in destination.parents:
                         raise ValueError("工程任务文件路径越界。")
                     destination.parent.mkdir(parents=True, exist_ok=True)
                     shutil.copy2(path, destination)
 
             combined_source = temporary_root / "outputs" / "combined.wav"
-            combined_target = output_root / f"{new_task_id}.wav"
+            staged_combined = temporary_root / "publish-combined.wav"
             if combined_source.is_file():
-                shutil.copy2(combined_source, combined_target)
+                shutil.copy2(combined_source, staged_combined)
 
-            imported_voices = []
+            imported_voice_names: list[str] = []
             voice_role_mapping: dict[str, str] = {}
             voice_bundle = temporary_root / "voices" / "project-voices.t8voice.zip"
-            if voice_bundle.is_file():
-                with zipfile.ZipFile(voice_bundle) as voice_archive:
-                    voice_manifest = json.loads(
-                        voice_archive.read("manifest.json").decode("utf-8")
-                    )
-                source_voice_names = [
-                    str(item.get("name") or "")
-                    for item in voice_manifest.get("profiles") or []
-                    if isinstance(item, dict) and str(item.get("name") or "").strip()
-                ]
-                imported_voices = voice_library.import_bundle(
-                    voice_bundle, conflict=voice_conflict
-                )
-                if voice_conflict == "rename":
-                    voice_role_mapping = {
-                        source: imported.name
-                        for source, imported in zip(source_voice_names, imported_voices)
-                    }
-                else:
-                    voice_role_mapping = {source: source for source in source_voice_names}
+            voice_manifest = VoiceLibrary.inspect_bundle(voice_bundle) if voice_bundle.is_file() else None
+            voice_context = voice_library.transaction() if voice_manifest is not None else nullcontext(voice_library)
+            published_session = False
+            published_combined = False
+            try:
+                with voice_context as target_library:
+                    imported_voices = []
+                    if voice_manifest is not None:
+                        imported_voices = target_library._import_bundle_in_place(
+                            voice_bundle,
+                            conflict=voice_conflict,
+                        )
+                        imported_voice_names = [item.name for item in imported_voices]
+                        source_voice_names = [
+                            str(item.get("name") or "")
+                            for item in voice_manifest.get("profiles") or []
+                            if isinstance(item, dict) and str(item.get("name") or "").strip()
+                        ]
+                        if voice_conflict == "rename":
+                            voice_role_mapping = {
+                                source: imported.name for source, imported in zip(source_voice_names, imported_voices)
+                            }
+                        else:
+                            voice_role_mapping = {source: source for source in source_voice_names}
 
-            restored = json.loads(json.dumps(task, ensure_ascii=False))
-            _rewrite_task_roles(restored, voice_role_mapping)
-            restored["task_id"] = new_task_id
-            restored["imported_from"] = str(archive_path)
-            restored["imported_at"] = time.strftime("%Y-%m-%d %H:%M:%S")
-            for line in (restored.get("lines") or {}).values():
-                if not isinstance(line, dict):
-                    continue
-                relative = str(line.get("file") or "")
-                line["file"] = str(session_dir / Path(relative).name) if relative else ""
-                if isinstance(line.get("report"), dict):
-                    line["report"] = _rewrite_report_paths(line["report"], session_dir)
-            report_path = session_dir / "report.json"
-            if report_path.is_file():
-                try:
-                    report = json.loads(report_path.read_text(encoding="utf-8-sig"))
-                    report_path.write_text(
-                        json.dumps(
-                            _rewrite_report_paths(report, session_dir),
-                            ensure_ascii=False,
-                            indent=2,
-                        ),
-                        encoding="utf-8",
+                    restored = json.loads(json.dumps(task, ensure_ascii=False))
+                    _rewrite_task_roles(restored, voice_role_mapping)
+                    restored["task_id"] = new_task_id
+                    restored["imported_from"] = str(archive_path)
+                    restored["imported_at"] = time.strftime("%Y-%m-%d %H:%M:%S")
+                    for line in (restored.get("lines") or {}).values():
+                        if not isinstance(line, dict):
+                            continue
+                        relative = str(line.get("file") or "")
+                        line["file"] = str(session_dir / Path(relative).name) if relative else ""
+                        if isinstance(line.get("report"), dict):
+                            line["report"] = _rewrite_report_paths(line["report"], session_dir)
+                    staged_report = staged_session / "report.json"
+                    if staged_report.is_file():
+                        try:
+                            report = json.loads(staged_report.read_text(encoding="utf-8-sig"))
+                            staged_report.write_text(
+                                json.dumps(
+                                    _rewrite_report_paths(report, session_dir),
+                                    ensure_ascii=False,
+                                    indent=2,
+                                ),
+                                encoding="utf-8",
+                            )
+                        except (OSError, json.JSONDecodeError):
+                            pass
+                    report_path = session_dir / "report.json"
+                    restored["combined_file"] = str(combined_target) if staged_combined.is_file() else ""
+                    restored["archive_file"] = ""
+                    restored["report_file"] = str(report_path) if staged_report.is_file() else ""
+                    rewritten_candidates = [
+                        staged_session / "rewritten_edited.srt",
+                        staged_session / "rewritten.srt",
+                    ]
+                    rewritten = next(
+                        (item for item in rewritten_candidates if item.is_file()),
+                        None,
                     )
-                except (OSError, json.JSONDecodeError):
-                    pass
-            restored["combined_file"] = str(combined_target) if combined_target.is_file() else ""
-            restored["archive_file"] = ""
-            restored["report_file"] = str(report_path) if report_path.is_file() else ""
-            rewritten_candidates = [
-                session_dir / "rewritten_edited.srt",
-                session_dir / "rewritten.srt",
-            ]
-            rewritten = next((item for item in rewritten_candidates if item.is_file()), None)
-            restored["rewritten_srt_file"] = str(rewritten) if rewritten else ""
-            save_task(output_root, restored)
+                    restored["rewritten_srt_file"] = str(session_dir / rewritten.name) if rewritten else ""
+                    save_task(staging_output, restored)
+                    if session_dir.exists() or combined_target.exists():
+                        raise RuntimeError("工程导入目标发生冲突，请重试。")
+                    staged_session.replace(session_dir)
+                    published_session = True
+                    if staged_combined.is_file():
+                        staged_combined.replace(combined_target)
+                        published_combined = True
+            except Exception:
+                if published_combined:
+                    combined_target.unlink(missing_ok=True)
+                if published_session and session_dir.is_dir():
+                    shutil.rmtree(session_dir)
+                raise
 
     return {
         "task_id": new_task_id,
-        "imported_voices": [item.name for item in imported_voices],
+        "imported_voices": imported_voice_names,
         "original_task_id": manifest.get("originalTaskId"),
         "source": str(archive_path),
         "status": restored.get("status", "unknown"),

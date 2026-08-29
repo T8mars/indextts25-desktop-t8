@@ -110,3 +110,44 @@ def test_project_bundle_renames_conflicting_voice_and_task_roles(tmp_path: Path)
     assert task["settings"]["timeline_rows"][0][1] == "旁白（导入 2）"
     assert task["lines"]["1"]["report"]["role"] == "旁白（导入 2）"
     assert Path(restored_voices.get("旁白（导入 2）").audio_path).read_bytes() == b"voice"
+
+
+def test_project_bundle_rejects_files_missing_from_manifest(tmp_path: Path):
+    output, voices, task_id = _completed_project(tmp_path)
+    project = export_project(output, task_id, voices, tmp_path / "episode")
+    malicious = tmp_path / "unlisted.indextts-project.zip"
+    with zipfile.ZipFile(project) as source, zipfile.ZipFile(malicious, "w") as target:
+        for item in source.infolist():
+            target.writestr(item, source.read(item.filename))
+        target.writestr("task/unlisted.bin", b"not-in-project-manifest")
+
+    with pytest.raises(ValueError, match="未列入清单"):
+        import_project(
+            malicious,
+            tmp_path / "restored-output",
+            VoiceLibrary(tmp_path / "restored-data"),
+        )
+
+
+def test_project_bundle_rolls_back_task_and_voices_on_voice_import_failure(
+    tmp_path: Path,
+    monkeypatch,
+):
+    output, voices, task_id = _completed_project(tmp_path)
+    project = export_project(output, task_id, voices, tmp_path / "episode")
+    restored_output = tmp_path / "restored-output"
+    restored_voices = VoiceLibrary(tmp_path / "restored-data")
+    original_import = VoiceLibrary._import_bundle_in_place
+
+    def import_then_fail(self, *args, **kwargs):
+        original_import(self, *args, **kwargs)
+        raise RuntimeError("simulated late failure")
+
+    monkeypatch.setattr(VoiceLibrary, "_import_bundle_in_place", import_then_fail)
+
+    with pytest.raises(RuntimeError, match="simulated late failure"):
+        import_project(project, restored_output, restored_voices)
+
+    assert restored_voices.list() == []
+    assert not list(restored_output.glob("dialogue_*"))
+    assert not list(restored_output.glob("dialogue_*.wav"))

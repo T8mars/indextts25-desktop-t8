@@ -8,11 +8,13 @@ import os
 import re
 import shutil
 import tempfile
+import threading
 import time
 import urllib.error
 import urllib.parse
 import urllib.request
 import zipfile
+from functools import wraps
 from pathlib import Path, PurePosixPath
 from typing import Any, Callable
 
@@ -22,10 +24,12 @@ AUDIOCPP_RELEASE_API = f"https://api.github.com/repos/{AUDIOCPP_REPOSITORY}/rele
 AUDIOCPP_MODEL_REPOSITORY = "audio-cpp/audio.cpp-gguf"
 AUDIOCPP_MODEL_API = f"https://huggingface.co/api/models/{AUDIOCPP_MODEL_REPOSITORY}"
 AUDIOCPP_MODEL_FOLDER = "IndexTTS2.5-GGUF"
-COMPONENT_SCHEMA_VERSION = 1
+COMPONENT_SCHEMA_VERSION = 2
 DOWNLOAD_CHUNK = 8 * 1024 * 1024
 DISK_RESERVE_BYTES = 1024**3
 ProgressCallback = Callable[[dict[str, Any]], None]
+_COMPONENT_LOCK = threading.RLock()
+_HASH_CACHE: dict[tuple[str, int, int, int, str], str] = {}
 
 
 _BACKEND_ASSETS = {
@@ -43,6 +47,84 @@ _MODEL_FILES = {
 }
 
 
+def _synchronized(method):
+    @wraps(method)
+    def wrapped(*args, **kwargs):
+        with _COMPONENT_LOCK:
+            return method(*args, **kwargs)
+
+    return wrapped
+
+
+def _write_json_atomic(path: Path, payload: dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_suffix(path.suffix + ".tmp")
+    temporary.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    temporary.replace(path)
+
+
+def _relative_path(root: Path, path: Path) -> str:
+    return path.resolve().relative_to(root.resolve()).as_posix()
+
+
+def _resolved_manifest_path(
+    root: Path,
+    manifest: dict[str, Any],
+    relative_key: str,
+    absolute_key: str,
+    fallback: Path | None = None,
+) -> Path:
+    relative = str(manifest.get(relative_key) or "").strip()
+    if relative:
+        candidate = (root / PurePosixPath(relative)).resolve()
+        if root.resolve() in candidate.parents or candidate == root.resolve():
+            if candidate.is_file():
+                return candidate
+    absolute = Path(str(manifest.get(absolute_key) or ""))
+    if absolute.is_file():
+        return absolute.resolve()
+    if fallback is not None and fallback.is_file():
+        return fallback.resolve()
+    return Path()
+
+
+def _verified_sha256(path: Path, expected: str) -> bool:
+    stat = path.stat()
+    key = (
+        str(path.resolve()),
+        int(stat.st_size),
+        int(stat.st_mtime_ns),
+        int(getattr(stat, "st_ctime_ns", 0)),
+        expected,
+    )
+    cached = _HASH_CACHE.get(key)
+    if cached is None:
+        cached = _sha256(path)
+        _HASH_CACHE[key] = cached
+        while len(_HASH_CACHE) > 32:
+            _HASH_CACHE.pop(next(iter(_HASH_CACHE)))
+    return cached == expected
+
+
+def _file_integrity(
+    path: Path,
+    *,
+    expected_size: int = 0,
+    expected_sha256: str = "",
+    verify_hash: bool,
+) -> tuple[bool, str]:
+    if not path.is_file():
+        return False, "missing"
+    if expected_size > 0 and path.stat().st_size != expected_size:
+        return False, "size-mismatch"
+    checksum = str(expected_sha256 or "").lower()
+    if not re.fullmatch(r"[0-9a-f]{64}", checksum):
+        return True, "legacy-unverified"
+    if not verify_hash:
+        return True, "size-verified"
+    return (True, "verified") if _verified_sha256(path, checksum) else (False, "sha256-mismatch")
+
+
 def _emit(callback: ProgressCallback | None, **event) -> None:
     if callback is not None:
         callback(event)
@@ -58,6 +140,13 @@ def _request_json(url: str, timeout: float = 30.0) -> dict[str, Any] | list[Any]
     )
     with urllib.request.urlopen(request, timeout=timeout) as response:
         return json.loads(response.read().decode("utf-8"))
+
+
+def _nonnegative_int(value: Any) -> int:
+    try:
+        return max(0, int(value))
+    except (TypeError, ValueError, OverflowError):
+        return 0
 
 
 def _sha256(path: Path, callback=None) -> str:
@@ -163,9 +252,7 @@ def _download(
     except (OSError, urllib.error.URLError) as exc:
         raise RuntimeError(f"下载 {label} 失败，断点文件已保留：{exc}") from exc
     if part.stat().st_size != expected_size:
-        raise RuntimeError(
-            f"{label} 下载大小不匹配：{part.stat().st_size} != {expected_size}"
-        )
+        raise RuntimeError(f"{label} 下载大小不匹配：{part.stat().st_size} != {expected_size}")
 
     def verify_progress(received: int, total: int) -> None:
         _emit(
@@ -191,9 +278,7 @@ def _safe_extract(archive_path: Path, destination: Path) -> None:
     with zipfile.ZipFile(archive_path) as archive:
         for item in archive.infolist():
             candidate = PurePosixPath(item.filename.replace("\\", "/"))
-            if candidate.is_absolute() or any(
-                part in {"", ".", ".."} for part in candidate.parts
-            ):
+            if candidate.is_absolute() or any(part in {"", ".", ".."} for part in candidate.parts):
                 raise ValueError(f"audio.cpp 压缩包包含不安全路径：{item.filename}")
         archive.extractall(destination)
 
@@ -212,11 +297,7 @@ def _release_assets(backend: str) -> tuple[dict[str, Any], list[dict[str, Any]]]
     selected: list[dict[str, Any]] = []
     for pattern in _BACKEND_ASSETS[backend]:
         match = next(
-            (
-                item
-                for item in assets
-                if re.search(pattern, str(item.get("name") or ""), re.IGNORECASE)
-            ),
+            (item for item in assets if re.search(pattern, str(item.get("name") or ""), re.IGNORECASE)),
             None,
         )
         if match is None:
@@ -229,6 +310,7 @@ def _release_assets(backend: str) -> tuple[dict[str, Any], list[dict[str, Any]]]
     return release, selected
 
 
+@_synchronized
 def install_runtime(
     data_dir: str | Path,
     backend: str,
@@ -246,11 +328,11 @@ def install_runtime(
     downloads = root / "downloads" / tag
     install_dir = root / "runtime" / tag / backend
     required = sum(int(item.get("size") or 0) for item in assets)
-    available = shutil.disk_usage(root.parent if root.parent.exists() else root.parent.parent).free
+    root.mkdir(parents=True, exist_ok=True)
+    available = shutil.disk_usage(root).free
     if available < required + DISK_RESERVE_BYTES:
         raise RuntimeError(
-            f"audio.cpp 安装空间不足：需要至少 {(required + DISK_RESERVE_BYTES) / 1024**3:.2f}GB，"
-            f"当前可用 {available / 1024**3:.2f}GB。"
+            f"audio.cpp 安装空间不足：需要至少 {(required + DISK_RESERVE_BYTES) / 1024**3:.2f}GB，当前可用 {available / 1024**3:.2f}GB。"
         )
     _emit(
         callback,
@@ -279,38 +361,61 @@ def install_runtime(
         candidates = list(staging.rglob("audiocpp_cli.exe"))
         if not candidates:
             raise RuntimeError("官方压缩包内没有找到 audiocpp_cli.exe。")
-        if install_dir.exists():
-            shutil.rmtree(install_dir)
         install_dir.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copytree(staging, install_dir)
-    executable_candidates = list(install_dir.rglob("audiocpp_cli.exe"))
-    if not executable_candidates:
-        raise RuntimeError("audio.cpp 安装完成后可执行文件缺失。")
-    executable = executable_candidates[0].resolve()
-    manifest = {
-        "schemaVersion": COMPONENT_SCHEMA_VERSION,
-        "release": tag,
-        "releaseUrl": release.get("html_url"),
-        "backend": backend,
-        "executable": str(executable),
-        "assets": [
-            {
-                "name": item["name"],
-                "size": int(item["size"]),
-                "sha256": _checksum(item.get("digest")),
-            }
-            for item in assets
-        ],
-        "installedAt": time.strftime("%Y-%m-%d %H:%M:%S"),
-    }
-    install_dir.mkdir(parents=True, exist_ok=True)
-    (install_dir / "t8-component.json").write_text(
-        json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8"
-    )
-    root.mkdir(parents=True, exist_ok=True)
-    (root / "current-runtime.json").write_text(
-        json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8"
-    )
+        candidate_dir = install_dir.with_name(f".{install_dir.name}.new-{os.getpid()}-{time.time_ns()}")
+        backup_dir = install_dir.with_name(f".{install_dir.name}.backup-{os.getpid()}-{time.time_ns()}")
+        try:
+            shutil.copytree(staging, candidate_dir)
+        except Exception:
+            shutil.rmtree(candidate_dir, ignore_errors=True)
+            raise
+        candidate_executable = next(iter(candidate_dir.rglob("audiocpp_cli.exe")), None)
+        if candidate_executable is None:
+            shutil.rmtree(candidate_dir, ignore_errors=True)
+            raise RuntimeError("audio.cpp 候选运行时缺少可执行文件。")
+        executable_relative_to_install = candidate_executable.relative_to(candidate_dir)
+        executable = (install_dir / executable_relative_to_install).resolve()
+        manifest = {
+            "schemaVersion": COMPONENT_SCHEMA_VERSION,
+            "release": tag,
+            "releaseUrl": release.get("html_url"),
+            "backend": backend,
+            "executable": str(executable),
+            "executableRelative": _relative_path(root, executable),
+            "executableSize": candidate_executable.stat().st_size,
+            "executableSha256": _sha256(candidate_executable),
+            "assets": [
+                {
+                    "name": item["name"],
+                    "size": int(item["size"]),
+                    "sha256": _checksum(item.get("digest")),
+                }
+                for item in assets
+            ],
+            "installedAt": time.strftime("%Y-%m-%d %H:%M:%S"),
+        }
+        try:
+            _write_json_atomic(candidate_dir / "t8-component.json", manifest)
+        except Exception:
+            shutil.rmtree(candidate_dir, ignore_errors=True)
+            raise
+        had_original = install_dir.exists()
+        try:
+            if had_original:
+                install_dir.replace(backup_dir)
+        except Exception:
+            shutil.rmtree(candidate_dir, ignore_errors=True)
+            raise
+        try:
+            candidate_dir.replace(install_dir)
+            _write_json_atomic(root / "current-runtime.json", manifest)
+        except Exception:
+            shutil.rmtree(install_dir, ignore_errors=True)
+            if had_original and backup_dir.exists():
+                backup_dir.replace(install_dir)
+            raise
+        else:
+            shutil.rmtree(backup_dir, ignore_errors=True)
     _emit(
         callback,
         phase="complete",
@@ -348,12 +453,12 @@ def _model_metadata(quantization: str) -> dict[str, Any]:
         "size": int(item.get("size") or 0),
         "sha256": _checksum(lfs.get("oid")),
         "url": (
-            f"https://huggingface.co/{AUDIOCPP_MODEL_REPOSITORY}/resolve/"
-            f"{revision}/{urllib.parse.quote(wanted_path, safe='/')}?download=true"
+            f"https://huggingface.co/{AUDIOCPP_MODEL_REPOSITORY}/resolve/{revision}/{urllib.parse.quote(wanted_path, safe='/')}?download=true"
         ),
     }
 
 
+@_synchronized
 def install_model(
     data_dir: str | Path,
     quantization: str = "q8_0",
@@ -364,37 +469,65 @@ def install_model(
     root = _component_root(data_dir)
     model_dir = root / "models" / AUDIOCPP_MODEL_FOLDER
     model_path = model_dir / metadata["filename"]
-    available = shutil.disk_usage(root.parent if root.parent.exists() else root.parent.parent).free
+    download_target = model_path.with_suffix(model_path.suffix + ".download")
+    download_part = download_target.with_suffix(download_target.suffix + ".part")
+    root.mkdir(parents=True, exist_ok=True)
+    available = shutil.disk_usage(root).free
     required = int(metadata["size"])
-    existing = model_path.stat().st_size if model_path.is_file() else 0
-    remaining = max(0, required - existing)
-    if available < remaining + DISK_RESERVE_BYTES:
-        raise RuntimeError(
-            f"GGUF 模型空间不足：还需约 {(remaining + DISK_RESERVE_BYTES) / 1024**3:.2f}GB，"
-            f"当前可用 {available / 1024**3:.2f}GB。"
-        )
-    _download(
-        metadata["url"],
-        model_path,
-        expected_size=required,
-        expected_sha256=metadata["sha256"],
-        label=metadata["filename"],
-        callback=callback,
+    installed_valid = (
+        model_path.is_file()
+        and model_path.stat().st_size == required
+        and _verified_sha256(model_path, metadata["sha256"])
     )
+    existing = max(
+        download_target.stat().st_size if download_target.is_file() else 0,
+        download_part.stat().st_size if download_part.is_file() else 0,
+    )
+    remaining = max(0, required - existing)
+    if not installed_valid and available < remaining + DISK_RESERVE_BYTES:
+        raise RuntimeError(
+            f"GGUF 模型空间不足：还需约 {(remaining + DISK_RESERVE_BYTES) / 1024**3:.2f}GB，当前可用 {available / 1024**3:.2f}GB。"
+        )
     manifest = {
         "schemaVersion": COMPONENT_SCHEMA_VERSION,
         "repository": AUDIOCPP_MODEL_REPOSITORY,
         "revision": metadata["revision"],
         "quantization": str(quantization).lower(),
         "modelPath": str(model_path.resolve()),
+        "modelRelative": _relative_path(root, model_path),
         "size": required,
         "sha256": metadata["sha256"],
         "installedAt": time.strftime("%Y-%m-%d %H:%M:%S"),
     }
-    model_dir.mkdir(parents=True, exist_ok=True)
-    (model_dir / "t8-model.json").write_text(
-        json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8"
-    )
+    if installed_valid:
+        _write_json_atomic(model_dir / "t8-model.json", manifest)
+    else:
+        downloaded_model = _download(
+            metadata["url"],
+            download_target,
+            expected_size=required,
+            expected_sha256=metadata["sha256"],
+            label=metadata["filename"],
+            callback=callback,
+        )
+        candidate_model = model_path.with_name(f".{model_path.name}.new-{os.getpid()}-{time.time_ns()}")
+        backup_model = model_path.with_name(f".{model_path.name}.backup-{os.getpid()}-{time.time_ns()}")
+        model_dir.mkdir(parents=True, exist_ok=True)
+        downloaded_model.replace(candidate_model)
+        had_original = model_path.exists()
+        try:
+            if had_original:
+                model_path.replace(backup_model)
+            candidate_model.replace(model_path)
+            _write_json_atomic(model_dir / "t8-model.json", manifest)
+        except Exception:
+            candidate_model.unlink(missing_ok=True)
+            model_path.unlink(missing_ok=True)
+            if had_original and backup_model.exists():
+                backup_model.replace(model_path)
+            raise
+        else:
+            backup_model.unlink(missing_ok=True)
     _emit(
         callback,
         phase="complete",
@@ -407,7 +540,12 @@ def install_model(
     return manifest
 
 
-def component_status(data_dir: str | Path) -> dict[str, Any]:
+@_synchronized
+def component_status(
+    data_dir: str | Path,
+    *,
+    verify_hash: bool = False,
+) -> dict[str, Any]:
     root = _component_root(data_dir)
     runtime: dict[str, Any] = {}
     model: dict[str, Any] = {}
@@ -416,23 +554,54 @@ def component_status(data_dir: str | Path) -> dict[str, Any]:
     except (OSError, json.JSONDecodeError, TypeError):
         pass
     try:
-        model = json.loads(
-            (root / "models" / AUDIOCPP_MODEL_FOLDER / "t8-model.json").read_text(
-                encoding="utf-8"
-            )
-        )
+        model = json.loads((root / "models" / AUDIOCPP_MODEL_FOLDER / "t8-model.json").read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError, TypeError):
         pass
-    executable = Path(str(runtime.get("executable") or ""))
-    model_path = Path(str(model.get("modelPath") or ""))
+    runtime_fallback = None
+    release = str(runtime.get("release") or "").strip()
+    backend = str(runtime.get("backend") or "").strip()
+    if release and Path(release).name == release and backend in _BACKEND_ASSETS:
+        runtime_dir = root / "runtime" / release / backend
+        runtime_fallback = next(iter(runtime_dir.rglob("audiocpp_cli.exe")), None)
+    executable = _resolved_manifest_path(
+        root,
+        runtime,
+        "executableRelative",
+        "executable",
+        runtime_fallback,
+    )
+    model_filename = _MODEL_FILES.get(str(model.get("quantization") or "").lower())
+    model_fallback = root / "models" / AUDIOCPP_MODEL_FOLDER / model_filename if model_filename else None
+    model_path = _resolved_manifest_path(
+        root,
+        model,
+        "modelRelative",
+        "modelPath",
+        model_fallback,
+    )
+    runtime_ready, runtime_integrity = _file_integrity(
+        executable,
+        expected_size=_nonnegative_int(runtime.get("executableSize")),
+        expected_sha256=str(runtime.get("executableSha256") or ""),
+        verify_hash=True,
+    )
+    model_ready, model_integrity = _file_integrity(
+        model_path,
+        expected_size=_nonnegative_int(model.get("size")),
+        expected_sha256=str(model.get("sha256") or ""),
+        verify_hash=verify_hash,
+    )
     return {
         "root": str(root),
         "runtime": runtime,
         "model": model,
-        "runtimeReady": executable.is_file(),
-        "modelReady": model_path.is_file(),
-        "executable": str(executable) if executable.is_file() else "",
-        "modelPath": str(model_path) if model_path.is_file() else "",
+        "runtimeReady": runtime_ready,
+        "modelReady": model_ready,
+        "runtimeIntegrity": runtime_integrity,
+        "modelIntegrity": model_integrity,
+        "installedBackend": backend,
+        "executable": str(executable) if runtime_ready else "",
+        "modelPath": str(model_path) if model_ready else "",
     }
 
 

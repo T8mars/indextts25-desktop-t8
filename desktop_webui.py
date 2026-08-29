@@ -22,7 +22,6 @@ from candidate_quality import combined_candidate_score, select_best_candidate, t
 from context_emotion import suggest_context_emotions
 from audiocpp_backend import (
     AUDIOCPP_MODEL_REPOSITORY,
-    AUDIOCPP_REPOSITORY,
     probe_audiocpp,
     run_audiocpp,
 )
@@ -32,7 +31,7 @@ from audiocpp_component_manager import (
     install_runtime as install_audiocpp_runtime,
 )
 from desktop_project_bundle import export_project, import_project
-from desktop_voice_library import VoiceLibrary, VoiceProfile
+from desktop_voice_library import VoiceLibrary, VoiceProfile, safe_voice_file_stem
 from desktop_presets import delete_preset, list_presets, load_preset, save_preset
 from desktop_tasks import (
     create_task,
@@ -92,7 +91,7 @@ from runtime_metrics import (
 
 
 APP_TITLE = "T8star-Aix · IndexTTS 2.5"
-DESKTOP_VERSION = "0.21.0"
+DESKTOP_VERSION = "0.21.1"
 MODEL_MANIFEST = json.loads(
     (Path(__file__).resolve().parent / "desktop_model_manifest.json").read_text(encoding="utf-8")
 )
@@ -2519,6 +2518,7 @@ def build_app(
         return (
             status.get("executable") or gr.update(),
             status.get("modelPath") or gr.update(),
+            status.get("installedBackend") or gr.update(),
             json.dumps(status, ensure_ascii=False, indent=2),
         )
 
@@ -2540,6 +2540,7 @@ def build_app(
         return (
             status.get("executable") or result.get("executable"),
             status.get("modelPath") or gr.update(),
+            status.get("installedBackend") or str(backend),
             json.dumps(status, ensure_ascii=False, indent=2),
         )
 
@@ -2556,6 +2557,7 @@ def build_app(
         return (
             status.get("executable") or gr.update(),
             status.get("modelPath") or result.get("modelPath"),
+            status.get("installedBackend") or gr.update(),
             json.dumps(status, ensure_ascii=False, indent=2),
         )
 
@@ -2573,6 +2575,7 @@ def build_app(
         return (
             status.get("executable"),
             status.get("modelPath"),
+            status.get("installedBackend") or str(backend),
             json.dumps(status, ensure_ascii=False, indent=2),
         )
 
@@ -2589,6 +2592,38 @@ def build_app(
     ):
         if not speaker_audio:
             raise gr.Error("audio.cpp 实验后端需要音色参考 WAV。")
+        installed = audiocpp_component_status(data_dir, verify_hash=True)
+        executable = str(executable or installed.get("executable") or "").strip()
+        model_dir = str(model_dir or installed.get("modelPath") or "").strip()
+
+        def managed_path_key(value):
+            return str(Path(str(value)).expanduser().resolve()).casefold() if str(value).strip() else ""
+
+        managed_executable_values = {
+            managed_path_key(installed.get("executable")),
+            managed_path_key((installed.get("runtime") or {}).get("executable")),
+        }
+        managed_model_values = {
+            managed_path_key(installed.get("modelPath")),
+            managed_path_key((installed.get("model") or {}).get("modelPath")),
+        }
+        executable_is_managed = not executable or managed_path_key(executable) in managed_executable_values
+        model_is_managed = not model_dir or managed_path_key(model_dir) in managed_model_values
+        if executable_is_managed and not installed.get("runtimeReady"):
+            raise gr.Error(
+                "已安装的 audio.cpp 运行时缺失或校验失败，请在组件区重新安装。"
+            )
+        if model_is_managed and not installed.get("modelReady"):
+            raise gr.Error(
+                "已安装的 audio.cpp GGUF 模型缺失或校验失败，请重新下载/校验模型。"
+            )
+        if executable_is_managed:
+            executable = str(installed.get("executable") or executable)
+        if model_is_managed:
+            model_dir = str(installed.get("modelPath") or model_dir)
+        installed_backend = str(installed.get("installedBackend") or "").strip()
+        if executable_is_managed and installed_backend:
+            backend = installed_backend
         target = output_dir / f"audiocpp_{time.strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:8]}.wav"
         try:
             report = run_audiocpp(
@@ -2757,7 +2792,10 @@ def build_app(
                     continue
                 saved_line = saved_lines.get(str(saved_script_line.index)) or {}
                 saved_profile = profiles[saved_script_line.role]
-                saved_file = session_dir / f"{saved_script_line.index:04d}_{saved_profile.name}.wav"
+                saved_file = session_dir / (
+                    f"{saved_script_line.index:04d}_"
+                    f"{safe_voice_file_stem(saved_profile.name, saved_profile.profile_id)}.wav"
+                )
                 if saved_line.get("status") != "completed" or not saved_file.is_file():
                     incomplete.append(saved_script_line.index)
             if incomplete:
@@ -2863,7 +2901,9 @@ def build_app(
         for offset, line in enumerate(lines):
             progress((offset / max(len(lines), 1)), desc=f"生成第 {offset + 1}/{len(lines)} 条：{line.role}")
             profile = profiles[line.role]
-            target = session_dir / f"{line.index:04d}_{profile.name}.wav"
+            target = session_dir / (
+                f"{line.index:04d}_{safe_voice_file_stem(profile.name, profile.profile_id)}.wav"
+            )
             saved_line = (task.get("lines") or {}).get(str(line.index)) or {}
             should_reuse = bool(
                 saved_line.get("status") == "completed"
@@ -4551,7 +4591,7 @@ def build_app(
                 )
                 audiocpp_backend = gr.Dropdown(
                     choices=["cuda", "cpu", "vulkan", "hip"],
-                    value="cuda",
+                    value=audiocpp_initial_status.get("installedBackend") or "cuda",
                     label="audio.cpp 计算后端",
                 )
                 audiocpp_duration = gr.Slider(
@@ -4620,25 +4660,45 @@ def build_app(
         )
         audiocpp_refresh_status_button.click(
             audiocpp_status_event,
-            outputs=[audiocpp_executable, audiocpp_model_dir, audiocpp_report],
+            outputs=[
+                audiocpp_executable,
+                audiocpp_model_dir,
+                audiocpp_backend,
+                audiocpp_report,
+            ],
             queue=False,
         )
         audiocpp_install_runtime_button.click(
             install_audiocpp_runtime_event,
             inputs=audiocpp_install_backend,
-            outputs=[audiocpp_executable, audiocpp_model_dir, audiocpp_report],
+            outputs=[
+                audiocpp_executable,
+                audiocpp_model_dir,
+                audiocpp_backend,
+                audiocpp_report,
+            ],
             concurrency_limit=1,
         )
         audiocpp_install_model_button.click(
             install_audiocpp_model_event,
             inputs=audiocpp_quantization,
-            outputs=[audiocpp_executable, audiocpp_model_dir, audiocpp_report],
+            outputs=[
+                audiocpp_executable,
+                audiocpp_model_dir,
+                audiocpp_backend,
+                audiocpp_report,
+            ],
             concurrency_limit=1,
         )
         audiocpp_install_all_button.click(
             install_audiocpp_all_event,
             inputs=[audiocpp_install_backend, audiocpp_quantization],
-            outputs=[audiocpp_executable, audiocpp_model_dir, audiocpp_report],
+            outputs=[
+                audiocpp_executable,
+                audiocpp_model_dir,
+                audiocpp_backend,
+                audiocpp_report,
+            ],
             concurrency_limit=1,
         )
         audiocpp_probe_button.click(

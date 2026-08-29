@@ -1,8 +1,13 @@
+import json
+import math
+import wave
+import zipfile
 from pathlib import Path
 
+import numpy as np
 import pytest
 
-from desktop_voice_library import VoiceLibrary
+from desktop_voice_library import VoiceLibrary, safe_voice_file_stem
 
 
 def test_voice_library_copies_and_removes_audio(tmp_path: Path):
@@ -47,7 +52,9 @@ def test_voice_library_can_load_edit_and_rename_existing_profile(tmp_path: Path)
         library.get("角色A")
 
 
-def test_voice_library_persists_all_role_emotion_fields_and_copies_reference(tmp_path: Path):
+def test_voice_library_persists_all_role_emotion_fields_and_copies_reference(
+    tmp_path: Path,
+):
     voice = tmp_path / "voice.wav"
     emotion = tmp_path / "emotion.wav"
     voice.write_bytes(b"voice")
@@ -104,9 +111,7 @@ def test_voice_library_requires_reference_audio_for_that_mode(tmp_path: Path):
     voice = tmp_path / "voice.wav"
     voice.write_bytes(b"voice")
     with pytest.raises(ValueError, match="需要提供情感参考音频"):
-        VoiceLibrary(tmp_path / "data").save(
-            "角色A", voice, emotion_mode="reference_audio"
-        )
+        VoiceLibrary(tmp_path / "data").save("角色A", voice, emotion_mode="reference_audio")
 
 
 def test_voice_library_v2_search_favorite_quality_and_notes(tmp_path: Path):
@@ -169,8 +174,6 @@ def test_voice_bundle_round_trip_and_conflict_modes(tmp_path: Path):
 
 
 def test_voice_bundle_rejects_unsafe_members(tmp_path: Path):
-    import zipfile
-
     bundle = tmp_path / "unsafe.t8voice.zip"
     with zipfile.ZipFile(bundle, "w") as archive:
         archive.writestr("../escape.wav", b"bad")
@@ -180,3 +183,75 @@ def test_voice_bundle_rejects_unsafe_members(tmp_path: Path):
         )
     with pytest.raises(ValueError, match="不安全路径"):
         VoiceLibrary(tmp_path / "data").import_bundle(bundle)
+
+
+def test_voice_library_normalizes_aac_to_portable_pcm_wav(tmp_path: Path):
+    av = pytest.importorskip("av")
+    source = tmp_path / "voice.aac"
+    sample_rate = 16000
+    samples = np.arange(sample_rate // 5, dtype=np.float32)
+    waveform = (0.1 * np.sin(2 * math.pi * 440 * samples / sample_rate)).reshape(1, -1)
+    with av.open(str(source), mode="w", format="adts") as container:
+        stream = container.add_stream("aac", rate=sample_rate)
+        stream.layout = "mono"
+        frame = av.AudioFrame.from_ndarray(waveform, format="fltp", layout="mono")
+        frame.sample_rate = sample_rate
+        for packet in stream.encode(frame):
+            container.mux(packet)
+        for packet in stream.encode(None):
+            container.mux(packet)
+
+    saved = VoiceLibrary(tmp_path / "data").save("AAC 角色", source)
+
+    assert Path(saved.audio_path).suffix == ".wav"
+    with wave.open(saved.audio_path, "rb") as audio:
+        assert audio.getnchannels() == 1
+        assert audio.getframerate() == 24000
+        assert audio.getnframes() > 0
+
+
+def test_voice_bundle_import_is_atomic_when_later_profile_is_invalid(tmp_path: Path):
+    bundle = tmp_path / "atomic.t8voice.zip"
+    manifest = {
+        "schemaVersion": 1,
+        "profiles": [
+            {"profile_id": "first", "name": "第一位", "audio_path": "audio/first.wav"},
+            {
+                "profile_id": "second",
+                "name": "第二位",
+                "audio_path": "audio/second.wav",
+                "language": "XX",
+            },
+        ],
+    }
+    with zipfile.ZipFile(bundle, "w") as archive:
+        archive.writestr("manifest.json", json.dumps(manifest, ensure_ascii=False))
+        archive.writestr("audio/first.wav", b"first")
+        archive.writestr("audio/second.wav", b"second")
+    library = VoiceLibrary(tmp_path / "data")
+
+    with pytest.raises(ValueError, match="不支持的语言"):
+        library.import_bundle(bundle)
+
+    assert library.list() == []
+    assert not library.root.exists()
+
+
+def test_voice_bundle_rejects_unlisted_members(tmp_path: Path):
+    bundle = tmp_path / "extra.t8voice.zip"
+    manifest = {
+        "schemaVersion": 1,
+        "profiles": [{"profile_id": "a", "name": "A", "audio_path": "audio/a.wav"}],
+    }
+    with zipfile.ZipFile(bundle, "w") as archive:
+        archive.writestr("manifest.json", json.dumps(manifest))
+        archive.writestr("audio/a.wav", b"voice")
+        archive.writestr("audio/unlisted.wav", b"unexpected")
+
+    with pytest.raises(ValueError, match="未列入清单"):
+        VoiceLibrary(tmp_path / "data").import_bundle(bundle)
+
+
+def test_voice_output_stem_removes_path_components():
+    stem = safe_voice_file_stem(r"角色/../../不安全\\名称")
+    assert "/" not in stem and "\\" not in stem and ".." not in stem
