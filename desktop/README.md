@@ -31,9 +31,10 @@ Windows Electron desktop integration for IndexTTS 2.5. The packaged application 
 - optional CPU placement for Wav2Vec/CAMPPlus reference encoders and fast default-emotion condition reuse
 - no-model acceleration preflight with per-mode availability/reason, exact bundled dependency versions, refresh, and JSON diagnostic export
 - signed GitHub Release app-layer updates with resumable download, exact-file verification, explicit install confirmation, and automatic rollback
+- live model scan/download/verification progress with current file, speed, ETA, conservative disk-space preflight, resumable repair, and precise failure details
 
 The large model files are intentionally external. On first launch, select a complete IndexTTS 2.5 model directory.
-Version 0.19.1 is aligned to code revision `ee40fa7d` and model bundle `1.0.0` at revision `14166a74`. It provides separate signed update channels: GitHub Releases for the app layer and Hugging Face for the complete external model bundle. Automatic checks are read-only; download and install remain explicit user actions. App updates and model manifests are verified with Ed25519 before their file paths, hashes, or revisions are trusted. Model downloads resume in place and verify all 26 main and auxiliary files. No benchmark, model load, model download, update download, install, or acceleration mode starts automatically.
+Version 0.20.0 is aligned to code revision `ee40fa7d` and model bundle `1.0.0` at revision `14166a74`. It provides separate signed update channels: GitHub Releases for the app layer and Hugging Face for the complete external model bundle. Automatic checks are read-only; download and install remain explicit user actions. App updates and model manifests are verified with Ed25519 before their file paths, hashes, or revisions are trusted. Model repair now shows the current file, overall and phase progress, transferred bytes, live speed, ETA, and available disk space while preserving resumable Hugging Face downloads. It hashes all 26 main and auxiliary files and reports the exact failing file before the Start button is enabled. No benchmark, model load, model download, update download, install, or acceleration mode starts automatically.
 The launcher validates official model file sizes, while the downloader performs full SHA-256 verification.
 This release also supports running the portable package from Windows paths containing Chinese characters.
 AAC/M4A and other compressed reference audio is decoded by the bundled PyAV runtime, without requiring a system FFmpeg installation. Streaming previews are also encoded by bundled PyAV, so Gradio no longer calls an external `ffmpeg` or `ffprobe` executable and cannot fail with `[WinError 2]` merely because those programs are absent from `PATH`.
@@ -196,7 +197,7 @@ npm run make
 ```
 
 This builds only `@electron-forge/maker-zip`. The unpacked application is still
-available under `desktop/out/T8star-Aix-IndexTTS-2.5-v0.19.1-win32-x64` for local testing.
+available under `desktop/out/T8star-Aix-IndexTTS-2.5-v0.20.0-win32-x64` for local testing.
 The bundled runtime contains tens of thousands of small files, so Squirrel/NuGet
 can spend a long time repeatedly rewriting a multi-gigabyte package. It is not the
 recommended user distribution. If an installer is specifically required, build it

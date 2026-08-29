@@ -172,6 +172,76 @@ def test_desktop_manifest_uses_the_complete_huggingface_mirror_with_modelscope_f
     }
 
 
+def test_desktop_model_progress_reports_resume_speed_eta_and_completion():
+    events = []
+    tick = [0.0]
+
+    def clock():
+        tick[0] += 1.0
+        return tick[0]
+
+    files = {
+        "ready.bin": {"size": 100},
+        "download.bin": {"size": 300},
+    }
+    progress = desktop_model_download.BundleProgress(
+        files,
+        source="huggingface",
+        callback=events.append,
+        clock=clock,
+    )
+    progress.preflight(["download.bin"], free_bytes=4096)
+    progress.begin_file("download.bin", 1)
+    progress.resume_file(100)
+    progress.update_file(200)
+    progress.complete_file()
+    progress.verify("download.bin", 300, 300)
+    progress.done()
+
+    assert events[0]["phase"] == "preflight"
+    assert events[0]["requiredBytes"] == 300
+    assert events[0]["availableBytes"] == 4096
+    transfer = next(
+        event
+        for event in events
+        if event["phase"] == "downloading" and event["received"] == 200
+    )
+    assert transfer["bundleReceived"] == 300
+    assert transfer["bytesPerSecond"] > 0
+    assert transfer["etaSeconds"] >= 0
+    assert events[-1]["phase"] == "complete"
+    assert events[-1]["overallPercent"] == 100.0
+    assert [event["overallPercent"] for event in events] == sorted(
+        event["overallPercent"] for event in events
+    )
+
+
+def test_desktop_model_inspection_reports_hash_progress(tmp_path, monkeypatch):
+    payload = b"verified"
+    manifest = {
+        "model.bin": {
+            "size": len(payload),
+            "sha256": __import__("hashlib").sha256(payload).hexdigest(),
+        },
+        "missing.bin": {"size": 4, "sha256": "0" * 64},
+    }
+    monkeypatch.setattr(desktop_model_download, "MODEL_FILES", manifest)
+    (tmp_path / "model.bin").write_bytes(payload)
+    events = []
+
+    missing, mismatched = desktop_model_download.inspect_model_files(
+        tmp_path,
+        verify_hashes=True,
+        on_progress=lambda name, processed, total: events.append(
+            (name, processed, total)
+        ),
+    )
+
+    assert missing == ["missing.bin"]
+    assert mismatched == []
+    assert events[-1][1:] == (len(payload) + 4, len(payload) + 4)
+
+
 @pytest.mark.parametrize("relative_path", ["../escape.bin", "C:/escape.bin", "aux:data.bin", "CON.txt"])
 def test_external_model_manifest_rejects_unsafe_windows_paths(tmp_path, relative_path):
     manifest = {

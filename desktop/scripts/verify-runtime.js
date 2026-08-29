@@ -50,6 +50,8 @@ if (
   !packagedMainSource.includes('ipcMain.handle("desktop:install-update"') ||
   !packagedMainSource.includes("checkForUpdates") ||
   !packagedMainSource.includes("markUpdateHealthyIfRequested") ||
+  !packagedMainSource.includes("MODEL_DOWNLOAD_PROGRESS_PREFIX") ||
+  !packagedMainSource.includes("attachModelDownloadOutput") ||
   !packagedMainSource.includes("Hardware probe only (model not loaded)") ||
   !packagedPreloadSource.includes("refreshDiagnostics") ||
   !packagedPreloadSource.includes("exportDiagnostics") ||
@@ -60,6 +62,7 @@ if (
   !packagedRendererSource.includes("renderAccelerationDiagnostics") ||
   !packagedRendererSource.includes("renderBenchmark") ||
   !packagedRendererSource.includes("renderUpdateReport") ||
+  !packagedRendererSource.includes("renderModelDownload") ||
   !packagedDiagnosticSource.includes("createDiagnosticReport") ||
   !packagedDiagnosticSource.includes("aio.lib/cufile.lib") ||
   !packagedHtmlSource.includes('id="runtimeProfile"') ||
@@ -72,6 +75,8 @@ if (
   !packagedHtmlSource.includes('id="checkUpdatesButton"') ||
   !packagedHtmlSource.includes('id="downloadUpdateButton"') ||
   !packagedHtmlSource.includes('id="installUpdateButton"') ||
+  !packagedHtmlSource.includes('id="modelDownloadPanel"') ||
+  !packagedHtmlSource.includes('id="modelDownloadProgress"') ||
   !packagedUpdateSource.includes("verifyManifestSignature") ||
   !packagedUpdateSource.includes("verifyPayloadFiles") ||
   !["low_vram", "balanced", "max_speed", "compatibility"].every((name) =>

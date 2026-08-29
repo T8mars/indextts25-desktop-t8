@@ -84,6 +84,11 @@ for (const profileControl of [
   "updateModelButton",
   "cancelUpdateButton",
   "installUpdateButton",
+  "modelDownloadPanel",
+  "modelDownloadProgress",
+  "modelDownloadTitle",
+  "modelDownloadDetail",
+  "modelDownloadDisk",
 ]) {
   assert.ok(htmlSource.includes(`id="${profileControl}"`), `Launcher must expose ${profileControl}.`);
 }
@@ -104,6 +109,8 @@ assert.match(releaseWorkflowSource, /desktop-update-manifest\.sig/);
 assert.match(releaseWorkflowSource, /desktop-app-update-/);
 assert.match(mainSource, /fetchText\("https:\/\/api\.github\.com\/repos\/index-tts\/index-tts\/commits\/main"/);
 assert.match(mainSource, /resolveModelBundleUpdate/);
+assert.match(mainSource, /@@T8_MODEL_PROGRESS@@/);
+assert.match(mainSource, /attachModelDownloadOutput/);
 assert.doesNotMatch(mainSource, /huggingface\.co\/api\/models\/t8star\/IndexTTS-2\.5-Comfy/);
 assert.match(mainSource, /Hardware probe only \(model not loaded\)/);
 assert.match(mainSource, /probe_acceleration/);

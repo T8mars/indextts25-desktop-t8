@@ -248,6 +248,40 @@ input, select {
 .update-progress progress { width: 100%; height: 12px; accent-color: var(--accent); }
 .update-progress span { color: var(--muted); font-size: 12px; }
 .update-install-actions { justify-content: flex-end; margin-top: 12px; }
+.model-download-card {
+  margin-top: 18px;
+  padding: 14px;
+  border: 1px solid rgba(251, 114, 153, 0.3);
+  border-radius: 12px;
+  background: rgba(251, 114, 153, 0.055);
+}
+.model-download-heading {
+  display: flex;
+  justify-content: space-between;
+  gap: 16px;
+  margin-bottom: 10px;
+  font-size: 12px;
+}
+.model-download-heading strong { color: #ffd0df; }
+.model-download-heading span {
+  color: var(--muted);
+  text-align: right;
+  overflow-wrap: anywhere;
+}
+.model-download-card progress {
+  width: 100%;
+  height: 14px;
+  accent-color: #fb7299;
+}
+.model-download-disk {
+  min-height: 18px;
+  margin: 8px 0 0;
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.55;
+}
+.model-download-disk.ready { color: #7be3ad; }
+.model-download-disk.warning { color: #ffc879; }
 
 button {
   border: 0;
@@ -316,5 +350,7 @@ footer { padding: 22px 4px 0; text-align: center; color: #71798a; font-size: 12p
   .diagnostics-grid { grid-template-columns: 1fr; }
   .update-results { grid-template-columns: 1fr; }
   .update-progress { grid-template-columns: 1fr; }
+  .model-download-heading { flex-direction: column; gap: 5px; }
+  .model-download-heading span { text-align: left; }
   .actions button { width: 100%; }
 }

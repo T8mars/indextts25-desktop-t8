@@ -25,7 +25,8 @@ const {
 } = require("./runtime_profiles");
 
 const APP_TITLE = "T8star-Aix · IndexTTS 2.5";
-const COMFY_NODE_VERSION = "0.18.0";
+const COMFY_NODE_VERSION = "0.19.0";
+const MODEL_DOWNLOAD_PROGRESS_PREFIX = "@@T8_MODEL_PROGRESS@@";
 const MODEL_URLS = {
   huggingface: "https://huggingface.co/t8star/IndexTTS-2.5-Comfy",
   modelscope: "https://modelscope.cn/models/IndexTeam/IndexTTS-2.5"
@@ -63,6 +64,7 @@ let state = {
   updateReport: null,
   updateDownload: null,
   updateReady: false,
+  modelDownload: null,
   modelBundleVersion: "",
   autoCheckUpdates: true,
   updateChannel: "stable",
@@ -638,6 +640,49 @@ function appendLog(rawLine) {
   }
 }
 
+function handleModelDownloadLine(line) {
+  const text = String(line || "").trimEnd();
+  if (!text) return;
+  if (!text.startsWith(MODEL_DOWNLOAD_PROGRESS_PREFIX)) {
+    appendLog(text);
+    return;
+  }
+  try {
+    const progress = JSON.parse(text.slice(MODEL_DOWNLOAD_PROGRESS_PREFIX.length));
+    updateState({
+      modelDownload: {
+        ...(state.modelDownload || {}),
+        ...progress,
+        status: progress.phase === "complete"
+          ? "complete"
+          : progress.phase === "error"
+            ? "error"
+            : "active"
+      },
+      message: progress.message || state.message
+    });
+  } catch (error) {
+    appendLog(`无法解析模型下载进度：${error.message}`);
+  }
+}
+
+function attachModelDownloadOutput(processRef) {
+  let stdoutBuffer = "";
+  const flushLines = (final = false) => {
+    const parts = stdoutBuffer.split(/\r?\n/);
+    const tail = parts.pop() || "";
+    stdoutBuffer = final ? "" : tail;
+    for (const line of parts) handleModelDownloadLine(line);
+    if (final && tail) handleModelDownloadLine(tail);
+  };
+  processRef.stdout.on("data", (chunk) => {
+    stdoutBuffer += chunk.toString("utf8");
+    flushLines(false);
+  });
+  processRef.stderr.on("data", (chunk) => appendLog(chunk.toString("utf8")));
+  processRef.on("close", () => flushLines(true));
+}
+
 async function probeRuntimeHardware() {
   const runtime = runtimePaths();
   const pythonPathParts = [runtime.backendRoot, runtime.sitePackages];
@@ -1081,7 +1126,15 @@ async function downloadExternalModel(source) {
     message: `正在从 ${source === "modelscope" ? "ModelScope" : "Hugging Face"} 下载模型…`,
     modelDir: target,
     modelValid: false,
-    missingFiles: []
+    missingFiles: [],
+    modelDownload: {
+      status: "active",
+      phase: "starting",
+      source,
+      overallPercent: 0,
+      phasePercent: 0,
+      message: "正在启动模型检查与下载任务…"
+    }
   });
   appendLog(`Downloading external model from ${source} to ${target}`);
   const downloadArguments = ["-u", scriptPath, "--target", target, "--source", source];
@@ -1104,8 +1157,7 @@ async function downloadExternalModel(source) {
 
   const processRef = downloadProcess;
   cancelledDownloadProcess = null;
-  processRef.stdout.on("data", (chunk) => appendLog(chunk.toString("utf8")));
-  processRef.stderr.on("data", (chunk) => appendLog(chunk.toString("utf8")));
+  attachModelDownloadOutput(processRef);
 
   const exitCode = await new Promise((resolve) => {
     processRef.on("error", (error) => {
@@ -1133,15 +1185,35 @@ async function downloadExternalModel(source) {
       modelDir: target,
       modelValid: true,
       missingFiles: [],
-      modelBundleVersion: validation.manifest.bundleVersion
+      modelBundleVersion: validation.manifest.bundleVersion,
+      modelDownload: {
+        ...(state.modelDownload || {}),
+        status: "complete",
+        phase: "complete",
+        overallPercent: 100,
+        phasePercent: 100,
+        message: "完整模型已下载并通过 SHA-256 校验。"
+      }
     });
   } else {
+    const reportedError = String(state.modelDownload?.error || "").trim();
     updateState({
       phase: "error",
-      message: wasCancelled ? "模型下载已取消，可稍后继续" : "模型下载未完成，请查看日志后重试",
+      message: wasCancelled
+        ? "模型下载已取消，可稍后继续"
+        : reportedError || "模型下载未完成，请查看日志后重试",
       modelDir: target,
-      modelValid: validation.valid,
-      missingFiles: validation.missingFiles
+      modelValid: false,
+      missingFiles: validation.missingFiles,
+      modelDownload: {
+        ...(state.modelDownload || {}),
+        status: wasCancelled ? "cancelled" : "error",
+        message: wasCancelled
+          ? "下载已取消，保留的断点文件可在下次继续。"
+          : reportedError
+            ? `失败：${reportedError}`
+            : "模型下载或校验失败，请查看错误日志后重试。"
+      }
     });
   }
   return state;
@@ -1154,7 +1226,15 @@ function cancelModelDownload() {
   cancelledDownloadProcess = processRef;
   activeModelDownloadBundle = null;
   processRef.kill();
-  updateState({ phase: "error", message: "正在取消模型下载，可稍后继续断点下载" });
+  updateState({
+    phase: "error",
+    message: "正在取消模型下载，可稍后继续断点下载",
+    modelDownload: {
+      ...(state.modelDownload || {}),
+      status: "cancelling",
+      message: "正在停止下载；已经写入的断点文件不会删除。"
+    }
+  });
 }
 
 function stopPythonService() {

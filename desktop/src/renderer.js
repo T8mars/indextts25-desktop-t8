@@ -40,6 +40,11 @@ const elements = {
   downloadModelscopeButton: document.querySelector("#downloadModelscopeButton"),
   downloadHuggingfaceButton: document.querySelector("#downloadHuggingfaceButton"),
   cancelDownloadButton: document.querySelector("#cancelDownloadButton"),
+  modelDownloadPanel: document.querySelector("#modelDownloadPanel"),
+  modelDownloadProgress: document.querySelector("#modelDownloadProgress"),
+  modelDownloadTitle: document.querySelector("#modelDownloadTitle"),
+  modelDownloadDetail: document.querySelector("#modelDownloadDetail"),
+  modelDownloadDisk: document.querySelector("#modelDownloadDisk"),
   huggingfaceButton: document.querySelector("#huggingfaceButton"),
   modelscopeButton: document.querySelector("#modelscopeButton"),
   openLogsButton: document.querySelector("#openLogsButton"),
@@ -71,6 +76,65 @@ const accelerationLabels = {
 };
 
 let currentState = {};
+
+function formatBytes(value) {
+  const bytes = Number(value);
+  if (!Number.isFinite(bytes) || bytes < 0) return "–";
+  if (bytes < 1024) return `${Math.round(bytes)} B`;
+  const units = ["KiB", "MiB", "GiB", "TiB"];
+  let amount = bytes;
+  let index = -1;
+  do {
+    amount /= 1024;
+    index += 1;
+  } while (amount >= 1024 && index < units.length - 1);
+  return `${amount >= 100 ? amount.toFixed(0) : amount.toFixed(1)} ${units[index]}`;
+}
+
+function formatEta(value) {
+  const seconds = Number(value);
+  if (!Number.isFinite(seconds) || seconds < 0) return "计算中";
+  if (seconds < 60) return `${Math.ceil(seconds)} 秒`;
+  if (seconds < 3600) return `${Math.ceil(seconds / 60)} 分钟`;
+  const hours = Math.floor(seconds / 3600);
+  const minutes = Math.ceil((seconds % 3600) / 60);
+  return `${hours} 小时 ${minutes} 分钟`;
+}
+
+function renderModelDownload(download) {
+  elements.modelDownloadPanel.hidden = !download;
+  if (!download) return;
+  elements.modelDownloadProgress.value = Number(download.overallPercent || 0);
+  elements.modelDownloadTitle.textContent = download.message || "正在准备模型下载…";
+
+  const details = [];
+  if (download.file) {
+    const position = download.fileCount
+      ? `文件 ${download.fileIndex || 0}/${download.fileCount}`
+      : "当前文件";
+    details.push(`${position}：${download.file}`);
+  }
+  if (download.phase === "downloading" && Number(download.total) > 0) {
+    details.push(`${formatBytes(download.received)} / ${formatBytes(download.total)}`);
+    if (Number(download.bytesPerSecond) > 0) {
+      details.push(`${formatBytes(download.bytesPerSecond)}/s`);
+      details.push(`预计剩余 ${formatEta(download.etaSeconds)}`);
+    }
+  } else if (["scanning", "verifying"].includes(download.phase) && Number(download.total) > 0) {
+    details.push(`已处理 ${formatBytes(download.received)} / ${formatBytes(download.total)}`);
+  }
+  elements.modelDownloadDetail.textContent = details.join(" · ") || "进度信息准备中…";
+
+  if (Number.isFinite(Number(download.availableBytes))) {
+    const required = formatBytes(download.requiredBytes);
+    const available = formatBytes(download.availableBytes);
+    elements.modelDownloadDisk.textContent = `磁盘预检：最多还需 ${required}，当前可用 ${available}${download.warning ? `。${download.warning}` : "。"}`;
+    elements.modelDownloadDisk.className = `model-download-disk ${download.diskSufficient === false ? "warning" : "ready"}`;
+  } else {
+    elements.modelDownloadDisk.textContent = "";
+    elements.modelDownloadDisk.className = "model-download-disk";
+  }
+}
 
 function renderProfileHint(selectedProfile) {
   const recommendation = currentState.recommendedProfile || "compatibility";
@@ -259,6 +323,7 @@ function renderState(state) {
   renderAccelerationDiagnostics(state.accelerationDiagnostics, state.diagnosticsBusy);
   renderBenchmark(state.benchmarkReport, busy, Boolean(state.modelValid));
   renderUpdateReport(state.updateReport, state.updateBusy);
+  renderModelDownload(state.modelDownload);
   elements.startButton.disabled = !state.modelValid || busy;
   elements.chooseModelButton.disabled = busy;
   elements.downloadModelscopeButton.disabled = busy;
