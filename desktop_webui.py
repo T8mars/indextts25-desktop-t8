@@ -26,6 +26,12 @@ from audiocpp_backend import (
     probe_audiocpp,
     run_audiocpp,
 )
+from audiocpp_component_manager import (
+    component_status as audiocpp_component_status,
+    install_model as install_audiocpp_model,
+    install_runtime as install_audiocpp_runtime,
+)
+from desktop_project_bundle import export_project, import_project
 from desktop_voice_library import VoiceLibrary, VoiceProfile
 from desktop_presets import delete_preset, list_presets, load_preset, save_preset
 from desktop_tasks import (
@@ -86,7 +92,7 @@ from runtime_metrics import (
 
 
 APP_TITLE = "T8star-Aix · IndexTTS 2.5"
-DESKTOP_VERSION = "0.20.0"
+DESKTOP_VERSION = "0.21.0"
 MODEL_MANIFEST = json.loads(
     (Path(__file__).resolve().parent / "desktop_model_manifest.json").read_text(encoding="utf-8")
 )
@@ -777,6 +783,7 @@ def build_app(
     )
     exact_vocab_path = next((path for path in exact_vocab_candidates if path.is_file()), None)
     voice_library = VoiceLibrary(data_dir)
+    audiocpp_initial_status = audiocpp_component_status(data_dir)
     runtime_fallback_used = False
     runtime_fallback_note = ""
     initial_tts = tts
@@ -1899,7 +1906,7 @@ def build_app(
             raise gr.Error("预设不存在。")
         return gr.update(choices=[""] + list_presets(data_dir), value=""), f"已删除预设：{name}"
 
-    def voice_rows():
+    def voice_rows(query="", tags="", favorites_only=False):
         def emotion_summary(item: VoiceProfile) -> str:
             if item.emotion_mode == "speaker":
                 return "跟随音色参考"
@@ -1915,13 +1922,35 @@ def build_app(
             suffix = " · 随机原型" if item.emotion_use_random else ""
             return "八维向量 · " + (" / ".join(populated) or "全零") + suffix
 
-        return [
-            [item.name, item.language, emotion_summary(item), item.audio_path]
-            for item in voice_library.list()
-        ]
+        rows = []
+        for item in voice_library.search(
+            str(query or ""), tags=str(tags or ""), favorites_only=bool(favorites_only)
+        ):
+            quality = item.quality or {}
+            score = quality.get("score")
+            quality_text = (
+                f"{score}/100 · {quality.get('grade', '')}" if score is not None else "未检测"
+            )
+            rows.append(
+                [
+                    "★" if item.favorite else "",
+                    item.name,
+                    "、".join(item.tags),
+                    item.language,
+                    quality_text,
+                    emotion_summary(item),
+                    item.notes,
+                    item.audio_path,
+                ]
+            )
+        return rows
 
     def voice_choices():
         return [item.name for item in voice_library.list()]
+
+    def filter_voice_library_event(query, tags, favorites_only):
+        rows = voice_rows(query, tags, favorites_only)
+        return rows, f"当前显示 {len(rows)} 个音色；搜索会匹配名称、标签和备注。"
 
     def load_single_voice_event(name):
         """Load a persisted voice into the regular single-generation audio input."""
@@ -1973,8 +2002,16 @@ def build_app(
         emotion_random_value,
         *values,
     ):
-        vector_values = values[:8]
-        dictionary_text, selected_voice, update_selected = values[8:]
+        if len(values) >= 14:
+            tags_value, favorite_value, notes_value = values[:3]
+            vector_values = values[3:11]
+            dictionary_text, selected_voice, update_selected = values[11:14]
+        elif len(values) >= 11:  # Desktop 0.20 and older event/test compatibility.
+            tags_value, favorite_value, notes_value = "", False, ""
+            vector_values = values[:8]
+            dictionary_text, selected_voice, update_selected = values[8:11]
+        else:
+            raise gr.Error("保存角色音色参数不完整，请刷新页面后重试。")
         if not audio:
             raise gr.Error("请上传角色的音色参考音频。")
         if update_selected and not selected_voice:
@@ -1984,6 +2021,11 @@ def build_app(
         except (IndexError, TypeError, ValueError) as exc:
             raise gr.Error("请选择有效的角色情感模式。") from exc
         try:
+            try:
+                waveform, sample_rate = torchaudio.load(str(audio))
+                quality = analyze_reference_audio(waveform, int(sample_rate))
+            except Exception:
+                quality = {}
             profile = voice_library.save(
                 name,
                 audio,
@@ -1995,6 +2037,10 @@ def build_app(
                 emotion_vector=vector_values,
                 emotion_use_random=bool(emotion_random_value),
                 pronunciation_dictionary=str(dictionary_text or ""),
+                tags=str(tags_value or ""),
+                favorite=bool(favorite_value),
+                notes=str(notes_value or ""),
+                quality=quality,
                 replace_name_or_id=selected_voice if update_selected else None,
             )
         except Exception as exc:
@@ -2008,7 +2054,10 @@ def build_app(
             profile.audio_path,
             f"已同步“{profile.name}”到语音生成页，可直接复用其音色参考。",
             False,
-            f"已保存角色音色：{profile.name}。参考音频已复制到用户数据目录。",
+            (
+                f"已保存角色音色：{profile.name}。参考音频质量 "
+                f"{profile.quality.get('score', '—')}/100（{profile.quality.get('grade', '未评级')}）。"
+            ),
         )
 
     def load_voice_event(name):
@@ -2029,8 +2078,43 @@ def build_app(
             profile.emotion_use_random,
             *profile.emotion_vector,
             profile.pronunciation_dictionary,
+            "、".join(profile.tags),
+            profile.favorite,
+            profile.notes,
             True,
             f"已载入：{profile.name}。可直接试听；修改后勾选“更新所选角色”即可覆盖或改名。",
+        )
+
+    def export_voice_bundle_event(selected_voice, export_all):
+        names = None if bool(export_all) else [str(selected_voice or "").strip()]
+        if names is not None and not names[0]:
+            raise gr.Error("请选择一个角色，或勾选导出全部音色。")
+        target = (
+            data_dir
+            / "exports"
+            / f"T8star-Aix-voices-{time.strftime('%Y%m%d-%H%M%S')}"
+        )
+        try:
+            bundle = voice_library.export_bundle(target, names)
+        except Exception as exc:
+            raise gr.Error(f"导出音色包失败：{exc}") from exc
+        return str(bundle), f"已导出可供桌面端和 ComfyUI 共用的音色包：{bundle.name}"
+
+    def import_voice_bundle_event(bundle_path, conflict_mode):
+        if not bundle_path:
+            raise gr.Error("请先选择 .t8voice.zip 音色包。")
+        try:
+            imported = voice_library.import_bundle(bundle_path, conflict=str(conflict_mode))
+        except Exception as exc:
+            raise gr.Error(f"导入音色包失败：{exc}") from exc
+        choices = voice_choices()
+        names = "、".join(item.name for item in imported) or "没有新增角色"
+        return (
+            voice_rows(),
+            gr.update(choices=choices, value=imported[0].name if imported else None),
+            gr.update(choices=choices),
+            gr.update(choices=choices),
+            f"音色包导入完成：{names}",
         )
 
     def delete_voice_event(name, single_selected=None):
@@ -2286,6 +2370,48 @@ def build_app(
             json.dumps(report_payload, ensure_ascii=False, indent=2),
         )
 
+    def export_dialogue_project_event(task_id):
+        task_id = str(task_id or "").strip()
+        if not task_id:
+            raise gr.Error("请先选择一个已保存任务。")
+        target = (
+            data_dir
+            / "exports"
+            / f"T8star-Aix-{task_id}-{time.strftime('%Y%m%d-%H%M%S')}"
+        )
+        try:
+            project = export_project(output_dir, task_id, voice_library, target)
+        except Exception as exc:
+            raise gr.Error(f"导出完整配音工程失败：{exc}") from exc
+        return str(project), f"完整工程已导出：{project.name}。其中包含任务、参数、时间轴、逐句音频、报告和所用音色。"
+
+    def import_dialogue_project_event(project_path, voice_conflict):
+        if not project_path:
+            raise gr.Error("请先选择 .indextts-project.zip 工程包。")
+        try:
+            result = import_project(
+                project_path,
+                output_dir,
+                voice_library,
+                voice_conflict=str(voice_conflict),
+            )
+            loaded = list(load_dialogue_task_editor_event(result["task_id"]))
+        except Exception as exc:
+            raise gr.Error(f"导入完整配音工程失败：{exc}") from exc
+        imported_voices = "、".join(result["imported_voices"]) or "无（使用了现有音色或工程未包含音色）"
+        loaded[7] = (
+            f"工程已导入为任务 {result['task_id']}；导入音色：{imported_voices}。"
+            "可以继续未完成任务、单句重做或直接重新混音。"
+        )
+        choices = voice_choices()
+        return (
+            gr.update(choices=task_choices(output_dir), value=result["task_id"]),
+            *loaded,
+            voice_rows(),
+            gr.update(choices=choices),
+            gr.update(choices=choices),
+        )
+
     def select_timeline_row_event(edited_rows, event: gr.SelectData):
         if isinstance(edited_rows, dict):
             rows = list(edited_rows.get("data") or [])
@@ -2384,7 +2510,71 @@ def build_app(
         )
 
     def probe_audiocpp_event(executable):
+        if not str(executable or "").strip():
+            executable = audiocpp_component_status(data_dir).get("executable")
         return json.dumps(probe_audiocpp(executable), ensure_ascii=False, indent=2)
+
+    def audiocpp_status_event():
+        status = audiocpp_component_status(data_dir)
+        return (
+            status.get("executable") or gr.update(),
+            status.get("modelPath") or gr.update(),
+            json.dumps(status, ensure_ascii=False, indent=2),
+        )
+
+    def _audiocpp_progress(progress):
+        def callback(event):
+            percent = max(0.0, min(100.0, float(event.get("percent") or 0.0)))
+            progress(percent / 100.0, desc=str(event.get("message") or event.get("label") or "audio.cpp"))
+
+        return callback
+
+    def install_audiocpp_runtime_event(backend, progress=gr.Progress()):
+        try:
+            result = install_audiocpp_runtime(
+                data_dir, str(backend), callback=_audiocpp_progress(progress)
+            )
+            status = audiocpp_component_status(data_dir)
+        except Exception as exc:
+            raise gr.Error(f"安装 audio.cpp 运行时失败：{exc}") from exc
+        return (
+            status.get("executable") or result.get("executable"),
+            status.get("modelPath") or gr.update(),
+            json.dumps(status, ensure_ascii=False, indent=2),
+        )
+
+    def install_audiocpp_model_event(quantization, progress=gr.Progress()):
+        try:
+            result = install_audiocpp_model(
+                data_dir,
+                str(quantization),
+                callback=_audiocpp_progress(progress),
+            )
+            status = audiocpp_component_status(data_dir)
+        except Exception as exc:
+            raise gr.Error(f"下载 audio.cpp GGUF 模型失败：{exc}") from exc
+        return (
+            status.get("executable") or gr.update(),
+            status.get("modelPath") or result.get("modelPath"),
+            json.dumps(status, ensure_ascii=False, indent=2),
+        )
+
+    def install_audiocpp_all_event(backend, quantization, progress=gr.Progress()):
+        callback = _audiocpp_progress(progress)
+        try:
+            runtime = install_audiocpp_runtime(data_dir, str(backend), callback=callback)
+            model = install_audiocpp_model(
+                data_dir, str(quantization), callback=callback
+            )
+            status = audiocpp_component_status(data_dir)
+        except Exception as exc:
+            raise gr.Error(f"一键安装 audio.cpp 完整组件失败：{exc}") from exc
+        status["lastInstall"] = {"runtime": runtime, "model": model}
+        return (
+            status.get("executable"),
+            status.get("modelPath"),
+            json.dumps(status, ensure_ascii=False, indent=2),
+        )
 
     def generate_audiocpp_event(
         executable,
@@ -3793,6 +3983,7 @@ def build_app(
         with gr.Tab("角色音色库"):
             gr.Markdown(
                 "把每个角色的音色与独立情感保存一次，批量台词和 SRT 会按角色名自动匹配。"
+                "音色库 2.0 支持标签、收藏、备注、保存时质量评分和便携音色包；"
                 "音色和情感参考音频都会复制到 Electron 用户数据目录，原文件移动后仍可使用。"
             )
             with gr.Row():
@@ -3841,6 +4032,17 @@ def build_app(
                         placeholder="每行：文字|读音|语言，例如 行长|HANG2 ZHANG3|ZH",
                         lines=4,
                     )
+                    with gr.Row():
+                        voice_tags = gr.Textbox(
+                            label="标签（逗号分隔）",
+                            placeholder="例如：女声、旁白、温柔、日语",
+                        )
+                        voice_favorite = gr.Checkbox(value=False, label="收藏音色")
+                    voice_notes = gr.TextArea(
+                        label="备注（可搜索）",
+                        placeholder="例如：纪录片旁白；适合平静情绪；录制于安静环境",
+                        lines=2,
+                    )
                     save_voice_button = gr.Button("保存角色音色", variant="primary")
                 with gr.Column():
                     delete_voice_select = gr.Dropdown(
@@ -3854,9 +4056,51 @@ def build_app(
                         label="更新所选角色（允许改名）",
                     )
                     delete_voice_button = gr.Button("删除角色音色", variant="stop")
+                    with gr.Row():
+                        voice_search = gr.Textbox(
+                            label="搜索名称/标签/备注", placeholder="输入关键词"
+                        )
+                        voice_tag_filter = gr.Textbox(
+                            label="必须包含标签", placeholder="多个标签用逗号分隔"
+                        )
+                    voice_favorites_only = gr.Checkbox(
+                        value=False, label="只显示收藏"
+                    )
+                    filter_voice_button = gr.Button("筛选音色库")
+                    with gr.Accordion("音色包导入 / 导出（桌面与 ComfyUI 共用）", open=False):
+                        voice_bundle_import = gr.File(
+                            label="导入 .t8voice.zip",
+                            file_types=[".zip"],
+                            type="filepath",
+                        )
+                        voice_import_conflict = gr.Dropdown(
+                            choices=[
+                                ("同名自动改名", "rename"),
+                                ("同名覆盖", "replace"),
+                                ("同名跳过", "skip"),
+                            ],
+                            value="rename",
+                            label="同名音色处理",
+                        )
+                        with gr.Row():
+                            import_voice_bundle_button = gr.Button("导入音色包")
+                            export_all_voices = gr.Checkbox(value=True, label="导出全部音色")
+                            export_voice_bundle_button = gr.Button("导出音色包")
+                        voice_bundle_download = gr.File(
+                            label="音色包下载", interactive=False
+                        )
                     voice_status = gr.Markdown("尚未操作。DeepSpeed 等可选依赖与音色库无关。")
             voice_table = gr.Dataframe(
-                headers=["角色", "语言", "独立情感设置", "本地音色音频"],
+                headers=[
+                    "收藏",
+                    "角色",
+                    "标签",
+                    "语言",
+                    "参考质量",
+                    "独立情感设置",
+                    "备注",
+                    "本地音色音频",
+                ],
                 value=voice_rows(),
                 interactive=False,
                 wrap=True,
@@ -4137,6 +4381,36 @@ def build_app(
                     )
                     retry_dialogue_line_button = gr.Button("重做选中/指定句并重新合并")
                     rebuild_dialogue_timeline_button = gr.Button("按编辑时间轴重新混音（不重新生成）")
+                with gr.Accordion("完整配音工程导入 / 导出", open=False):
+                    gr.Markdown(
+                        "工程包会保存脚本/SRT、角色与情感、全部生成参数、可编辑时间轴、"
+                        "逐句 WAV、合并音频、字幕和报告，并附带当前任务使用的便携音色包。"
+                    )
+                    with gr.Row():
+                        export_dialogue_project_button = gr.Button(
+                            "导出当前任务工程", variant="secondary"
+                        )
+                        dialogue_project_download = gr.File(
+                            label="完整工程包下载", interactive=False
+                        )
+                    with gr.Row():
+                        dialogue_project_import = gr.File(
+                            label="导入 .indextts-project.zip",
+                            file_types=[".zip"],
+                            type="filepath",
+                        )
+                        project_voice_conflict = gr.Dropdown(
+                            choices=[
+                                ("同名音色自动改名", "rename"),
+                                ("同名音色覆盖", "replace"),
+                                ("同名音色跳过", "skip"),
+                            ],
+                            value="rename",
+                            label="工程内音色冲突处理",
+                        )
+                        import_dialogue_project_button = gr.Button(
+                            "导入并打开工程", variant="primary"
+                        )
                 gr.Markdown(
                     "操作：可直接拖动下方音频块改变位置，或拖动左右手柄改变起止时间；"
                     "靠近其他台词边界和 ASR 逐字时间点会自动吸附，按住 Alt 可临时关闭吸附。"
@@ -4213,18 +4487,48 @@ def build_app(
         with gr.Tab("实验 audio.cpp 后端"):
             gr.Markdown(
                 "这是与默认 Python 推理完全隔离的可选后端，不会自动替换当前模型。"
-                f"先从 [audio.cpp 官方发布页]({AUDIOCPP_REPOSITORY}/releases) 获取 Windows CLI，"
-                f"再从 [官方 GGUF 仓库]({AUDIOCPP_MODEL_REPOSITORY}) 下载 `IndexTTS2.5-GGUF`。"
-                "Q8 模型约 3.5GB；其文本归一化实现与官方 Python 路径并非所有边界输入都完全一致，"
+                "现在可一键安装经过 Release SHA-256 校验的 Windows 运行时，并从"
+                f" [官方 GGUF 仓库](https://huggingface.co/{AUDIOCPP_MODEL_REPOSITORY}) 自动下载固定 revision 模型。"
+                "Q8 模型约 3.5GB；下载支持断点续传，CUDA 安装会同时包含匹配的官方 CUDA 12.4 运行库。"
+                "其文本归一化实现与官方 Python 路径并非所有边界输入都完全一致，"
                 "请先对中文、英语、日语、西语和阿语做试听对比。"
             )
+            with gr.Accordion("一键安装 / 更新可选组件", open=True):
+                with gr.Row():
+                    audiocpp_install_backend = gr.Dropdown(
+                        choices=[
+                            ("NVIDIA CUDA 12.4（含运行库）", "cuda"),
+                            ("Vulkan（NVIDIA/AMD/Intel）", "vulkan"),
+                            ("CPU", "cpu"),
+                        ],
+                        value="cuda",
+                        label="运行时版本",
+                    )
+                    audiocpp_quantization = gr.Dropdown(
+                        choices=[
+                            ("Q8_0 · 约 3.5GB（推荐）", "q8_0"),
+                            ("F16 · 约 4.5GB", "f16"),
+                            ("原始精度 · 约 7.9GB", "original"),
+                        ],
+                        value="q8_0",
+                        label="GGUF 模型精度",
+                    )
+                with gr.Row():
+                    audiocpp_install_runtime_button = gr.Button("安装/更新运行时")
+                    audiocpp_install_model_button = gr.Button("下载/校验 GGUF 模型")
+                    audiocpp_install_all_button = gr.Button(
+                        "一键安装完整 audio.cpp", variant="primary"
+                    )
+                    audiocpp_refresh_status_button = gr.Button("刷新组件状态")
             with gr.Row():
                 audiocpp_executable = gr.Textbox(
                     label="audiocpp_cli.exe 绝对路径",
+                    value=audiocpp_initial_status.get("executable") or "",
                     placeholder=r"D:\audio.cpp\audiocpp_cli.exe",
                 )
                 audiocpp_model_dir = gr.Textbox(
                     label="IndexTTS2.5-GGUF 模型目录或 GGUF 路径",
+                    value=audiocpp_initial_status.get("modelPath") or "",
                     placeholder=r"D:\models\IndexTTS2.5-GGUF",
                 )
                 audiocpp_probe_button = gr.Button("检测 CLI")
@@ -4269,6 +4573,7 @@ def build_app(
             audiocpp_output = gr.Audio(label="audio.cpp 生成结果", type="filepath")
             audiocpp_report = gr.TextArea(
                 label="audio.cpp 探测/生成报告 JSON",
+                value=json.dumps(audiocpp_initial_status, ensure_ascii=False, indent=2),
                 lines=14,
                 interactive=False,
             )
@@ -4312,6 +4617,29 @@ def build_app(
             clear_reference_cache_event,
             outputs=reference_cache_status,
             queue=False,
+        )
+        audiocpp_refresh_status_button.click(
+            audiocpp_status_event,
+            outputs=[audiocpp_executable, audiocpp_model_dir, audiocpp_report],
+            queue=False,
+        )
+        audiocpp_install_runtime_button.click(
+            install_audiocpp_runtime_event,
+            inputs=audiocpp_install_backend,
+            outputs=[audiocpp_executable, audiocpp_model_dir, audiocpp_report],
+            concurrency_limit=1,
+        )
+        audiocpp_install_model_button.click(
+            install_audiocpp_model_event,
+            inputs=audiocpp_quantization,
+            outputs=[audiocpp_executable, audiocpp_model_dir, audiocpp_report],
+            concurrency_limit=1,
+        )
+        audiocpp_install_all_button.click(
+            install_audiocpp_all_event,
+            inputs=[audiocpp_install_backend, audiocpp_quantization],
+            outputs=[audiocpp_executable, audiocpp_model_dir, audiocpp_report],
+            concurrency_limit=1,
         )
         audiocpp_probe_button.click(
             probe_audiocpp_event,
@@ -4496,6 +4824,9 @@ def build_app(
                 voice_emotion_text,
                 voice_emotion_strength,
                 voice_random_emotion,
+                voice_tags,
+                voice_favorite,
+                voice_notes,
                 *voice_vector_controls,
                 voice_dictionary,
                 delete_voice_select,
@@ -4527,6 +4858,9 @@ def build_app(
                 voice_random_emotion,
                 *voice_vector_controls,
                 voice_dictionary,
+                voice_tags,
+                voice_favorite,
+                voice_notes,
                 voice_update_selected,
                 voice_status,
             ],
@@ -4545,6 +4879,30 @@ def build_app(
                 voice_update_selected,
                 voice_status,
             ],
+            queue=False,
+        )
+        filter_voice_button.click(
+            filter_voice_library_event,
+            inputs=[voice_search, voice_tag_filter, voice_favorites_only],
+            outputs=[voice_table, voice_status],
+            queue=False,
+        )
+        import_voice_bundle_button.click(
+            import_voice_bundle_event,
+            inputs=[voice_bundle_import, voice_import_conflict],
+            outputs=[
+                voice_table,
+                delete_voice_select,
+                dialogue_default_role,
+                single_voice_select,
+                voice_status,
+            ],
+            queue=False,
+        )
+        export_voice_bundle_button.click(
+            export_voice_bundle_event,
+            inputs=[delete_voice_select, export_all_voices],
+            outputs=[voice_bundle_download, voice_status],
             queue=False,
         )
         import_dialogue_button.click(
@@ -4869,6 +5227,32 @@ def build_app(
                 dialogue_timeline_visual,
                 dialogue_task_status,
                 dialogue_report,
+            ],
+            queue=False,
+        )
+        export_dialogue_project_button.click(
+            export_dialogue_project_event,
+            inputs=dialogue_task_select,
+            outputs=[dialogue_project_download, dialogue_task_status],
+            queue=False,
+        )
+        import_dialogue_project_button.click(
+            import_dialogue_project_event,
+            inputs=[dialogue_project_import, project_voice_conflict],
+            outputs=[
+                dialogue_task_select,
+                dialogue_type,
+                dialogue_script,
+                dialogue_default_role,
+                dialogue_default_language,
+                dialogue_preview,
+                timeline_policy,
+                dialogue_timeline_visual,
+                dialogue_task_status,
+                dialogue_report,
+                voice_table,
+                delete_voice_select,
+                single_voice_select,
             ],
             queue=False,
         )

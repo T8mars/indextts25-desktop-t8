@@ -18,10 +18,12 @@ Windows Electron desktop integration for IndexTTS 2.5. The packaged application 
 - streaming playback with cancellation while speech blocks are generated
 - optional clarity, narration, deharsh, warm, and normalize post-processing
 - persistent character voice library, directly selectable from the single-generation page without re-uploading audio
+- searchable Voice Library 2.0 metadata, favorites, quality reports, and portable `.t8voice.zip` import/export shared with ComfyUI
 - multi-role batch/JSON dialogue and SRT dubbing with timeline reports
 - per-line emotion overrides for the same role (text description, eight-dimensional vector, speaker-following, or role-default inheritance)
 - context-aware per-line emotion suggestions that fill the editable timeline without starting synthesis
 - crash-safe dialogue task manifests, restart/resume, and selected-line regeneration
+- complete `.indextts-project.zip` export/import containing task state, per-line audio, combined audio, subtitles/reports, and referenced voice bundles
 - local Whisper ASR proofreading with OpenAI/faster-whisper backends, CER/WER, normalized diffs, and word timestamps
 - rewritten SRT export using original timing or the generated audio's actual timeline
 - editable millisecond timeline table plus draggable/resizable tracks, ASR word-boundary snapping, and no-inference re-mixing
@@ -32,9 +34,10 @@ Windows Electron desktop integration for IndexTTS 2.5. The packaged application 
 - no-model acceleration preflight with per-mode availability/reason, exact bundled dependency versions, refresh, and JSON diagnostic export
 - signed GitHub Release app-layer updates with resumable download, exact-file verification, explicit install confirmation, and automatic rollback
 - live model scan/download/verification progress with current file, speed, ETA, conservative disk-space preflight, resumable repair, and precise failure details
+- opt-in audio.cpp component manager for verified Windows CUDA/Vulkan/CPU runtimes plus Q8/F16/original GGUF downloads
 
 The large model files are intentionally external. On first launch, select a complete IndexTTS 2.5 model directory.
-Version 0.20.0 is aligned to code revision `ee40fa7d` and model bundle `1.0.0` at revision `14166a74`. It provides separate signed update channels: GitHub Releases for the app layer and Hugging Face for the complete external model bundle. Automatic checks are read-only; download and install remain explicit user actions. App updates and model manifests are verified with Ed25519 before their file paths, hashes, or revisions are trusted. Model repair now shows the current file, overall and phase progress, transferred bytes, live speed, ETA, and available disk space while preserving resumable Hugging Face downloads. It hashes all 26 main and auxiliary files and reports the exact failing file before the Start button is enabled. No benchmark, model load, model download, update download, install, or acceleration mode starts automatically.
+Version 0.21.0 is aligned to code revision `ee40fa7d` and model bundle `1.0.0` at revision `14166a74`. It provides separate signed update channels: GitHub Releases for the app layer and Hugging Face for the complete external model bundle. Automatic checks are read-only; download and install remain explicit user actions. App updates and model manifests are verified with Ed25519 before their file paths, hashes, or revisions are trusted. Model repair now shows the current file, overall and phase progress, transferred bytes, live speed, ETA, and available disk space while preserving resumable Hugging Face downloads. It hashes all 26 main and auxiliary files and reports the exact failing file before the Start button is enabled. No benchmark, model load, model download, update download, install, or acceleration mode starts automatically.
 The launcher validates official model file sizes, while the downloader performs full SHA-256 verification.
 This release also supports running the portable package from Windows paths containing Chinese characters.
 AAC/M4A and other compressed reference audio is decoded by the bundled PyAV runtime, without requiring a system FFmpeg installation. Streaming previews are also encoded by bundled PyAV, so Gradio no longer calls an external `ffmpeg` or `ffprobe` executable and cannot fail with `[WinError 2]` merely because those programs are absent from `PATH`.
@@ -55,6 +58,11 @@ and `角色：台词` markers. The optional fifth column supports `text:生气�
 emotion independently. It exports a combined WAV plus a ZIP containing per-line WAV files and `report.json`.
 The UI lists all five language codes and makes clear that the supported 0.5–2.0 duration factor is a unitless
 duration multiplier, not a maximum number of seconds. Copyable batch and SRT examples can be loaded with one click.
+
+Voice Library 2.0 adds tag/search/favorite/notes and saved quality metadata. Its `.t8voice.zip` export is portable and
+is read directly by the ComfyUI Saved Voice node from `ComfyUI/models/TTS/IndexTTS-2.5/voices/`. Project export uses
+`.indextts-project.zip` and includes task state, line WAV files, combined output, subtitle/report files, and the referenced
+voice bundles. Imported projects receive a new local task ID and do not overwrite an existing task.
 SRT slot finishing now defaults to safe padding: short audio is padded, while overlong speech is preserved so dialogue
 is not silently cut off. One-pass native length regulation, natural overrun, legacy retry, and hard-trim modes remain
 available as explicit choices with truncation warnings.
@@ -197,7 +205,7 @@ npm run make
 ```
 
 This builds only `@electron-forge/maker-zip`. The unpacked application is still
-available under `desktop/out/T8star-Aix-IndexTTS-2.5-v0.20.0-win32-x64` for local testing.
+available under `desktop/out/T8star-Aix-IndexTTS-2.5-v0.21.0-win32-x64` for local testing.
 The bundled runtime contains tens of thousands of small files, so Squirrel/NuGet
 can spend a long time repeatedly rewriting a multi-gigabyte package. It is not the
 recommended user distribution. If an installer is specifically required, build it

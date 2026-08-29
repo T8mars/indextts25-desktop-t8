@@ -107,3 +107,76 @@ def test_voice_library_requires_reference_audio_for_that_mode(tmp_path: Path):
         VoiceLibrary(tmp_path / "data").save(
             "角色A", voice, emotion_mode="reference_audio"
         )
+
+
+def test_voice_library_v2_search_favorite_quality_and_notes(tmp_path: Path):
+    voice = tmp_path / "voice.wav"
+    voice.write_bytes(b"voice")
+    library = VoiceLibrary(tmp_path / "data")
+    saved = library.save(
+        "温柔旁白",
+        voice,
+        tags="女声，旁白, 女声",
+        favorite=True,
+        notes="适合纪录片",
+        quality={"score": 91, "grade": "优秀"},
+    )
+
+    assert saved.tags == ("女声", "旁白")
+    assert saved.favorite is True
+    assert library.search("纪录片")[0].name == "温柔旁白"
+    assert library.search(tags="旁白", favorites_only=True)[0].quality["score"] == 91
+    assert library.search(tags="男声") == []
+
+    updated = library.set_favorite(saved.profile_id, False)
+    assert updated.favorite is False
+    assert library.search(favorites_only=True) == []
+
+
+def test_voice_bundle_round_trip_and_conflict_modes(tmp_path: Path):
+    voice = tmp_path / "voice.wav"
+    emotion = tmp_path / "emotion.wav"
+    voice.write_bytes(b"voice-data")
+    emotion.write_bytes(b"emotion-data")
+    source = VoiceLibrary(tmp_path / "source")
+    source.save(
+        "角色A",
+        voice,
+        "JA",
+        emotion_mode="reference_audio",
+        emotion_audio=emotion,
+        tags=["主角", "日语"],
+        favorite=True,
+        notes="第一版",
+        quality={"score": 88},
+    )
+    bundle = source.export_bundle(tmp_path / "voices")
+    assert bundle.name.endswith(".t8voice.zip")
+
+    target = VoiceLibrary(tmp_path / "target")
+    imported = target.import_bundle(bundle)
+    assert [item.name for item in imported] == ["角色A"]
+    restored = target.get("角色A")
+    assert Path(restored.audio_path).read_bytes() == b"voice-data"
+    assert Path(restored.emotion_audio_path).read_bytes() == b"emotion-data"
+    assert restored.tags == ("主角", "日语")
+    assert restored.favorite is True
+    assert restored.quality["score"] == 88
+
+    renamed = target.import_bundle(bundle, conflict="rename")
+    assert renamed[0].name == "角色A（导入 2）"
+    assert target.import_bundle(bundle, conflict="skip") == []
+
+
+def test_voice_bundle_rejects_unsafe_members(tmp_path: Path):
+    import zipfile
+
+    bundle = tmp_path / "unsafe.t8voice.zip"
+    with zipfile.ZipFile(bundle, "w") as archive:
+        archive.writestr("../escape.wav", b"bad")
+        archive.writestr(
+            "manifest.json",
+            '{"schemaVersion":1,"profiles":[{"name":"A","audio_path":"../escape.wav"}]}',
+        )
+    with pytest.raises(ValueError, match="不安全路径"):
+        VoiceLibrary(tmp_path / "data").import_bundle(bundle)
