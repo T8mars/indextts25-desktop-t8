@@ -165,6 +165,8 @@ function renderAccelerationDiagnostics(report, busy) {
   const versions = report.capabilities?.versions || {};
   const versionParts = [
     ["torch", versions.torch],
+    ["Torchaudio", versions.torchaudio],
+    ["TorchCodec", versions.torchcodec],
     ["CUDA", versions.cuda_runtime],
     ["FlashAttention", versions.flash_attn],
     ["Triton", versions.triton],
@@ -172,6 +174,19 @@ function renderAccelerationDiagnostics(report, busy) {
     ["Ninja", versions.ninja]
   ].map(([name, value]) => `${name} ${value || "未安装"}`);
   elements.diagnosticsVersions.textContent = versionParts.join(" · ");
+
+  const torchcodec = report.capabilities?.runtime_checks?.torchcodec;
+  if (torchcodec) {
+    const ready = Boolean(torchcodec.ready);
+    const item = document.createElement("div");
+    item.className = `diagnostic-item ${ready ? "ready" : "fallback"}`;
+    const title = document.createElement("strong");
+    title.textContent = `${ready ? "✓" : "!"} TorchCodec / FFmpeg DLL`;
+    const description = document.createElement("span");
+    description.textContent = torchcodec.reason || "没有返回音频运行时检测结果";
+    item.append(title, description);
+    elements.diagnosticsGrid.appendChild(item);
+  }
 
   for (const mode of Object.keys(accelerationLabels)) {
     const result = report.modes?.[mode];

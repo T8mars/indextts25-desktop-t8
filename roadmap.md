@@ -1,22 +1,45 @@
 # T8star-Aix IndexTTS 2.5 开发路线图
 
 本文档记录桌面整合包与 ComfyUI 节点的共同开发范围、依赖政策和验收标准。当前公开基线为
-**Desktop 0.22.0 / ComfyUI Node 0.21.0**。
+**Desktop 0.22.1 / ComfyUI Node 0.21.2**。
 
 | 发行物 | 当前版本 | 本版主要内容 |
 | --- | --- | --- |
-| Windows Electron 整合包 | 0.22.0 | 跨段语速异常保护、异常段单独重做、签名自动更新 |
-| ComfyUI V3 节点 | 0.21.0 | 跨段语速报告与选择性重做、33 组工作流 |
+| Windows Electron 整合包 | 0.22.1 | TorchCodec 预检、Cache API、双显存质量回归 |
+| ComfyUI V3 节点 | 0.21.2 | Arabic 优化、8/24GB 基线、质量趋势、33 组工作流 |
 | 固定官方核心 | `ee40fa7d` | 未发现必须更换的 revision |
 | 固定模型镜像 | `14166a74` | Hugging Face 独立下载，26 个主模型与辅助文件全部校验 |
 
-## Desktop v0.22.0 / Node v0.21.0
+## Desktop v0.22.0 / Node v0.21.0（上一公开基线）
 
 - [x] 每个内部长文本分段记录语言感知文字单位、真实时长和单位/秒。
 - [x] 至少两个稳定分段后建立中位语速基线，仅在后续分段低于基线 45% 时标记异常。
 - [x] 只用更小 Token 上限和独立 seed 重做异常段；候选未明显改善或变得过快时保留原段。
 - [x] 普通情绪放慢、短句、确定性采样和原生目标时长模式不强行调整。
 - [x] Desktop 报告和 ComfyUI 状态均输出可审计的跨段语速明细。
+
+## 下一版开发分支（未发布）
+
+- [x] 中、英、日、西、阿固定长文本真实模型回归；本机 RTX 实测 5 组 WAV 全部无削波，严格门禁通过，RTF 为 0.552–0.864，峰值显存不超过 5.77 GB。
+- [x] `quality-report.json` 记录可选 CER/WER、跨段语速、削波、静音、时长、RTF 与峰值显存，并支持旧报告基线比较。
+- [x] Desktop 提供跨段语速柱状图、可读表格、原始/自动重试/当前采用三路试听，以及内部单段重做后安全重组最终 WAV。
+- [x] `indextts.cli` 完成正式 2.5 五语言、情感、时长、采样、CFM、精度、参考设备与可选加速参数，并通过独立真实 BF16 WAV 冒烟。
+- [x] 根仓库 155 项测试、节点仓库 172 项测试通过（另 1 项按环境跳过）；compileall、Pylint Fatal 门禁、Comfy 节点校验、Electron 五组脚本测试、打包与包内运行时自检全部通过。
+- [x] 历史规划文档和中英文使用说明同步为当前架构状态。
+
+## Node v0.21.1 / Desktop 开发分支
+
+- [x] 固定 OpenAI Whisper `20250625`，使用 `base` CUDA 完成中英日西阿真实 CER/WER 基线。
+- [x] 定时 GPU 质量回归与普通 CI 完全分离，避免 PR/Push 流程加载大模型。
+- [x] 显式 `GenerationMixin` 继承，并以 TorchCodec 原生 I/O 兼容 Torchaudio 2.9+。
+- [x] 节点版本提升到 0.21.1，重新生成并校验 33 组 UI/API 工作流。
+
+## Node v0.21.2 / Desktop v0.22.1
+
+- [x] Arabic Whisper `small` 实测 WER 由 0.6154 降至 0.1923，加入不掩盖辅音错误的保守规范化。
+- [x] Transformers GPT 缓存迁移到 `DynamicCache`，保留旧 tuple 输入兼容并完成真实权重回归。
+- [x] 启动前检查 TorchCodec 与 Windows FFmpeg 共享 DLL；Torchaudio 2.8 便携路径不变。
+- [x] RTX 真机完成正式 8GB/24GB 五语言回归；生成两档脱敏基线和 CER/WER、RTF、VRAM 趋势产物。
 
 ## Desktop v0.21.2 / Node v0.20.9
 

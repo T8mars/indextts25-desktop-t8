@@ -44,6 +44,7 @@ function createDiagnosticReport({
     updateCheck: state.updateReport || null,
     notes: [
       "预检只检查硬件、依赖与工具链，不加载 IndexTTS 模型。",
+      "Torchaudio 2.9 会预检 TorchCodec 及 FFmpeg 共享 DLL；只有 ffmpeg.exe 不代表 TorchCodec 可用。",
       "实际加速初始化失败时会自动回退；真实生效模式以启动日志和 WebUI 环境诊断为准。",
       "DeepSpeed 的 aio.lib/cufile.lib 信息属于可选训练/存储扩展探测，不是语音推理成功的必要条件。"
     ]

@@ -1,9 +1,21 @@
 # T8star-Aix · ComfyUI IndexTTS 2.5 节点规划
 
-> 状态：需求规划 / 尚未开发  
+> 状态：历史架构规划 / 已实现并持续维护（当前 Node 0.21.2、Desktop 0.22.1）
 > 目标：把当前正式版 IndexTTS 2.5 能力做成稳定、易装、可复现、与 ComfyUI 音频生态互通的自定义节点包。  
 > 当前代码基线：`index-tts/index-tts@ee40fa7d6c6b8a2c7f06105f9f1e65775b74868c`  
 > 模型基线：`IndexTeam/IndexTTS-2.5@ba2480d9f7f629eb18f6acaebb357679d9ba88a4`
+
+> 本文保留最初的架构决策和验收理由，不再表示功能尚未开发。实际发布状态、后续事项和验收记录
+> 以节点仓库 `roadmap.md`、中英文 README 及 GitHub Release 为准。P0/P1/P2 节点、SRT 多角色、
+> 音色库、ASR、时间轴、加速诊断、模型修复下载与 Registry 发布均已完成。
+
+### 2026-08-30 实施快照
+
+- ComfyUI 使用原生 V3 schema、标准 `AUDIO`、独立控制对象和 33 组 UI/API 示例工作流。
+- Desktop 支持可恢复多角色工程、音色包、签名自动更新、长文本保护和内部单段重做。
+- 两端共享五语言、情感、发音、时长、参考缓存和跨段语速保护核心。
+- 新增五语言真实音质回归工具，固定记录 CER/WER、语速波动、削波、静音、时长、RTF 和峰值显存。
+- `indextts.cli` 已切换为正式 IndexTTS 2.5 路径，不再调用旧 IndexTTS 1.x 推理类。
 
 ## 1. 结论先行
 

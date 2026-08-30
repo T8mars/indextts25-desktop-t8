@@ -94,6 +94,46 @@ class _EmotionSuggestTTS(_CapturingTTS):
         self.qwen_emo = _FakeQwenEmotion()
 
 
+class _SegmentedTTS(_FakeTTS):
+    segments = (
+        "第一段包含足够多的文字用于建立稳定语速基线。",
+        "第二段同样保持自然清楚并形成可靠的比较基线。",
+        "第三段故意返回异常缓慢的音频以触发自动保护。",
+    )
+
+    @classmethod
+    def split_text_by_tokens(cls, text, limit, prefix):
+        if text == " ".join(cls.segments):
+            return list(cls.segments)
+        return [text]
+
+    @classmethod
+    def infer(cls, *_args, stream_return=False, **kwargs):
+        if stream_return:
+            return super().infer(stream_return=True, **kwargs)
+        sample_rate = 1000
+        text = str(kwargs.get("text") or "")
+        collector = kwargs.get("segment_collector")
+        if collector is not None and text == " ".join(cls.segments):
+            durations = (2.0, 2.0, 8.0)
+            parts = []
+            for index, (segment, duration) in enumerate(zip(cls.segments, durations), 1):
+                waveform = torch.ones(1, round(sample_rate * duration)) * (0.05 * index)
+                collector.append(
+                    {
+                        "index": index,
+                        "text": segment,
+                        "language": "ZH",
+                        "sample_rate": sample_rate,
+                        "duration_seconds": duration,
+                        "waveform": waveform,
+                    }
+                )
+                parts.append(waveform)
+            return sample_rate, torch.cat(parts, dim=-1)
+        return sample_rate, torch.ones(1, 2000) * 0.25
+
+
 def test_desktop_builds_complete_pronunciation_workspace(tmp_path, monkeypatch):
     output_dir = tmp_path / "outputs"
     data_dir = tmp_path / "user-data"
@@ -168,6 +208,11 @@ def test_desktop_builds_complete_pronunciation_workspace(tmp_path, monkeypatch):
     assert "CFM 温度" in labels
     assert "随机种子" in labels
     assert "边生成边试听" in labels
+    assert "内部文本分段语速报告" in labels
+    assert "选择内部段" in labels
+    assert "原始段试听" in labels
+    assert "自动重试候选试听（未触发时为空）" in labels
+    assert "当前采用段试听" in labels
     assert "已保存任务" in labels
     assert "要重做的台词序号" in labels
     assert "生成后逐句自动 ASR 校对" in labels
@@ -339,6 +384,65 @@ def test_single_generation_can_reuse_saved_voice_without_uploading(tmp_path):
     assert delete_result[3]["value"] is None
     assert delete_result[4] is None
     assert "请重新选择或上传参考音频" in delete_result[5]
+
+
+def test_cross_segment_workspace_can_audition_redo_and_merge_one_internal_segment(tmp_path):
+    output_dir = tmp_path / "outputs"
+    data_dir = tmp_path / "user-data"
+    output_dir.mkdir()
+    data_dir.mkdir()
+    demo = build_app(_SegmentedTTS(), output_dir, data_dir, verbose=False)
+    generate_block = next(
+        block
+        for block in demo.fns.values()
+        if getattr(block.fn, "__name__", "") == "generate"
+    )
+    inputs = [getattr(component, "value", None) for component in generate_block.inputs]
+    by_label = {
+        getattr(component, "label", None): index
+        for index, component in enumerate(generate_block.inputs)
+    }
+    inputs[0] = "fake-prompt.wav"
+    inputs[1] = " ".join(_SegmentedTTS.segments)
+    inputs[4] = 0
+    inputs[9] = []
+    inputs[by_label["边生成边试听"]] = False
+    outputs = list(generate_block.fn(*inputs))[-1]
+
+    assert len(outputs) == 10
+    manifest_path = Path(outputs[9])
+    assert manifest_path.is_file()
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    assert len(manifest["segments"]) == 3
+    assert manifest["segments"][2]["selected_source"] == "auto_retry"
+    assert "已采用重试" in outputs[7]
+
+    load_artifacts = next(
+        block.fn
+        for block in demo.fns.values()
+        if getattr(block.fn, "__name__", "") == "load_segment_artifacts_event"
+    )
+    original, retry, selected, status = load_artifacts(str(manifest_path), "3")
+    assert Path(original).is_file()
+    assert Path(retry).is_file()
+    assert Path(selected) == Path(retry)
+    assert "当前采用" in status
+
+    redo = next(
+        block.fn
+        for block in demo.fns.values()
+        if getattr(block.fn, "__name__", "") == "redo_internal_segment_event"
+    )
+    redo_result = redo(
+        str(manifest_path),
+        "3",
+        progress=lambda *_args, **_kwargs: None,
+    )
+    assert Path(redo_result[0]).is_file()
+    assert Path(redo_result[6]).name.startswith("segment_003_manual_retry_")
+    assert "单独重做并合入" in redo_result[7]
+    updated = json.loads(manifest_path.read_text(encoding="utf-8"))
+    assert updated["segments"][2]["selected_source"] == "manual_retry"
 
 
 def test_desktop_context_emotion_suggestions_fill_timeline_without_synthesis(tmp_path):

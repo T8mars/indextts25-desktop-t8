@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import gc
 import json
+import shutil
 import threading
 import time
 import traceback
@@ -73,6 +74,7 @@ from indextts.speech_rate_guard import (
     retry_candidate_improves_rate,
 )
 from indextts.utils.reference_condition_cache import ReferenceConditionCache
+from indextts.utils.audio_io import load_audio_file, save_audio_file
 from indextts.pronunciation import (
     ANNOTATION_PATTERN,
     PronunciationEntry,
@@ -92,10 +94,21 @@ from runtime_metrics import (
     format_runtime_metrics,
     start_runtime_measurement,
 )
+from segment_rate_workspace import (
+    SEGMENT_RATE_HEADERS,
+    compose_segment_workspace,
+    load_segment_workspace,
+    render_segment_rate_html,
+    segment_choices,
+    segment_rate_rows,
+    select_replacement_audio,
+    selected_segment_artifacts,
+    write_segment_workspace,
+)
 
 
 APP_TITLE = "T8star-Aix · IndexTTS 2.5"
-DESKTOP_VERSION = "0.22.0"
+DESKTOP_VERSION = "0.22.1"
 MODEL_MANIFEST = json.loads(
     (Path(__file__).resolve().parent / "desktop_model_manifest.json").read_text(encoding="utf-8")
 )
@@ -385,6 +398,23 @@ CSS = """
 .t8-timeline-word { pointer-events: none; z-index: 3; }
 #t8-timeline-drag-payload { display: none !important; }
 .t8-timeline-hint,.t8-timeline-empty { margin-top: 9px; font-size: 12px; opacity: .68; }
+.t8-rate-chart { display: grid; gap: 9px; padding: 12px; border: 1px solid rgba(89,125,255,.22); border-radius: 14px; background: rgba(255,255,255,.68); }
+.t8-rate-legend,.t8-rate-empty { font-size: 12px; opacity: .72; }
+.t8-rate-card { padding: 10px 12px; border-radius: 10px; background: rgba(148,163,184,.08); }
+.t8-rate-title { display: flex; justify-content: space-between; gap: 10px; align-items: center; }
+.t8-rate-badge { padding: 2px 8px; border-radius: 999px; font-size: 11px; font-weight: 750; }
+.t8-rate-badge.stable { background: rgba(34,197,94,.16); color: #147a38; }
+.t8-rate-badge.suspect { background: rgba(239,68,68,.16); color: #b91c1c; }
+.t8-rate-badge.short { background: rgba(148,163,184,.2); color: #475569; }
+.t8-rate-track { position: relative; height: 10px; margin: 8px 0 5px; overflow: hidden; border-radius: 999px; background: rgba(148,163,184,.18); }
+.t8-rate-fill { display: block; height: 100%; border-radius: inherit; }
+.t8-rate-fill.stable { background: linear-gradient(90deg,#34d399,#22c55e); }
+.t8-rate-fill.suspect { background: linear-gradient(90deg,#fb7185,#ef4444); }
+.t8-rate-fill.short { background: #94a3b8; }
+.t8-rate-baseline { position: absolute; top: -2px; bottom: -2px; width: 2px; background: #3156c8; box-shadow: 0 0 0 1px rgba(255,255,255,.7); }
+.t8-rate-meta,.t8-rate-text { font-size: 12px; line-height: 1.45; }
+.t8-rate-meta { color: #475569; }
+.t8-rate-text { margin-top: 3px; overflow-wrap: anywhere; }
 .t8-footer { text-align: center; opacity: .58; font-size: 12px; padding: 14px; }
 @media (max-width: 900px) {
   .gradio-container main.fillable { padding: 16px !important; }
@@ -1310,6 +1340,8 @@ def build_app(
         cache_risk_guarded = False
         long_text_guard_reports: list[dict] = []
         segment_rate_guard_reports: list[dict] = []
+        selected_segment_session: dict | None = None
+        segment_manifest_path: Path | None = None
 
         def result_to_waveform(result):
             if not isinstance(result, tuple) or len(result) != 2:
@@ -1464,6 +1496,8 @@ def build_app(
                                     record_waveform.shape[-1] / block_rate
                                 ),
                                 "waveform": record_waveform.clamp(-1, 1).contiguous(),
+                                "original_waveform": record_waveform.clamp(-1, 1).contiguous().clone(),
+                                "selected_source": "original",
                             }
                         )
                     if not normalized_records:
@@ -1477,6 +1511,8 @@ def build_app(
                                 "sample_rate": block_rate,
                                 "duration_seconds": waveform.shape[-1] / block_rate,
                                 "waveform": waveform,
+                                "original_waveform": waveform.clone(),
+                                "selected_source": "original",
                             }
                         )
                     block_segment_records.append(normalized_records)
@@ -1565,11 +1601,13 @@ def build_app(
                                 ),
                                 accepted=accepted,
                             )
+                            record["retry_waveform"] = retry_waveform
                             if accepted:
                                 record["waveform"] = retry_waveform
                                 record["duration_seconds"] = (
                                     retry_waveform.shape[-1] / retry_rate
                                 )
+                                record["selected_source"] = "auto_retry"
                         except Exception as retry_error:
                             rate_report.update(
                                 retried=True,
@@ -1608,7 +1646,10 @@ def build_app(
                 [chunk.pause_after_ms for chunk in plan.chunks],
                 plan.chunks[0].pause_before_ms,
             )
-            return combined, sample_rate, disabled, guarded
+            return combined, sample_rate, disabled, guarded, {
+                "block_records": block_segment_records,
+                "rate_reports": rate_reports,
+            }
 
         def stream_infer_once(factor: float, native_target_seconds: float | None = None):
             """Yield playable chunks and return the same final tensor as non-streaming inference."""
@@ -1727,6 +1768,7 @@ def build_app(
                         preview_waveform, preview_status = next(stream_generator)
                     except StopIteration as finished:
                         waveform, sample_rate, accel_disabled, cache_risk_guarded = finished.value
+                        selected_segment_session = None
                         runtime_note = ""
                         break
                     yield (
@@ -1736,9 +1778,19 @@ def build_app(
                         gr.skip(),
                         format_pronunciation_report(pronunciation_result) + "\n\n" + preview_status,
                         "正在生成；完成后显示真实耗时、RTF 与 CUDA 峰值显存。",
+                        gr.skip(),
+                        gr.skip(),
+                        gr.skip(),
+                        gr.skip(),
                     )
             else:
-                (waveform, sample_rate, accel_disabled, cache_risk_guarded), runtime_note = execute_with_runtime_fallback(
+                (
+                    waveform,
+                    sample_rate,
+                    accel_disabled,
+                    cache_risk_guarded,
+                    selected_segment_session,
+                ), runtime_note = execute_with_runtime_fallback(
                     lambda: infer_once(
                         duration_factor,
                         target_duration_seconds if native_requested else None,
@@ -1758,7 +1810,13 @@ def build_app(
                     used_factor, actual_ms, target_duration_seconds * 1000
                 )
                 if abs(fitted - used_factor) >= 0.02:
-                    (waveform, sample_rate, disabled_again, guarded_again), second_note = execute_with_runtime_fallback(
+                    (
+                        waveform,
+                        sample_rate,
+                        disabled_again,
+                        guarded_again,
+                        selected_segment_session,
+                    ), second_note = execute_with_runtime_fallback(
                         lambda: infer_once(fitted)
                     )
                     accel_disabled = accel_disabled or disabled_again
@@ -1792,7 +1850,7 @@ def build_app(
 
                 def review_candidate(candidate, candidate_rate, attempt_index):
                     candidate_path = candidate_dir / f"candidate_{attempt_index + 1:02d}_seed_{seed + attempt_index * 100_003}.wav"
-                    torchaudio.save(str(candidate_path), candidate, candidate_rate)
+                    save_audio_file(candidate_path, candidate, candidate_rate)
                     candidate_paths.append(str(candidate_path))
                     technical = technical_audio_review(candidate, candidate_rate)
                     result = {
@@ -1829,9 +1887,16 @@ def build_app(
                     return result
 
                 candidates = [(waveform, sample_rate)]
+                candidate_segment_sessions = [selected_segment_session]
                 attempts = [review_candidate(waveform, sample_rate, 0)]
                 for retry_index in range(1, retry_count + 1):
-                    (candidate, candidate_rate, disabled_again, guarded_again), retry_note = (
+                    (
+                        candidate,
+                        candidate_rate,
+                        disabled_again,
+                        guarded_again,
+                        candidate_segment_session,
+                    ), retry_note = (
                         execute_with_runtime_fallback(
                             lambda retry_index=retry_index: infer_once(
                                 used_factor,
@@ -1871,9 +1936,11 @@ def build_app(
                         retry_index,
                     )
                     candidates.append((candidate, candidate_rate))
+                    candidate_segment_sessions.append(candidate_segment_session)
                     attempts.append(candidate_review)
                 selected_index = select_best_candidate(attempts)
                 waveform, sample_rate = candidates[selected_index]
+                selected_segment_session = candidate_segment_sessions[selected_index]
                 selected_review = attempts[selected_index]
                 quality_report = {
                     "enabled": quality_asr_enabled,
@@ -1887,7 +1954,76 @@ def build_app(
                     "recognized_text": selected_review.get("recognized_text", selected_review.get("text", "")),
                     "attempts": attempts,
                 }
-            torchaudio.save(str(target), waveform, sample_rate)
+            save_audio_file(target, waveform, sample_rate)
+            if selected_segment_session and selected_segment_session.get("block_records"):
+                workspace = data_dir / "segment_rate_workspaces" / target.stem
+                block_records = selected_segment_session["block_records"]
+                block_pauses = []
+                for block_index, records in enumerate(block_records):
+                    chunk = plan.chunks[block_index]
+                    block_pauses.append(
+                        {
+                            "index": block_index + 1,
+                            "segment_indices": [int(record["index"]) for record in records],
+                            "pause_before_ms": int(chunk.pause_before_ms),
+                            "pause_after_ms": int(chunk.pause_after_ms),
+                        }
+                    )
+                session_reports = list(selected_segment_session.get("rate_reports") or [])
+                session_seed_offset = int(
+                    session_reports[0].get("seed_offset") or 0
+                ) if session_reports else 0
+
+                def save_segment_audio(path, audio, rate):
+                    tensor = torch.as_tensor(audio).detach().cpu().float()
+                    if tensor.ndim == 1:
+                        tensor = tensor.unsqueeze(0)
+                    elif tensor.ndim != 2:
+                        tensor = tensor.reshape(1, -1)
+                    save_audio_file(path, tensor.clamp(-1, 1), int(rate))
+
+                segment_manifest_path = write_segment_workspace(
+                    workspace,
+                    block_records=block_records,
+                    reports=session_reports,
+                    block_pauses=block_pauses,
+                    settings={
+                        "prompt_audio": str(prompt_audio),
+                        "language": str(language),
+                        "emotion_mode": int(emotion_mode),
+                        "emotion_audio": str(emotion_audio or ""),
+                        "emotion_alpha": float(emotion_weight),
+                        "emotion_vector": (
+                            [float(item) for item in emo_vector]
+                            if emo_vector is not None
+                            else None
+                        ),
+                        "emotion_text": str((emotion_text or "").strip()),
+                        "random_emotion": bool(random_emotion),
+                        "do_sample": bool(do_sample),
+                        "temperature": float(temperature),
+                        "top_p": float(top_p),
+                        "top_k": int(top_k),
+                        "num_beams": int(num_beams),
+                        "repetition_penalty": float(repetition_penalty),
+                        "length_penalty": float(length_penalty),
+                        "max_mel_tokens": int(max_mel_tokens),
+                        "max_text_tokens": int(max_text_tokens),
+                        "segment_silence_ms": int(segment_silence_ms),
+                        "duration_factor": float(used_factor),
+                        "target_duration_mode": str(target_duration_mode),
+                        "target_duration_seconds": float(target_duration_seconds),
+                        "postprocess_preset": str(postprocess_preset),
+                        "postprocess_strength": float(postprocess_strength),
+                        "seed": int(seed),
+                        "seed_offset": session_seed_offset,
+                        "diffusion_steps": int(diffusion_steps),
+                        "inference_cfg_rate": float(inference_cfg_rate),
+                        "cfm_temperature": float(cfm_temperature),
+                    },
+                    output_path=target,
+                    save_audio=save_segment_audio,
+                )
         except Exception as exc:
             traceback.print_exc()
             detail = str(exc).strip() or type(exc).__name__
@@ -1895,7 +2031,7 @@ def build_app(
         if not target.exists():
             raise gr.Error("语音生成失败，请查看桌面启动日志。")
 
-        waveform, sample_rate = torchaudio.load(str(target))
+        waveform, sample_rate = load_audio_file(target)
         audio_duration = waveform.shape[-1] / sample_rate
         performance = finish_runtime_measurement(
             performance_measurement,
@@ -1920,9 +2056,14 @@ def build_app(
             metrics += "；长英文/西语保护=" + json.dumps(
                 latin_guard_reports, ensure_ascii=False
             )
+        selected_rate_reports = (
+            list(selected_segment_session.get("rate_reports") or [])
+            if selected_segment_session
+            else segment_rate_guard_reports
+        )
         rate_guard_reports = [
             item
-            for item in segment_rate_guard_reports
+            for item in selected_rate_reports
             if item.get("eligible") or item.get("suspect")
         ]
         if rate_guard_reports:
@@ -1945,6 +2086,7 @@ def build_app(
             "metrics": metrics,
             "performance": performance,
             "segment_rate_guard": rate_guard_reports,
+            "segment_workspace": str(segment_manifest_path or ""),
         })
         memory_report = apply_memory_policy()
         metrics += "；模型生命周期=" + json.dumps(memory_report, ensure_ascii=False)
@@ -1955,7 +2097,203 @@ def build_app(
             load_history(output_dir),
             format_pronunciation_report(pronunciation_result) + "\n\n" + metrics,
             metrics,
+            segment_rate_rows(selected_rate_reports),
+            render_segment_rate_html(selected_rate_reports),
+            gr.update(
+                choices=(
+                    segment_choices(load_segment_workspace(segment_manifest_path))
+                    if segment_manifest_path
+                    else []
+                ),
+                value=(
+                    next(
+                        (
+                            str(item.get("index"))
+                            for item in selected_rate_reports
+                            if item.get("suspect")
+                        ),
+                        str(selected_rate_reports[0].get("index"))
+                        if selected_rate_reports
+                        else None,
+                    )
+                ),
+            ),
+            str(segment_manifest_path or ""),
         )
+
+    def load_segment_artifacts_event(manifest_path, segment_index):
+        if not manifest_path or not segment_index:
+            return None, None, None, "尚无可审计的内部文本分段。"
+        try:
+            manifest = load_segment_workspace(manifest_path)
+            artifacts = selected_segment_artifacts(manifest, segment_index)
+        except Exception as exc:
+            return None, None, None, f"读取分段试听文件失败：{exc}"
+        segment = artifacts["segment"]
+        report = segment.get("report") or {}
+        status = (
+            f"第 {segment['index']} 段｜原始 {float(report.get('units_per_second') or 0):.3f} 单位/秒｜"
+            f"基线 {float(report.get('baseline_units_per_second') or 0):.3f}｜"
+            f"当前采用：{segment.get('selected_source', 'original')}。"
+        )
+        if not artifacts["retry_audio"]:
+            status += " 该段没有触发自动重试；仍可手动单独重做。"
+        return (
+            artifacts["original_audio"],
+            artifacts["retry_audio"],
+            artifacts["selected_audio"],
+            status,
+        )
+
+    def redo_internal_segment_event(
+        manifest_path,
+        segment_index,
+        progress=gr.Progress(),
+    ):
+        ensure_model()
+        if not manifest_path or not segment_index:
+            raise gr.Error("请先生成多段长文本并选择一个内部段。")
+        try:
+            manifest = load_segment_workspace(manifest_path)
+            artifacts = selected_segment_artifacts(manifest, segment_index)
+            segment = artifacts["segment"]
+            settings = manifest.get("settings") or {}
+            index = int(segment["index"])
+            redo_count = int(segment.get("redo_count") or 0) + 1
+            progress(0.05, desc=f"单独重做第 {index} 个内部文本段")
+            vector = settings.get("emotion_vector")
+            retry_seed = (
+                int(settings.get("seed") or 0)
+                + int(settings.get("seed_offset") or 0)
+                + 200_003
+                + index * 997
+                + redo_count * 100_003
+            ) & 0xFFFFFFFF
+            generated = tts.infer(
+                spk_audio_prompt=str(settings["prompt_audio"]),
+                text=str(segment["text"]),
+                output_path=None,
+                lang=str(segment.get("language") or settings.get("language") or "ZH"),
+                emo_audio_prompt=(
+                    str(settings.get("emotion_audio"))
+                    if int(settings.get("emotion_mode") or 0) == 1
+                    and settings.get("emotion_audio")
+                    else None
+                ),
+                emo_alpha=float(settings.get("emotion_alpha") or 1.0),
+                emo_vector=vector,
+                use_emo_text=int(settings.get("emotion_mode") or 0) == 3,
+                emo_text=str(settings.get("emotion_text") or "") or None,
+                use_random=bool(settings.get("random_emotion")),
+                do_sample=True,
+                temperature=float(settings.get("temperature") or 0.8),
+                top_p=float(settings.get("top_p") or 0.8),
+                top_k=(
+                    int(settings.get("top_k"))
+                    if int(settings.get("top_k") or 0) > 0
+                    else None
+                ),
+                num_beams=int(settings.get("num_beams") or 3),
+                repetition_penalty=float(settings.get("repetition_penalty") or 10.0),
+                length_penalty=float(settings.get("length_penalty") or 0.0),
+                max_mel_tokens=int(settings.get("max_mel_tokens") or 1500),
+                max_text_tokens_per_segment=max(
+                    20,
+                    int(round(int(settings.get("max_text_tokens") or 120) * 2 / 3)),
+                ),
+                interval_silence=int(settings.get("segment_silence_ms") or 0),
+                text_normalization=False,
+                duration_factor=float(settings.get("duration_factor") or 1.0),
+                seed=retry_seed,
+                diffusion_steps=int(settings.get("diffusion_steps") or 25),
+                inference_cfg_rate=float(settings.get("inference_cfg_rate") or 0.7),
+                cfm_temperature=float(settings.get("cfm_temperature") or 1.0),
+            )
+            if isinstance(generated, tuple) and len(generated) == 2:
+                result = generated
+            else:
+                result = None
+                for result in generated:
+                    pass
+            if not isinstance(result, tuple) or len(result) != 2:
+                raise RuntimeError("IndexTTS 没有返回可用的单段音频。")
+            retry_rate, raw = result
+            retry_waveform = torch.as_tensor(raw).detach().cpu()
+            if retry_waveform.ndim == 1:
+                retry_waveform = retry_waveform.unsqueeze(0)
+            elif retry_waveform.ndim == 2 and retry_waveform.shape[-1] == 1:
+                retry_waveform = retry_waveform.transpose(0, 1)
+            elif retry_waveform.ndim != 2:
+                retry_waveform = retry_waveform.reshape(1, -1)
+            retry_waveform = retry_waveform.float()
+            if retry_waveform.numel() and float(retry_waveform.abs().max()) > 2.0:
+                retry_waveform = retry_waveform / 32768.0
+            retry_waveform = retry_waveform.clamp(-1, 1).contiguous()
+            if int(retry_rate) != int(segment.get("sample_rate") or retry_rate):
+                raise RuntimeError("单段重做结果的采样率与原任务不一致。")
+            workspace = Path(manifest["workspace"])
+            retry_path = workspace / f"segment_{index:03d}_manual_retry_{redo_count:02d}.wav"
+            save_audio_file(retry_path, retry_waveform, int(retry_rate))
+            units = float((segment.get("report") or {}).get("speech_units") or 0.0)
+            duration = retry_waveform.shape[-1] / int(retry_rate)
+            retry_units_per_second = units / duration if units > 0 and duration > 0 else 0.0
+            manifest = select_replacement_audio(
+                manifest_path,
+                index,
+                retry_path,
+                source="manual_retry",
+                report_update={
+                    "manual_retried": True,
+                    "manual_retry_seed": retry_seed,
+                    "manual_retry_duration_seconds": round(duration, 4),
+                    "manual_retry_units_per_second": round(retry_units_per_second, 4),
+                },
+            )
+            progress(0.72, desc="重新合并全部内部段")
+            rebuilt, sample_rate = compose_segment_workspace(
+                manifest,
+                lambda path: load_audio_file(path),
+            )
+            target_mode = str(settings.get("target_duration_mode") or "off")
+            target_seconds = float(settings.get("target_duration_seconds") or 0.0)
+            if target_mode in {"pad", "exact"} and target_seconds > 0:
+                rebuilt, _duration_report = apply_duration_policy(
+                    rebuilt, sample_rate, target_seconds, target_mode
+                )
+            rebuilt, _postprocess = postprocess_waveform(
+                rebuilt,
+                sample_rate,
+                str(settings.get("postprocess_preset") or "off"),
+                float(settings.get("postprocess_strength") or 1.0),
+            )
+            output_path = Path(manifest["output_path"])
+            backup = workspace / "final_before_manual_segment_redo.wav"
+            if output_path.is_file() and not backup.exists():
+                shutil.copy2(output_path, backup)
+            save_audio_file(output_path, rebuilt, sample_rate)
+            refreshed = load_segment_workspace(manifest_path)
+            reports = [
+                dict(item.get("report") or {}) for item in refreshed.get("segments", [])
+            ]
+            updated_artifacts = selected_segment_artifacts(refreshed, index)
+            progress(1.0, desc="单段重做并合并完成")
+            return (
+                str(output_path),
+                segment_rate_rows(reports),
+                render_segment_rate_html(reports),
+                gr.update(choices=segment_choices(refreshed), value=str(index)),
+                updated_artifacts["original_audio"],
+                updated_artifacts["retry_audio"],
+                updated_artifacts["selected_audio"],
+                (
+                    f"第 {index} 段已使用 seed {retry_seed} 单独重做并合入最终音频；"
+                    f"新段 {duration:.3f} 秒 / {retry_units_per_second:.3f} 单位每秒。"
+                    "首次重做前的完整音频已保存在分段工作区，可随时恢复。"
+                ),
+            )
+        except Exception as exc:
+            traceback.print_exc()
+            raise gr.Error(f"内部单段重做失败：{str(exc).strip() or type(exc).__name__}") from exc
 
     def save_preset_event(
         name,
@@ -2227,7 +2565,7 @@ def build_app(
             raise gr.Error("请选择有效的角色情感模式。") from exc
         try:
             try:
-                waveform, sample_rate = torchaudio.load(str(audio))
+                waveform, sample_rate = load_audio_file(audio)
                 quality = analyze_reference_audio(waveform, int(sample_rate))
             except Exception:
                 quality = {}
@@ -2663,7 +3001,7 @@ def build_app(
         else:
             diff_markdown = "未发现归一化后的文本差异。"
         status = f"{verdict} · 相似度 {review['similarity']:.1%} · {metric_name} {review['metric_error_rate']:.3f} · {transcript['backend']}"
-        waveform, sample_rate = torchaudio.load(str(audio_path))
+        waveform, sample_rate = load_audio_file(audio_path)
         alignment = waveform_html(
             waveform,
             sample_rate,
@@ -2681,7 +3019,7 @@ def build_app(
         if not audio_path:
             raise gr.Error("请先从已保存音色库选择角色，或上传/录制音色参考音频。")
         try:
-            waveform, sample_rate = torchaudio.load(str(audio_path))
+            waveform, sample_rate = load_audio_file(audio_path)
             if bool(auto_prepare):
                 prepared, report = prepare_reference_audio(
                     waveform,
@@ -2692,7 +3030,7 @@ def build_app(
                 prepared_dir = data_dir / "prepared_references"
                 prepared_dir.mkdir(parents=True, exist_ok=True)
                 prepared_path = prepared_dir / f"reference_{uuid.uuid4().hex[:12]}.wav"
-                torchaudio.save(str(prepared_path), prepared, sample_rate)
+                save_audio_file(prepared_path, prepared, sample_rate)
                 output_path = str(prepared_path)
                 display_waveform = prepared
             else:
@@ -3117,7 +3455,7 @@ def build_app(
                 and force_line_number != line.index
             )
             if should_reuse:
-                cached_waveform, cached_rate = torchaudio.load(str(target))
+                cached_waveform, cached_rate = load_audio_file(target)
                 cached_clip = cached_waveform.unsqueeze(0)
                 if sample_rate is None:
                     sample_rate = int(cached_rate)
@@ -3290,7 +3628,7 @@ def build_app(
                         [chunk.pause_after_ms for chunk in line_plan.chunks],
                         line_plan.chunks[0].pause_before_ms,
                     )
-                    torchaudio.save(str(target), combined_line, rate_value)
+                    save_audio_file(target, combined_line, rate_value)
                     return combined_line.unsqueeze(0), int(rate_value), disabled, guarded
 
                 (waveform_value, rate_value, disabled, guarded), runtime_note = (
@@ -3336,7 +3674,7 @@ def build_app(
                 )
                 duration_adjustment["mode"] = "native"
                 actual_ms = waveform.shape[-1] * 1000 / rate
-                torchaudio.save(str(target), waveform[0], rate)
+                save_audio_file(target, waveform[0], rate)
             elif bool(fit_slots) and line.slot_ms and abs(actual_ms - line.slot_ms) > int(fit_tolerance):
                 fitted = fit_duration_factor(used_factor, actual_ms, line.slot_ms)
                 if abs(fitted - used_factor) >= 0.02:
@@ -3349,7 +3687,7 @@ def build_app(
                     waveform, rate, line.slot_ms / 1000.0, slot_duration_mode
                 )
                 actual_ms = waveform.shape[-1] * 1000 / rate
-                torchaudio.save(str(target), waveform[0], rate)
+                save_audio_file(target, waveform[0], rate)
             if sample_rate is None:
                 sample_rate = rate
             elif sample_rate != rate:
@@ -3438,7 +3776,7 @@ def build_app(
                             line.slot_ms / 1000.0,
                             slot_duration_mode,
                         )
-                    torchaudio.save(str(target), candidate[0], candidate_rate)
+                    save_audio_file(target, candidate[0], candidate_rate)
                     candidate_review = review_line_audio(target, line, language_value) or {}
                     candidate_seed = (
                         dialogue_seed + offset * 1000 + retry_index * 100_003
@@ -3469,7 +3807,7 @@ def build_app(
                         break
                 waveform, rate = selected_waveform, selected_rate
                 actual_ms = waveform.shape[-1] * 1000 / rate
-                torchaudio.save(str(target), waveform[0], rate)
+                save_audio_file(target, waveform[0], rate)
                 line_report["actual_duration_ms"] = round(actual_ms)
                 line_report["asr"] = {
                     **selected_review,
@@ -3522,7 +3860,7 @@ def build_app(
         )
         mixed = processed_mixed.unsqueeze(0)
         combined = output_dir / f"{run_id}.wav"
-        torchaudio.save(str(combined), mixed[0], sample_rate, encoding="PCM_S", bits_per_sample=16)
+        save_audio_file(combined, mixed[0], sample_rate, pcm16=True)
         duration_seconds = mixed.shape[-1] / sample_rate
         performance = finish_runtime_measurement(
             performance_measurement,
@@ -3640,7 +3978,7 @@ def build_app(
             clip_path = Path(str(saved_line.get("file") or ""))
             if saved_line.get("status") != "completed" or not clip_path.is_file():
                 raise gr.Error(f"任务第 {line.index} 条音频缺失，请先继续未完成任务。")
-            waveform, rate = torchaudio.load(str(clip_path))
+            waveform, rate = load_audio_file(clip_path)
             if sample_rate is None:
                 sample_rate = int(rate)
             elif sample_rate != int(rate):
@@ -3676,7 +4014,7 @@ def build_app(
         )
         session_dir = output_dir / task_id
         combined = output_dir / f"{task_id}_edited.wav"
-        torchaudio.save(str(combined), processed, sample_rate, encoding="PCM_S", bits_per_sample=16)
+        save_audio_file(combined, processed, sample_rate, pcm16=True)
         srt_content, subtitle_report = rewrite_srt(
             lines,
             report_lines,
@@ -4202,6 +4540,59 @@ def build_app(
                 file_types=["audio"],
                 interactive=False,
             )
+            with gr.Accordion("跨段语速审计与内部单段重做", open=True):
+                gr.Markdown(
+                    "生成多段长文本后，这里按真实音频时长显示每个内部段的语速。"
+                    "可分别试听自动判断前的原始段、自动重试候选和当前采用段；"
+                    "手动重做只运行选中内部段，然后自动重新合并最终音频。"
+                )
+                segment_rate_chart = gr.HTML(render_segment_rate_html([]))
+                segment_rate_table = gr.Dataframe(
+                    headers=SEGMENT_RATE_HEADERS,
+                    datatype=[
+                        "number",
+                        "number",
+                        "str",
+                        "number",
+                        "number",
+                        "number",
+                        "number",
+                        "str",
+                        "str",
+                        "str",
+                        "str",
+                    ],
+                    interactive=False,
+                    wrap=True,
+                    label="内部文本分段语速报告",
+                )
+                segment_manifest_state = gr.Textbox(visible=False)
+                with gr.Row():
+                    segment_rate_select = gr.Dropdown(
+                        choices=[],
+                        label="选择内部段",
+                        info="优先自动选中异常段；没有异常时也可试听或主动重做任意段。",
+                        scale=6,
+                    )
+                    redo_internal_segment_button = gr.Button(
+                        "单独重做该内部段并合入",
+                        variant="primary",
+                        scale=3,
+                    )
+                with gr.Row():
+                    segment_original_audio = gr.Audio(
+                        label="原始段试听",
+                        type="filepath",
+                    )
+                    segment_retry_audio = gr.Audio(
+                        label="自动重试候选试听（未触发时为空）",
+                        type="filepath",
+                    )
+                    segment_selected_audio = gr.Audio(
+                        label="当前采用段试听",
+                        type="filepath",
+                    )
+                segment_rate_status = gr.Markdown("尚未生成可审计的多段长文本。")
             generation_performance = gr.Markdown(
                 "尚未生成。RTF=生成耗时÷音频时长；小于 1 表示生成速度快于实时。"
                 "峰值显存为本次生成期间 PyTorch 实际分配峰值，缓存峰值是 CUDA 保留内存。"
@@ -5413,6 +5804,47 @@ def build_app(
                 history,
                 pronunciation_report,
                 generation_performance,
+                segment_rate_table,
+                segment_rate_chart,
+                segment_rate_select,
+                segment_manifest_state,
+            ],
+            concurrency_limit=1,
+        )
+        generation_event.then(
+            load_segment_artifacts_event,
+            inputs=[segment_manifest_state, segment_rate_select],
+            outputs=[
+                segment_original_audio,
+                segment_retry_audio,
+                segment_selected_audio,
+                segment_rate_status,
+            ],
+            queue=False,
+        )
+        segment_rate_select.change(
+            load_segment_artifacts_event,
+            inputs=[segment_manifest_state, segment_rate_select],
+            outputs=[
+                segment_original_audio,
+                segment_retry_audio,
+                segment_selected_audio,
+                segment_rate_status,
+            ],
+            queue=False,
+        )
+        redo_internal_segment_button.click(
+            redo_internal_segment_event,
+            inputs=[segment_manifest_state, segment_rate_select],
+            outputs=[
+                output_audio,
+                segment_rate_table,
+                segment_rate_chart,
+                segment_rate_select,
+                segment_original_audio,
+                segment_retry_audio,
+                segment_selected_audio,
+                segment_rate_status,
             ],
             concurrency_limit=1,
         )

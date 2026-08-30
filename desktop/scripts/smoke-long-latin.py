@@ -20,6 +20,7 @@ from desktop_generation_controls import (  # noqa: E402
     run_with_long_text_guard,
 )
 from indextts.infer_v2_5 import IndexTTS2  # noqa: E402
+from indextts.utils.audio_io import save_audio_file  # noqa: E402
 
 
 CASES = {
@@ -112,7 +113,7 @@ def main() -> int:
         )
         waveform, sample_rate = _waveform(result)
         output = output_dir / f"long_{language.lower()}_guarded.wav"
-        torchaudio.save(str(output), waveform, sample_rate)
+        save_audio_file(output, waveform, sample_rate)
         duration = waveform.shape[-1] / sample_rate
         final_reasons = assess_long_text_result(
             text,

@@ -13,6 +13,8 @@ from typing import Any, Sequence
 import torch
 import torchaudio
 
+from indextts.utils.audio_io import load_audio_file
+
 
 ASR_MODELS = ("tiny", "base", "small", "medium", "turbo")
 ASR_BACKENDS = ("auto", "openai_whisper", "faster_whisper")
@@ -22,6 +24,8 @@ _MODEL_LOCK = threading.RLock()
 _NON_WORD = re.compile(r"[^\w]+", re.UNICODE)
 _WORD_TOKEN = re.compile(r"[^\W_]+", re.UNICODE)
 _CJK = re.compile(r"[\u3400-\u9fff\u3040-\u30ff]")
+_ARABIC_DIACRITICS = re.compile(r"[\u0610-\u061a\u064b-\u065f\u0670\u06d6-\u06ed]")
+_ARABIC_LETTER_NORMALIZATION = str.maketrans({"أ": "ا", "إ": "ا", "آ": "ا", "ٱ": "ا", "ى": "ي"})
 _CHINESE_NUMBER = re.compile(r"[负負]?[零〇一二两兩三四五六七八九十百千万萬亿億]+(?:点[零〇一二两兩三四五六七八九]+)?")
 _DIGITS = {"零": 0, "〇": 0, "一": 1, "二": 2, "两": 2, "兩": 2, "三": 3, "四": 4, "五": 5, "六": 6, "七": 7, "八": 8, "九": 9}
 _SMALL_UNITS = {"十": 10, "百": 100, "千": 1000}
@@ -105,18 +109,21 @@ def _canonicalize_numbers(text: str) -> str:
     return _CHINESE_NUMBER.sub(replace, text)
 
 
-def _normalized_value(text: str) -> str:
+def _normalized_value(text: str, language: str = "AUTO") -> str:
     value = unicodedata.normalize("NFKC", str(text or "")).casefold()
-    return _canonicalize_numbers(_simplify_chinese(value))
+    value = _canonicalize_numbers(_simplify_chinese(value))
+    if str(language or "AUTO").upper() == "AR":
+        value = _ARABIC_DIACRITICS.sub("", value.replace("ـ", ""))
+        value = value.translate(_ARABIC_LETTER_NORMALIZATION)
+    return value
 
 
 def normalize_review_text(text: str, language: str = "AUTO") -> str:
-    del language
-    return _NON_WORD.sub("", _normalized_value(text)).replace("_", "")
+    return _NON_WORD.sub("", _normalized_value(text, language)).replace("_", "")
 
 
-def _word_tokens(text: str) -> list[str]:
-    return _WORD_TOKEN.findall(_normalized_value(text).replace("_", " "))
+def _word_tokens(text: str, language: str = "AUTO") -> list[str]:
+    return _WORD_TOKEN.findall(_normalized_value(text, language).replace("_", " "))
 
 
 def edit_distance(left: Sequence[Any], right: Sequence[Any]) -> int:
@@ -156,7 +163,7 @@ def review_transcript(expected_text: str, recognized_text: str, language: str = 
     recognized = normalize_review_text(recognized_text, language)
     char_distance = edit_distance(expected, recognized)
     cer = char_distance / max(len(expected), 1)
-    expected_words, recognized_words = _word_tokens(expected_text), _word_tokens(recognized_text)
+    expected_words, recognized_words = _word_tokens(expected_text, language), _word_tokens(recognized_text, language)
     word_distance = edit_distance(expected_words, recognized_words)
     wer = word_distance / max(len(expected_words), 1)
     metric = _metric(language, expected, recognized)
@@ -173,7 +180,7 @@ def review_transcript(expected_text: str, recognized_text: str, language: str = 
         "threshold": threshold, "passed": bool(expected and recognized and similarity >= threshold),
         "language": str(language).upper(),
         "differences": _difference_details(metric_expected, metric_recognized, "" if metric == "cer" else " "),
-        "normalization": ["NFKC", "casefold", "traditional_to_simplified", "number_canonicalization", "punctuation_ignored"],
+        "normalization": ["NFKC", "casefold", "traditional_to_simplified", "number_canonicalization", "punctuation_ignored"] + (["arabic_diacritics_removed", "arabic_alef_ya_normalization"] if str(language or "AUTO").upper() == "AR" else []),
     }
 
 
@@ -251,7 +258,7 @@ def transcribe_waveform(waveform, sample_rate: int, *, language: str = "AUTO", m
 
 
 def transcribe_audio_file(path: str | Path, **kwargs) -> dict[str, Any]:
-    waveform, sample_rate = torchaudio.load(str(path))
+    waveform, sample_rate = load_audio_file(path)
     return transcribe_waveform(waveform, int(sample_rate), **kwargs)
 
 

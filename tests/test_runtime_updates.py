@@ -265,11 +265,14 @@ def test_acceleration_preflight_reports_versions_without_loading_a_model():
     assert set(report["versions"]) == {
         "torch",
         "cuda_runtime",
+        "torchaudio",
+        "torchcodec",
         "deepspeed",
         "flash_attn",
         "triton",
         "ninja",
     }
+    assert report["runtime_checks"]["torchcodec"]["ready"] is True
 
 
 def test_deepspeed_receives_bfloat16_instead_of_treating_bf16_as_fp16(monkeypatch):

@@ -212,10 +212,15 @@ if (!modelDownloadSource.includes("_VERSION_TO_REPO") || !modelDownloadSource.in
   console.error("Packaged model download helper is not the synchronized IndexTTS 2.5 version.");
   process.exit(1);
 }
+const audioIoSource = fs.readFileSync(path.join(moduleRoot, "utils", "audio_io.py"), "utf8");
+if (!audioIoSource.includes("AudioDecoder") || !audioIoSource.includes("AudioEncoder") || !audioIoSource.includes("uses_torchcodec_io")) {
+  console.error("Packaged audio I/O helper is missing native TorchCodec 2.9 migration support.");
+  process.exit(1);
+}
 
 const desktopSource = fs.readFileSync(path.join(packagedRoot, "desktop_webui.py"), "utf8");
 const voiceLibrarySource = fs.readFileSync(path.join(packagedRoot, "desktop_voice_library.py"), "utf8");
-for (const moduleName of ["desktop_presets.py", "desktop_voice_library.py", "desktop_generation_controls.py", "desktop_model_lifecycle.py", "desktop_streaming_audio.py", "desktop_tasks.py", "desktop_project_bundle.py", "desktop_runtime_benchmark.py", "audio_quality.py", "audiocpp_backend.py", "audiocpp_component_manager.py", "candidate_quality.py", "speech_review.py", "timeline_tools.py", "context_emotion.py", "dialogue_runtime.py", "runtime_acceleration.py", "runtime_benchmark.py", "runtime_metrics.py"]) {
+for (const moduleName of ["desktop_presets.py", "desktop_voice_library.py", "desktop_generation_controls.py", "desktop_model_lifecycle.py", "desktop_streaming_audio.py", "desktop_tasks.py", "desktop_project_bundle.py", "desktop_runtime_benchmark.py", "audio_quality.py", "audiocpp_backend.py", "audiocpp_component_manager.py", "candidate_quality.py", "speech_review.py", "timeline_tools.py", "context_emotion.py", "dialogue_runtime.py", "runtime_acceleration.py", "runtime_benchmark.py", "runtime_metrics.py", "segment_rate_workspace.py"]) {
   if (!fs.existsSync(path.join(packagedRoot, moduleName))) {
     console.error(`Packaged desktop runtime module is missing: ${moduleName}`);
     process.exit(1);
@@ -228,6 +233,8 @@ if (
   !desktopSource.includes("open=True") ||
   !desktopSource.includes("完整参数预设（含参考音频）") ||
   !desktopSource.includes("段间静音（毫秒）") ||
+  !desktopSource.includes("跨段语速审计与内部单段重做") ||
+  !desktopSource.includes("redo_internal_segment_event") ||
   !desktopSource.includes("目标时长（秒）") ||
   !desktopSource.includes("标点停顿预设") ||
   !desktopSource.includes("可选音频后处理") ||
@@ -283,6 +290,9 @@ const check = spawnSync(pythonExe, [
   [
     "import torch, gradio, transformers, flash_attn, triton, deepspeed",
     "from indextts.infer_v2_5 import IndexTTS2",
+    "from indextts.gpt.model_v2_5 import GPT2InferenceModel",
+    "from indextts.gpt.transformers_generation_utils import GenerationMixin",
+    "from indextts.utils.audio_io import uses_torchcodec_io",
     "from indextts.pronunciation import PronunciationEntry, process_pronunciation_text",
     "from desktop_generation_controls import DesktopGenerationPlan, DesktopSpeechChunk, allocate_native_chunk_durations, effective_segment_limit, split_speech_chunks",
     "from desktop_model_lifecycle import DesktopModelLifecycle",
@@ -308,6 +318,8 @@ const check = spawnSync(pythonExe, [
     "assert task_choices('不存在的任务目录') == []",
     "assert asr_available()",
     "assert ASR_BACKENDS == ('auto', 'openai_whisper', 'faster_whisper')",
+    "assert GenerationMixin in GPT2InferenceModel.__bases__",
+    "assert uses_torchcodec_io() is False",
     "assert review_transcript('第二十五條臺詞', '第25条台词', 'ZH', 0.99)['passed']",
     "assert review_transcript('one small test', 'one test', 'EN', 0.5)['metric'] == 'wer'",
     "srt, _ = rewrite_srt([DialogueLine(1, '旁白', '测试', 'ZH', 0, 1000)], [], timing_mode='original')",
@@ -317,7 +329,8 @@ const check = spawnSync(pythonExe, [
     "assert 'RTF' in format_runtime_metrics(performance)",
     "preflight = probe_acceleration('cpu')",
     "assert preflight['versions']['torch'] == str(torch.__version__)",
-    "assert set(preflight['versions']) == {'torch', 'cuda_runtime', 'deepspeed', 'flash_attn', 'triton', 'ninja'}",
+    "assert set(preflight['versions']) == {'torch', 'cuda_runtime', 'torchaudio', 'torchcodec', 'deepspeed', 'flash_attn', 'triton', 'ninja'}",
+    "assert preflight['runtime_checks']['torchcodec']['ready'] is True",
     "assert torch.__version__ == '2.8.0+cu128'",
     "print(torch.__version__, gradio.__version__, transformers.__version__, flash_attn.__version__, triton.__version__, deepspeed.__version__, 'pronunciation=OK', 'acceleration=OK', 'generation_controls=OK', 'tasks=OK', 'asr=OK', 'timeline=OK')"
   ].join("; ")

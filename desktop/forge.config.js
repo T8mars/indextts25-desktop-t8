@@ -2,8 +2,28 @@ const fs = require("node:fs");
 const path = require("node:path");
 const { prunePackagedRuntime } = require("./scripts/prune-runtime");
 const desktopPackage = require("./package.json");
+const electronPackage = require("electron/package.json");
 
 const projectRoot = path.resolve(__dirname, "..");
+
+function findCachedElectronZip() {
+  const fileName = `electron-v${electronPackage.version}-win32-x64.zip`;
+  const roots = [
+    process.env.ELECTRON_CACHE,
+    process.env.LOCALAPPDATA && path.join(process.env.LOCALAPPDATA, "electron", "Cache")
+  ].filter(Boolean);
+  for (const root of roots) {
+    if (!fs.existsSync(root)) continue;
+    const direct = path.join(root, fileName);
+    if (fs.existsSync(direct)) return path.dirname(direct);
+    for (const entry of fs.readdirSync(root, { withFileTypes: true })) {
+      if (!entry.isDirectory()) continue;
+      const candidate = path.join(root, entry.name, fileName);
+      if (fs.existsSync(candidate)) return path.dirname(candidate);
+    }
+  }
+  return undefined;
+}
 
 function resolvePythonRuntime() {
   const managedPython = path.join(projectRoot, ".python");
@@ -22,6 +42,7 @@ function resolvePythonRuntime() {
 
 const pythonRuntime = resolvePythonRuntime();
 const sitePackages = path.join(projectRoot, ".venv", "Lib", "site-packages");
+const electronZipDir = findCachedElectronZip();
 
 if (!fs.existsSync(sitePackages)) {
   throw new Error("Python dependencies were not found under .venv/Lib/site-packages.");
@@ -31,6 +52,7 @@ module.exports = {
   packagerConfig: {
     name: `T8star-Aix-IndexTTS-2.5-v${desktopPackage.version}`,
     executableName: "T8star-Aix-IndexTTS-2.5",
+    electronZipDir,
     asar: true,
     icon: path.join(projectRoot, "assets", "index_icon"),
     extraResource: [
@@ -58,6 +80,7 @@ module.exports = {
       path.join(projectRoot, "runtime_metrics.py"),
       path.join(projectRoot, "runtime_benchmark.py"),
       path.join(projectRoot, "candidate_quality.py"),
+      path.join(projectRoot, "segment_rate_workspace.py"),
       path.join(projectRoot, "desktop_model_download.py"),
       path.join(projectRoot, "desktop_model_manifest.json"),
       path.join(projectRoot, "desktop_acceleration_manifest.json"),

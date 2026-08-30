@@ -10,6 +10,7 @@ import torch
 import torchaudio
 
 from indextts.infer_v2_5 import IndexTTS2
+from indextts.utils.audio_io import load_audio_file
 
 
 CASES = {
@@ -50,7 +51,7 @@ def main() -> int:
                 verbose=False,
             )
         )
-        waveform, sample_rate = torchaudio.load(path)
+        waveform, sample_rate = load_audio_file(path)
         if not result or not torch.isfinite(waveform).all() or waveform.shape[-1] < sample_rate // 2:
             raise RuntimeError(f"回归音频无效：{path}")
         if not torch.equal(waveform[..., -1], torch.zeros_like(waveform[..., -1])):

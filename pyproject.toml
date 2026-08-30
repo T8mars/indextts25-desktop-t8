@@ -58,7 +58,7 @@ dependencies = [
   "torchaudio==2.8.*",
   "tqdm>=4.67.1",
   "transformers==4.52.1",
-  "openai-whisper>=20231117",
+  "openai-whisper==20250625",
   "opencc-python-reimplemented>=0.1.7",
 
   # Use "wetext" on Windows/Mac, otherwise "WeTextProcessing" on Linux.

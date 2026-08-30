@@ -10,6 +10,8 @@ from dataclasses import asdict, dataclass
 
 import torch
 
+from indextts.utils.audio_io import probe_torchcodec_runtime
+
 
 MODES = ("off", "auto_safe", "bigvgan_cuda", "torch_compile", "gpt_accel", "deepspeed")
 
@@ -53,6 +55,7 @@ def _distribution_version(*names: str) -> str | None:
 
 
 def probe_acceleration(device: str = "cuda:0") -> dict:
+    audio_runtime = probe_torchcodec_runtime()
     cuda = bool(torch.cuda.is_available() and str(device).startswith("cuda"))
     bf16 = False
     if cuda:
@@ -91,6 +94,8 @@ def probe_acceleration(device: str = "cuda:0") -> dict:
         "gpu": gpu,
         "versions": {
             "torch": str(torch.__version__),
+            "torchaudio": audio_runtime.get("torchaudio"),
+            "torchcodec": audio_runtime.get("torchcodec"),
             "cuda_runtime": str(torch.version.cuda or ""),
             "deepspeed": _distribution_version("deepspeed"),
             "flash_attn": _distribution_version("flash-attn", "flash_attn"),
@@ -98,6 +103,7 @@ def probe_acceleration(device: str = "cuda:0") -> dict:
             "ninja": _distribution_version("ninja"),
         },
         "modules": {
+            "torchcodec": bool(audio_runtime.get("ready")),
             "deepspeed": _has_module("deepspeed"),
             "flash_attn": _has_module("flash_attn"),
             "triton": _has_module("triton"),
@@ -108,6 +114,7 @@ def probe_acceleration(device: str = "cuda:0") -> dict:
             "cl": shutil.which("cl") is not None,
             "cxx": any(shutil.which(name) is not None for name in ("c++", "g++", "clang++")),
         },
+        "runtime_checks": {"torchcodec": audio_runtime},
     }
 
 

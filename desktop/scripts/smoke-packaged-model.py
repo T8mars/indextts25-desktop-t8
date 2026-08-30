@@ -10,6 +10,7 @@ import torch
 import torchaudio
 
 from indextts.infer_v2_5 import IndexTTS2
+from indextts.utils.audio_io import load_audio_file
 
 
 def main() -> int:
@@ -34,7 +35,7 @@ def main() -> int:
     )
     model.infer(
         str(args.speaker.resolve()),
-        "这是零点八点一版本的真实模型验证。",
+        "这是零点二十二点一版本的真实模型验证。",
         str(output),
         "ZH",
         seed=20260824,
@@ -45,13 +46,25 @@ def main() -> int:
         num_beams=3,
         repetition_penalty=10.0,
     )
-    waveform, sample_rate = torchaudio.load(str(output))
+    waveform, sample_rate = load_audio_file(output)
     if waveform.numel() == 0 or sample_rate != 22050:
         raise RuntimeError("Packaged model produced an invalid waveform.")
+    if not torch.isfinite(waveform).all():
+        raise RuntimeError("Packaged model produced NaN or Inf samples.")
+    duration_seconds = waveform.shape[-1] / sample_rate
+    peak = float(waveform.abs().max().item())
+    rms = float(waveform.float().square().mean().sqrt().item())
+    if duration_seconds < 0.2 or peak < 1e-4 or rms < 1e-5:
+        raise RuntimeError(
+            "Packaged model produced an empty or effectively silent waveform: "
+            f"duration={duration_seconds:.3f}s peak={peak:.6f} rms={rms:.6f}"
+        )
     print(json.dumps({
         "output": str(output),
         "sample_rate": sample_rate,
-        "duration_seconds": round(waveform.shape[-1] / sample_rate, 3),
+        "duration_seconds": round(duration_seconds, 3),
+        "peak": round(peak, 6),
+        "rms": round(rms, 6),
         "cuda_kernel": bool(args.cuda_kernel),
         "torch": torch.__version__,
         "gpu": torch.cuda.get_device_name(0),

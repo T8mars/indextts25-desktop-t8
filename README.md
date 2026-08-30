@@ -1,11 +1,11 @@
 # T8star-Aix · IndexTTS 2.5 Desktop
 
 这是基于官方 IndexTTS 2.5 制作的 Windows Electron 桌面整合版源码仓库，当前桌面版本为
-**0.21.0**。完整功能、开发和打包说明见 [Desktop README](desktop/README.md)。
+**0.22.1**。完整功能、开发和打包说明见 [Desktop README](desktop/README.md)。
 
-> 0.21.0 新增音色库 2.0、跨 Desktop/ComfyUI 的 `.t8voice.zip`、完整项目导入导出，以及
-> audio.cpp Windows 运行时与 GGUF 的可选一键安装。所有下载都由用户主动触发，并执行断点续传、
-> 磁盘预检与 SHA-256 校验；默认 Python 推理与约 10GB 官方模型仍保持独立。
+> 0.22.1 在长文本保护基础上加入 Arabic 专用 ASR 基线、Transformers Cache 新接口、
+> TorchCodec/FFmpeg DLL 启动预检、质量趋势图，以及 8GB/24GB 双显存回归。
+> 模型、更新和可选组件仍只在用户明确操作后下载或安装。
 
 - 官方开源项目：[index-tts/index-tts](https://github.com/index-tts/index-tts)（感谢官方团队开源）
 - T8star-Aix ComfyUI 节点：[T8mars/comfyui-indextts25-t8](https://github.com/T8mars/comfyui-indextts25-t8)
@@ -19,6 +19,37 @@
 运行便携版时，可在启动器中选择完整的 IndexTTS 2.5 模型目录，也可点击
 “Hugging Face 自动下载／修复完整模型”；选择父目录后会创建 `IndexTTS-2.5` 子目录。源码开发环境与打包步骤见上方
 Desktop README。本整合版并非 IndexTTS 官方发行版，模型与基础推理代码的权利和许可归原项目所有。
+
+## IndexTTS 2.5 命令行
+
+```powershell
+.\.venv\Scripts\python.exe -m indextts.cli "欢迎使用 IndexTTS 2.5。" `
+  --voice .\voice.wav --model-dir .\checkpoints --language ZH `
+  --precision auto --duration-factor 1.0 --output-path .\gen.wav
+```
+
+CLI 支持 `ZH / EN / JA / ES / AR`、参考情感、八维情感向量、情感文本、正式时长系数、
+原生目标时长、完整采样/CFM 参数，以及可选 BigVGAN CUDA、GPT 加速、Torch Compile 和 DeepSpeed。
+运行 `python -m indextts.cli --help` 可查看全部参数。
+
+## 五语言真实音质回归
+
+OpenAI Whisper 固定为 `20250625`；中英日西使用 `base`，Arabic 使用实测更准确的 `small`。
+8GB/24GB 脱敏基线保存在节点仓库的 `quality_baselines/openai-whisper-mixed-*-gpu.json`；
+每周任务串行执行两档并生成 CER/WER、RTF、峰值显存趋势图，不让普通 PR/Push 加载大模型。
+Torchaudio 2.9+ 使用原生 TorchCodec I/O，并在启动前检查 TorchCodec 与 FFmpeg 共享 DLL；桌面自带的
+Torchaudio 2.8 环境继续走兼容后端。
+
+```powershell
+.\.venv\Scripts\python.exe .\desktop\scripts\smoke-multilingual-quality.py `
+  --model-dir .\checkpoints --voice .\voice.wav `
+  --asr-backend auto --output-dir .\quality-regression --strict
+```
+
+工具固定生成中、英、日、西、阿五组长文本，输出每组 WAV 和 `quality-report.json`，记录 CER/WER、
+分段语速离散度、削波、静音、时长、RTF 与峰值显存。再次运行时可用
+`--baseline 旧报告.json` 检查音质或性能回退；脚本不会自动下载主模型或参考音频，
+但启用可选 ASR 时，所选 Whisper 模型可能下载到输出目录的 `asr_models` 子目录。
 
 ---
 

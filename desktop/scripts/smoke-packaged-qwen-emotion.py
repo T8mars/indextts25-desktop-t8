@@ -11,6 +11,7 @@ import torch
 import torchaudio
 
 from indextts.infer_v2_5 import IndexTTS2
+from indextts.utils.audio_io import load_audio_file
 
 
 CASES = (
@@ -70,7 +71,7 @@ def main() -> int:
             num_beams=3,
             repetition_penalty=10.0,
         )
-        waveform, sample_rate = torchaudio.load(str(output))
+        waveform, sample_rate = load_audio_file(output)
         if waveform.numel() == 0 or sample_rate != 22050:
             raise RuntimeError(f"Qwen emotion smoke produced an invalid waveform: {output}")
         results.append(

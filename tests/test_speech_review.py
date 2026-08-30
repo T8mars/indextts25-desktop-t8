@@ -38,6 +38,13 @@ def test_english_review_uses_wer():
     assert review["passed"] is True
 
 
+def test_arabic_review_normalizes_diacritics_tatweel_alef_and_ya():
+    review = speech_review.review_transcript("إِلَى ٱلْمَدِينَةِ", "الـي المدينة", "AR", 0.99)
+    assert review["metric"] == "wer"
+    assert review["wer"] == 0.0
+    assert "arabic_diacritics_removed" in review["normalization"]
+
+
 def test_transcribe_waveform_resamples_without_external_ffmpeg(monkeypatch):
     captured = {}
 

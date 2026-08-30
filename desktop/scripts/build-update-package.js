@@ -38,6 +38,7 @@ const APP_RESOURCE_FILES = [
   "runtime_metrics.py",
   "runtime_benchmark.py",
   "candidate_quality.py",
+  "segment_rate_workspace.py",
   "desktop_model_download.py",
   "desktop_model_manifest.json",
   "desktop_acceleration_manifest.json",

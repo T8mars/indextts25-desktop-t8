@@ -29,16 +29,19 @@ Windows Electron desktop integration for IndexTTS 2.5. The packaged application 
 - editable millisecond timeline table plus draggable/resizable tracks, ASR word-boundary snapping, and no-inference re-mixing
 - reference-condition cache statistics and safe clearing for this application's own `safetensors` entries
 - conservative cross-segment speech-rate anomaly detection with selective retry of only a collapsed segment
+- visual internal-segment rate audit with original/retry/current audio previews and one-click segment-only regeneration
+- deterministic five-language real-model quality regression with optional CER/WER and baseline comparison
+- a complete IndexTTS 2.5 CLI for five languages, emotion, duration, sampling, precision, and optional acceleration
 - bundled FlashAttention 2.8.3, Triton Windows 3.4.0.post21, and DeepSpeed 0.17.5 Windows acceleration wheels with automatic fallback
 - explicit auto/BF16/FP16/FP32 selection before model loading, plus native-BF16 fallback detection
 - optional CPU placement for Wav2Vec/CAMPPlus reference encoders and fast default-emotion condition reuse
 - no-model acceleration preflight with per-mode availability/reason, exact bundled dependency versions, refresh, and JSON diagnostic export
 - signed GitHub Release app-layer updates with resumable download, exact-file verification, explicit install confirmation, and automatic rollback
 - live model scan/download/verification progress with current file, speed, ETA, conservative disk-space preflight, resumable repair, and precise failure details
-- opt-in audio.cpp component manager for verified Windows CUDA/Vulkan/CPU runtimes plus Q8/F16/original GGUF downloads
+- local-only experimental audio.cpp node that accepts user-supplied CLI/GGUF absolute paths and never installs components
 
 The large model files are intentionally external. On first launch, select a complete IndexTTS 2.5 model directory.
-Version 0.22.0 is aligned to code revision `ee40fa7d`, ComfyUI Node 0.21.0, and model bundle `1.0.0` at revision `14166a74`. Long-text synthesis now measures the actual rate of each internal segment, establishes a median baseline only after two stable segments, and selectively regenerates a later segment only when its rate collapses below 45% of that baseline. A retry is accepted only when it is materially closer to the baseline without becoming too fast; short lines, ordinary emotional slowing, deterministic sampling, and native target duration are left alone. It retains the 0.21.2 transactional project/voice-bundle import and export, Windows-portable archive collision checks, normalized portable WAV storage, strict optional-component manifest containment and integrity verification, and safer disk-space/resume handling. Signed app and model updates remain explicit user actions verified with Ed25519. No benchmark, model load, model download, update download, install, or acceleration mode starts automatically.
+Version 0.22.1 is aligned to code revision `ee40fa7d`, ComfyUI Node 0.21.2, and model bundle `1.0.0` at revision `14166a74`. OpenAI Whisper is pinned to `20250625`: ZH/EN/JA/ES use `base`, while AR uses the materially more accurate `small` baseline. Weekly GPU QA serializes formal 8 GB and 24 GB profiles and publishes CER/WER, RTF, and peak-VRAM trend artifacts. GPT inference now uses the Transformers Cache API, and startup diagnostics check native TorchCodec plus Windows FFmpeg shared DLL availability before Torchaudio 2.9 I/O is attempted; the bundled Torchaudio 2.8 path remains unchanged. Long-text synthesis still applies conservative segment-rate protection. Signed app and model updates remain explicit user actions verified with Ed25519. No benchmark, model load, model download, update download, install, or acceleration mode starts automatically.
 The launcher validates official model file sizes, while the downloader performs full SHA-256 verification.
 This release also supports running the portable package from Windows paths containing Chinese characters.
 AAC/M4A and other compressed reference audio is decoded by the bundled PyAV runtime, without requiring a system FFmpeg installation. Streaming previews are also encoded by bundled PyAV, so Gradio no longer calls an external `ffmpeg` or `ffprobe` executable and cannot fail with `[WinError 2]` merely because those programs are absent from `PATH`.
@@ -46,6 +49,38 @@ The setup screen and Gradio workspace now adapt from compact windows to full-scr
 The pronunciation workspace supports inline Chinese Pinyin, English CMU phonemes, Japanese kana,
 an editable persistent dictionary, preview/validation, search, and YAML/JSON import/export. The dictionary
 is stored under Electron's per-user data directory and is never written into the external model directory.
+
+### Development-branch quality audit and CLI
+
+After a non-streaming multi-segment generation, the `跨段语速审计与内部单段重做` panel displays the real
+units-per-second value and preceding stable median for every internal segment. It preserves separate original,
+automatic-retry, and currently selected WAV artifacts. Selecting a segment and clicking the regeneration button
+runs only that segment with a new reproducible seed, rebuilds all speech blocks and pauses, reapplies the selected
+duration/post-processing policy, and writes the merged final WAV. The first full result is backed up before any
+manual segment replacement.
+
+Run the deterministic multilingual regression against an existing complete model and reference voice:
+
+```powershell
+..\.venv\Scripts\python.exe scripts\smoke-multilingual-quality.py `
+  --model-dir ..\checkpoints --voice ..\voice.wav `
+  --asr-backend auto --output-dir ..\quality-regression --strict
+```
+
+The output contains five WAV files and `quality-report.json`. Add `--baseline previous\quality-report.json` to
+detect material RTF, CER/WER, clipping, silence, duration, or internal-rate regressions. The runner never downloads
+the main model or reference audio.
+
+The repository CLI now uses `indextts.infer_v2_5.IndexTTS2`:
+
+```powershell
+..\.venv\Scripts\python.exe -m indextts.cli "A reproducible IndexTTS 2.5 CLI sample." `
+  --voice ..\voice.wav --model-dir ..\checkpoints --language EN `
+  --precision auto --output-path ..\cli-sample.wav
+```
+
+Use `python -m indextts.cli --help` for emotion references/vectors/text, native target duration, sampling/CFM,
+reference-device, and acceleration options.
 
 The visible `角色音色库` tab copies named voice and emotion-reference audio into the same user-data directory. The
 `语音生成` tab exposes these saved roles in a refreshable dropdown; selecting one reuses its copied timbre audio immediately,
@@ -206,7 +241,7 @@ npm run make
 ```
 
 This builds only `@electron-forge/maker-zip`. The unpacked application is still
-available under `desktop/out/T8star-Aix-IndexTTS-2.5-v0.22.0-win32-x64` for local testing.
+available under `desktop/out/T8star-Aix-IndexTTS-2.5-v0.22.1-win32-x64` for local testing.
 The bundled runtime contains tens of thousands of small files, so Squirrel/NuGet
 can spend a long time repeatedly rewriting a multi-gigabyte package. It is not the
 recommended user distribution. If an installer is specifically required, build it
