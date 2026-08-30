@@ -69,6 +69,21 @@ class _CapturingTTS(_FakeTTS):
         return super().infer(stream_return=stream_return, **kwargs)
 
 
+class _FailingStreamAccelerationTTS(_FakeTTS):
+    @staticmethod
+    def infer(*_args, stream_return=False, **_kwargs):
+        if not stream_return:
+            raise AssertionError("Failed streaming acceleration must not be retried before fallback.")
+
+        def fail_during_iteration():
+            raise RuntimeError(
+                "Keyword argument waves_per_eu was specified but unrecognised"
+            )
+            yield  # pragma: no cover - keeps this function a generator
+
+        return fail_during_iteration()
+
+
 class _FakeQwenEmotion:
     @staticmethod
     def inference(prompt):
@@ -603,6 +618,44 @@ def test_desktop_single_generation_retries_failed_asr_candidate(tmp_path, monkey
     assert len(outputs[-1][2]) == 3
     assert '"attempt_count": 3' in outputs[-1][4]
     assert "RTF" in outputs[-1][5]
+
+
+def test_desktop_streaming_acceleration_failure_reloads_normal_mode(tmp_path):
+    output_dir = tmp_path / "outputs"
+    data_dir = tmp_path / "user-data"
+    output_dir.mkdir()
+    data_dir.mkdir()
+    normal = _CapturingTTS()
+    demo = build_app(
+        _FailingStreamAccelerationTTS(),
+        output_dir,
+        data_dir,
+        verbose=False,
+        fallback_factory=lambda: normal,
+    )
+    generate_block = next(
+        block
+        for block in demo.fns.values()
+        if getattr(block.fn, "__name__", "") == "generate"
+    )
+    inputs = [getattr(component, "value", None) for component in generate_block.inputs]
+    by_label = {
+        getattr(component, "label", None): index
+        for index, component in enumerate(generate_block.inputs)
+    }
+    inputs[0] = "fake-prompt.wav"
+    inputs[1] = "流式加速失败后应自动回退普通模式。"
+    inputs[4] = 0
+    inputs[9] = []
+    inputs[by_label["边生成边试听"]] = True
+
+    outputs = list(generate_block.fn(*inputs))
+
+    assert len(normal.calls) == 1
+    assert Path(outputs[-1][1]).is_file()
+    final_text = "\n".join(str(item) for item in outputs[-1])
+    assert "waves_per_eu" in final_text
+    assert "已释放加速模型、重载普通模式并自动重试" in final_text
 
 
 def test_desktop_dialogue_routes_saved_emotions_per_role(tmp_path):

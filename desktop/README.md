@@ -41,7 +41,7 @@ Windows Electron desktop integration for IndexTTS 2.5. The packaged application 
 - local-only experimental audio.cpp node that accepts user-supplied CLI/GGUF absolute paths and never installs components
 
 The large model files are intentionally external. On first launch, select a complete IndexTTS 2.5 model directory.
-Version 0.22.1 is aligned to code revision `ee40fa7d`, ComfyUI Node 0.21.2, and model bundle `1.0.0` at revision `14166a74`. OpenAI Whisper is pinned to `20250625`: ZH/EN/JA/ES use `base`, while AR uses the materially more accurate `small` baseline. Weekly GPU QA serializes formal 8 GB and 24 GB profiles and publishes CER/WER, RTF, and peak-VRAM trend artifacts. GPT inference now uses the Transformers Cache API, and startup diagnostics check native TorchCodec plus Windows FFmpeg shared DLL availability before Torchaudio 2.9 I/O is attempted; the bundled Torchaudio 2.8 path remains unchanged. Long-text synthesis still applies conservative segment-rate protection. Signed app and model updates remain explicit user actions verified with Ed25519. No benchmark, model load, model download, update download, install, or acceleration mode starts automatically.
+Version 0.22.2 is aligned to code revision `ee40fa7d`, ComfyUI Node 0.21.4, and model bundle `1.0.0` at revision `14166a74`. Streaming synthesis now catches optional acceleration failures, reloads the normal model, and completes the task instead of surfacing raw PyTorch/Triton errors. The launcher recommends the balanced profile on high-VRAM GPUs; experimental GPT acceleration remains an explicit manual choice. Known NVIDIA `waves_per_eu` mismatches receive an actionable diagnostic and safe fallback. OpenAI Whisper is pinned to `20250625`: ZH/EN/JA/ES use `base`, while AR uses the materially more accurate `small` baseline. Weekly GPU QA serializes formal 8 GB and 24 GB profiles and publishes CER/WER, RTF, and peak-VRAM trend artifacts. Signed app and model updates remain explicit user actions verified with Ed25519. No benchmark, model load, model download, update download, install, or acceleration mode starts automatically.
 The launcher validates official model file sizes, while the downloader performs full SHA-256 verification.
 This release also supports running the portable package from Windows paths containing Chinese characters.
 AAC/M4A and other compressed reference audio is decoded by the bundled PyAV runtime, without requiring a system FFmpeg installation. Streaming previews are also encoded by bundled PyAV, so Gradio no longer calls an external `ffmpeg` or `ffprobe` executable and cannot fail with `[WinError 2]` merely because those programs are absent from `PATH`.
@@ -241,7 +241,7 @@ npm run make
 ```
 
 This builds only `@electron-forge/maker-zip`. The unpacked application is still
-available under `desktop/out/T8star-Aix-IndexTTS-2.5-v0.22.1-win32-x64` for local testing.
+available under `desktop/out/T8star-Aix-IndexTTS-2.5-v0.22.2-win32-x64` for local testing.
 The bundled runtime contains tens of thousands of small files, so Squirrel/NuGet
 can spend a long time repeatedly rewriting a multi-gigabyte package. It is not the
 recommended user distribution. If an installer is specifically required, build it

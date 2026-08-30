@@ -19,6 +19,8 @@ def main() -> int:
     parser.add_argument("--speaker", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--cuda-kernel", action="store_true")
+    parser.add_argument("--gpt-accel", action="store_true")
+    parser.add_argument("--torch-compile", action="store_true")
     args = parser.parse_args()
     model_dir = args.model_dir.resolve()
     output = args.output.resolve()
@@ -31,6 +33,8 @@ def main() -> int:
         device="cuda:0",
         use_bf16=True,
         use_cuda_kernel=args.cuda_kernel,
+        use_accel=args.gpt_accel,
+        use_torch_compile=args.torch_compile,
         use_qwen_emo=False,
     )
     model.infer(
@@ -41,10 +45,10 @@ def main() -> int:
         seed=20260824,
         diffusion_steps=8,
         do_sample=True,
-        top_p=0.8,
-        top_k=30,
-        num_beams=3,
-        repetition_penalty=10.0,
+        top_p=1.0 if args.gpt_accel else 0.8,
+        top_k=0 if args.gpt_accel else 30,
+        num_beams=1 if args.gpt_accel else 3,
+        repetition_penalty=1.0 if args.gpt_accel else 10.0,
     )
     waveform, sample_rate = load_audio_file(output)
     if waveform.numel() == 0 or sample_rate != 22050:
@@ -66,6 +70,8 @@ def main() -> int:
         "peak": round(peak, 6),
         "rms": round(rms, 6),
         "cuda_kernel": bool(args.cuda_kernel),
+        "gpt_accel": bool(args.gpt_accel),
+        "torch_compile": bool(args.torch_compile),
         "torch": torch.__version__,
         "gpu": torch.cuda.get_device_name(0),
     }, ensure_ascii=False))

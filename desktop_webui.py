@@ -88,7 +88,13 @@ from indextts.pronunciation import (
     save_dictionary,
     validate_reading,
 )
-from runtime_acceleration import MODES, format_acceleration_report, probe_acceleration, resolve_acceleration
+from runtime_acceleration import (
+    MODES,
+    describe_acceleration_failure,
+    format_acceleration_report,
+    probe_acceleration,
+    resolve_acceleration,
+)
 from runtime_metrics import (
     finish_runtime_measurement,
     format_runtime_metrics,
@@ -108,7 +114,7 @@ from segment_rate_workspace import (
 
 
 APP_TITLE = "T8star-Aix · IndexTTS 2.5"
-DESKTOP_VERSION = "0.22.1"
+DESKTOP_VERSION = "0.22.2"
 MODEL_MANIFEST = json.loads(
     (Path(__file__).resolve().parent / "desktop_model_manifest.json").read_text(encoding="utf-8")
 )
@@ -898,22 +904,26 @@ def build_app(
             indent=2,
         )
 
-    def execute_with_runtime_fallback(callback):
+    def execute_with_runtime_fallback(callback, *, initial_error=None):
         """Retry once with a freshly loaded normal model after optional acceleration fails."""
 
         nonlocal tts, runtime_fallback_used, runtime_fallback_note
         ensure_model()
-        try:
-            result = callback()
-        except Exception as exc:
+        if initial_error is None:
+            try:
+                return callback(), runtime_fallback_note
+            except Exception as exc:
+                initial_error = exc
+        exc = initial_error
+        if exc is not None:
             if fallback_factory is None or runtime_fallback_used:
-                raise
+                raise exc
             runtime_fallback_note = (
-                f"可选加速运行失败：{type(exc).__name__}: {exc}；"
+                f"可选加速运行失败：{describe_acceleration_failure(exc)}；"
                 "已释放加速模型、重载普通模式并自动重试。"
             )
             print(">> " + runtime_fallback_note, flush=True)
-            traceback.print_exc()
+            traceback.print_exception(type(exc), exc, exc.__traceback__)
             lifecycle.release("acceleration_fallback")
             tts = None
             try:
@@ -1763,25 +1773,40 @@ def build_app(
                     duration_factor,
                     target_duration_seconds if native_requested else None,
                 )
-                while True:
-                    try:
-                        preview_waveform, preview_status = next(stream_generator)
-                    except StopIteration as finished:
-                        waveform, sample_rate, accel_disabled, cache_risk_guarded = finished.value
-                        selected_segment_session = None
-                        runtime_note = ""
-                        break
-                    yield (
-                        (sample_rate if 'sample_rate' in locals() else 22050, preview_waveform.squeeze(0).numpy()),
-                        gr.skip(),
-                        gr.skip(),
-                        gr.skip(),
-                        format_pronunciation_report(pronunciation_result) + "\n\n" + preview_status,
-                        "正在生成；完成后显示真实耗时、RTF 与 CUDA 峰值显存。",
-                        gr.skip(),
-                        gr.skip(),
-                        gr.skip(),
-                        gr.skip(),
+                try:
+                    while True:
+                        try:
+                            preview_waveform, preview_status = next(stream_generator)
+                        except StopIteration as finished:
+                            waveform, sample_rate, accel_disabled, cache_risk_guarded = finished.value
+                            selected_segment_session = None
+                            runtime_note = ""
+                            break
+                        yield (
+                            (sample_rate if 'sample_rate' in locals() else 22050, preview_waveform.squeeze(0).numpy()),
+                            gr.skip(),
+                            gr.skip(),
+                            gr.skip(),
+                            format_pronunciation_report(pronunciation_result) + "\n\n" + preview_status,
+                            "正在生成；完成后显示真实耗时、RTF 与 CUDA 峰值显存。",
+                            gr.skip(),
+                            gr.skip(),
+                            gr.skip(),
+                            gr.skip(),
+                        )
+                except Exception as stream_error:
+                    (
+                        waveform,
+                        sample_rate,
+                        accel_disabled,
+                        cache_risk_guarded,
+                        selected_segment_session,
+                    ), runtime_note = execute_with_runtime_fallback(
+                        lambda: infer_once(
+                            duration_factor,
+                            target_duration_seconds if native_requested else None,
+                        ),
+                        initial_error=stream_error,
                     )
             else:
                 (
@@ -6071,7 +6096,10 @@ def main() -> None:
         if acceleration.effective == "off":
             raise
         traceback.print_exc()
-        startup_fallback = f"可选加速初始化失败：{type(exc).__name__}: {exc}；已自动回退普通模式。"
+        startup_fallback = (
+            f"可选加速初始化失败：{describe_acceleration_failure(exc)}；"
+            "已自动回退普通模式。"
+        )
         print(">> " + startup_fallback, flush=True)
         acceleration = resolve_acceleration("off", acceleration_device, capabilities)
         if torch.cuda.is_available():

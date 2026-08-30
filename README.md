@@ -1,10 +1,10 @@
 # T8star-Aix · IndexTTS 2.5 Desktop
 
 这是基于官方 IndexTTS 2.5 制作的 Windows Electron 桌面整合版源码仓库，当前桌面版本为
-**0.22.1**。完整功能、开发和打包说明见 [Desktop README](desktop/README.md)。
+**0.22.2**。完整功能、开发和打包说明见 [Desktop README](desktop/README.md)。
 
-> 0.22.1 在长文本保护基础上加入 Arabic 专用 ASR 基线、Transformers Cache 新接口、
-> TorchCodec/FFmpeg DLL 启动预检、质量趋势图，以及 8GB/24GB 双显存回归。
+> 0.22.2 修复流式试听中的可选加速异常无法自动回退，并把实验性 GPT 加速改为手动选择；
+> `waves_per_eu` 等 PyTorch/Triton 不兼容错误会自动重载普通模式继续生成。
 > 模型、更新和可选组件仍只在用户明确操作后下载或安装。
 
 - 官方开源项目：[index-tts/index-tts](https://github.com/index-tts/index-tts)（感谢官方团队开源）

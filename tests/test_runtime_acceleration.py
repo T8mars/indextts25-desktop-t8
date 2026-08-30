@@ -1,4 +1,8 @@
-from runtime_acceleration import recommend_runtime_config, resolve_acceleration
+from runtime_acceleration import (
+    describe_acceleration_failure,
+    recommend_runtime_config,
+    resolve_acceleration,
+)
 
 
 def capabilities(*, cuda=True, deepspeed=False, flash=False, triton=False, ninja=False, nvcc=False, cxx=False):
@@ -33,6 +37,14 @@ def test_deepspeed_is_opt_in_and_never_part_of_auto_safe():
 def test_cpu_always_falls_back():
     selected = resolve_acceleration("gpt_accel", device="cpu", capabilities=capabilities(cuda=False, flash=True, triton=True))
     assert selected.effective == "off"
+
+
+def test_waves_per_eu_error_is_reported_as_a_torch_triton_mismatch():
+    message = describe_acceleration_failure(
+        RuntimeError("Keyword argument waves_per_eu was specified but unrecognised")
+    )
+    assert "仅适用于 AMD" in message
+    assert "GPT/torch.compile 加速与本机环境不兼容" in message
 
 
 def test_bigvgan_requires_both_cuda_and_cpp_toolchains():

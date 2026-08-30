@@ -9,7 +9,7 @@ const {
 assert.equal(recommendRuntimeProfile({ cudaAvailable: false, vramGb: 32 }), "compatibility");
 assert.equal(recommendRuntimeProfile({ cudaAvailable: true, vramGb: 8 }), "low_vram");
 assert.equal(recommendRuntimeProfile({ cudaAvailable: true, vramGb: 12 }), "balanced");
-assert.equal(recommendRuntimeProfile({ cudaAvailable: true, vramGb: 24 }), "max_speed");
+assert.equal(recommendRuntimeProfile({ cudaAvailable: true, vramGb: 24 }), "balanced");
 
 const recommended = resolveRuntimeProfile("recommended", "low_vram");
 assert.equal(recommended.name, "low_vram");

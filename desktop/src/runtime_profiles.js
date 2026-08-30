@@ -23,7 +23,7 @@ const RUNTIME_PROFILES = Object.freeze({
     precisionMode: "auto",
     referenceDevice: "same",
     reuseDefaultEmotion: true,
-    description: "参考编码器同显卡并启用 GPT 加速；不兼容采样会自动回退普通路径。"
+    description: "手动启用实验性 GPT 加速；驱动或 PyTorch/Triton 不兼容时自动回退普通路径。"
   }),
   compatibility: Object.freeze({
     label: "稳定兼容",
@@ -39,7 +39,6 @@ function recommendRuntimeProfile(hardware = {}) {
   if (!hardware.cudaAvailable) return "compatibility";
   const vramGb = Number(hardware.vramGb || 0);
   if (vramGb > 0 && vramGb < 10) return "low_vram";
-  if (vramGb >= 16) return "max_speed";
   return "balanced";
 }
 
