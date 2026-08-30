@@ -1,4 +1,6 @@
 import json
+import hashlib
+import wave
 import zipfile
 from pathlib import Path
 
@@ -9,12 +11,20 @@ from desktop_tasks import create_task, load_task, set_task_status, update_task_l
 from desktop_voice_library import VoiceLibrary
 
 
+def _write_test_wav(path: Path, *, sample: int = 100, frames: int = 240) -> Path:
+    with wave.open(str(path), "wb") as audio:
+        audio.setnchannels(1)
+        audio.setsampwidth(2)
+        audio.setframerate(24000)
+        audio.writeframes(int(sample).to_bytes(2, "little", signed=True) * frames)
+    return path
+
+
 def _completed_project(tmp_path: Path):
     output = tmp_path / "outputs"
     data = tmp_path / "data"
     output.mkdir()
-    voice_audio = tmp_path / "voice.wav"
-    voice_audio.write_bytes(b"voice")
+    voice_audio = _write_test_wav(tmp_path / "voice.wav")
     voices = VoiceLibrary(data)
     voices.save("旁白", voice_audio, tags="旁白", quality={"score": 90})
     task_id = "dialogue_20260829_120000_1234abcd"
@@ -34,7 +44,9 @@ def _completed_project(tmp_path: Path):
     clip = session / "0001_旁白.wav"
     clip.write_bytes(b"clip")
     report = session / "report.json"
-    report.write_text(json.dumps({"lines": [{"role": "旁白", "file": str(clip)}]}), encoding="utf-8")
+    report.write_text(
+        json.dumps({"lines": [{"role": "旁白", "file": str(clip)}]}), encoding="utf-8"
+    )
     subtitle = session / "rewritten.srt"
     subtitle.write_text("1\n00:00:00,000 --> 00:00:01,000\n你好\n", encoding="utf-8")
     combined = output / f"{task_id}.wav"
@@ -92,8 +104,7 @@ def test_project_bundle_renames_conflicting_voice_and_task_roles(tmp_path: Path)
     output, voices, task_id = _completed_project(tmp_path)
     project = export_project(output, task_id, voices, tmp_path / "episode")
     restored_voices = VoiceLibrary(tmp_path / "restored-data")
-    existing_audio = tmp_path / "existing.wav"
-    existing_audio.write_bytes(b"existing")
+    existing_audio = _write_test_wav(tmp_path / "existing.wav", sample=200)
     restored_voices.save("旁白", existing_audio)
 
     restored_output = tmp_path / "restored-output"
@@ -109,7 +120,8 @@ def test_project_bundle_renames_conflicting_voice_and_task_roles(tmp_path: Path)
     assert task["settings"]["default_role"] == "旁白（导入 2）"
     assert task["settings"]["timeline_rows"][0][1] == "旁白（导入 2）"
     assert task["lines"]["1"]["report"]["role"] == "旁白（导入 2）"
-    assert Path(restored_voices.get("旁白（导入 2）").audio_path).read_bytes() == b"voice"
+    with wave.open(restored_voices.get("旁白（导入 2）").audio_path, "rb") as audio:
+        assert audio.getnframes() > 0
 
 
 def test_project_bundle_rejects_files_missing_from_manifest(tmp_path: Path):
@@ -151,3 +163,50 @@ def test_project_bundle_rolls_back_task_and_voices_on_voice_import_failure(
     assert restored_voices.list() == []
     assert not list(restored_output.glob("dialogue_*"))
     assert not list(restored_output.glob("dialogue_*.wav"))
+
+
+def test_project_bundle_rejects_windows_case_aliases(tmp_path: Path):
+    project = tmp_path / "case-alias.indextts-project.zip"
+    upper = b"upper"
+    lower = b"lower"
+    manifest = {
+        "schemaVersion": 1,
+        "task": {},
+        "files": {
+            "task/A.wav": {
+                "size": len(upper),
+                "sha256": hashlib.sha256(upper).hexdigest(),
+            },
+            "task/a.wav": {
+                "size": len(lower),
+                "sha256": hashlib.sha256(lower).hexdigest(),
+            },
+        },
+    }
+    with zipfile.ZipFile(project, "w") as archive:
+        archive.writestr("project.json", json.dumps(manifest))
+        archive.writestr("task/A.wav", upper)
+        archive.writestr("task/a.wav", lower)
+
+    with pytest.raises(ValueError, match="Windows"):
+        import_project(project, tmp_path / "output", VoiceLibrary(tmp_path / "voices"))
+
+
+def test_project_export_preserves_existing_target_on_failure(
+    tmp_path: Path, monkeypatch
+):
+    output, voices, task_id = _completed_project(tmp_path)
+    target = tmp_path / "episode.indextts-project.zip"
+    target.write_bytes(b"existing-project")
+    original_write = zipfile.ZipFile.write
+
+    def fail_first_write(self, *args, **kwargs):
+        raise OSError("simulated export failure")
+
+    monkeypatch.setattr(zipfile.ZipFile, "write", fail_first_write)
+    with pytest.raises(OSError, match="simulated export failure"):
+        export_project(output, task_id, voices, target)
+    monkeypatch.setattr(zipfile.ZipFile, "write", original_write)
+
+    assert target.read_bytes() == b"existing-project"
+    assert not list(tmp_path.glob(".episode.indextts-project.zip.*.tmp"))

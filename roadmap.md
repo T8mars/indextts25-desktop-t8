@@ -1,22 +1,31 @@
 # T8star-Aix IndexTTS 2.5 开发路线图
 
 本文档记录桌面整合包与 ComfyUI 节点的共同开发范围、依赖政策和验收标准。当前公开基线为
-**Desktop 0.21.0 / ComfyUI Node 0.20.0**。
+**Desktop 0.21.2 / ComfyUI Node 0.20.9**。
 
 | 发行物 | 当前版本 | 本版主要内容 |
 | --- | --- | --- |
-| Windows Electron 整合包 | 0.21.0 | 音色库 2.0、项目包、audio.cpp 一键组件 |
-| ComfyUI V3 节点 | 0.20.0 | 已保存音色节点、audio.cpp 一键组件、34 组工作流 |
+| Windows Electron 整合包 | 0.21.2 | 音色/项目包事务保护、便携路径校验、签名自动更新 |
+| ComfyUI V3 节点 | 0.20.9 | 33 组工作流、Registry 扫描兼容门禁、模型与下载加固 |
 | 固定官方核心 | `ee40fa7d` | 未发现必须更换的 revision |
 | 固定模型镜像 | `14166a74` | Hugging Face 独立下载，26 个主模型与辅助文件全部校验 |
 
-## v0.21.0 / Node v0.20.0
+## Desktop v0.21.2 / Node v0.20.9
+
+- [x] Desktop 音色包与项目包改为事务导入/原子导出，失败时不留下半成品或污染现有音色库。
+- [x] 拒绝 Windows 大小写、Unicode 归一化或尾随空格下会互相覆盖的压缩包路径。
+- [x] 保存音色统一解码为单声道 24 kHz PCM WAV，并拒绝无有效采样的输入。
+- [x] Desktop audio.cpp 可选组件严格限制在用户数据目录内，清单、大小和 SHA-256 缺一不可。
+- [x] 启动器版本展示同步到 Desktop 0.21.2 / Node 0.20.9。
+- [x] Node 0.20.9 增加 Pylint 4 Fatal/Astroid CI 门禁并完成 Linux、Windows 双平台测试。
+
+## Desktop v0.21.0 / Node v0.20.0（历史）
 
 - [x] 音色库新增标签、搜索、收藏、备注、质量元数据与 `.t8voice.zip` 导入导出。
 - [x] ComfyUI 新增“已保存音色”节点，直接读取 Desktop 音色包，无需重复上传参考音频。
 - [x] Desktop 完整项目包携带任务状态、逐句/合并音频、字幕报告与引用音色，可跨机器恢复。
-- [x] Desktop 与 ComfyUI 均提供主动确认的 audio.cpp Windows 运行时/GGUF 下载、续传、磁盘与哈希校验。
-- [x] ComfyUI 示例扩充到 34 组 UI/API 工作流。
+- [x] Desktop 与当时的 ComfyUI 版本均提供主动确认的 audio.cpp Windows 运行时/GGUF 下载、续传、磁盘与哈希校验。
+- [x] 当时 ComfyUI 示例扩充到 34 组 UI/API 工作流；Node 0.20.5 后已删除 Registry 不允许的一键联网安装示例，现保留 33 组。
 
 ## v0.20.0 / Node v0.19.0
 

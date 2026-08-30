@@ -1,8 +1,10 @@
 import hashlib
 import io
 import json
+import os
 import zipfile
 from pathlib import Path
+from types import SimpleNamespace
 
 import audiocpp_component_manager as manager
 import pytest
@@ -23,7 +25,9 @@ class _Response(io.BytesIO):
 
 def test_download_verifies_checksum_and_emits_progress(tmp_path: Path, monkeypatch):
     payload = b"verified-payload"
-    monkeypatch.setattr(manager.urllib.request, "urlopen", lambda *args, **kwargs: _Response(payload))
+    monkeypatch.setattr(
+        manager.urllib.request, "urlopen", lambda *args, **kwargs: _Response(payload)
+    )
     events = []
     target = manager._download(
         "https://example.invalid/file.zip",
@@ -44,7 +48,9 @@ def test_download_recovers_completed_part_without_network(tmp_path: Path, monkey
     monkeypatch.setattr(
         manager.urllib.request,
         "urlopen",
-        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("network not expected")),
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("network not expected")
+        ),
     )
     restored = manager._download(
         "https://example.invalid/file.zip",
@@ -56,7 +62,9 @@ def test_download_recovers_completed_part_without_network(tmp_path: Path, monkey
     assert restored.read_bytes() == payload
 
 
-def test_install_runtime_selects_assets_extracts_and_records_manifest(tmp_path: Path, monkeypatch):
+def test_install_runtime_selects_assets_extracts_and_records_manifest(
+    tmp_path: Path, monkeypatch
+):
     binary_zip = io.BytesIO()
     with zipfile.ZipFile(binary_zip, "w") as archive:
         archive.writestr("audio/bin/audiocpp_cli.exe", b"exe")
@@ -103,7 +111,9 @@ def test_install_runtime_selects_assets_extracts_and_records_manifest(tmp_path: 
     result = manager.install_runtime(tmp_path, "cuda")
     assert result["release"] == "v9.9.9"
     assert Path(result["executable"]).read_bytes() == b"exe"
-    assert (Path(result["executable"]).parent / "cudart64_12.dll").read_bytes() == b"cuda"
+    assert (
+        Path(result["executable"]).parent / "cudart64_12.dll"
+    ).read_bytes() == b"cuda"
     status = manager.component_status(tmp_path)
     assert status["runtimeReady"] is True
 
@@ -119,14 +129,20 @@ def test_install_model_uses_hf_revision_size_and_hash(tmp_path: Path, monkeypatc
         "url": "https://example.invalid/model",
     }
     monkeypatch.setattr(manager, "_model_metadata", lambda quantization: metadata)
-    monkeypatch.setattr(manager.urllib.request, "urlopen", lambda *args, **kwargs: _Response(payload))
+    monkeypatch.setattr(
+        manager.urllib.request, "urlopen", lambda *args, **kwargs: _Response(payload)
+    )
     result = manager.install_model(tmp_path, "q8_0")
     assert Path(result["modelPath"]).read_bytes() == payload
-    saved = json.loads((Path(result["modelPath"]).parent / "t8-model.json").read_text(encoding="utf-8"))
+    saved = json.loads(
+        (Path(result["modelPath"]).parent / "t8-model.json").read_text(encoding="utf-8")
+    )
     assert saved["revision"] == "a" * 40
 
 
-def test_component_status_detects_same_size_model_corruption(tmp_path: Path, monkeypatch):
+def test_component_status_detects_same_size_model_corruption(
+    tmp_path: Path, monkeypatch
+):
     payload = b"good-model"
     metadata = {
         "filename": "index-tts2_5-q8_0.gguf",
@@ -151,7 +167,110 @@ def test_component_status_detects_same_size_model_corruption(tmp_path: Path, mon
     assert status["modelIntegrity"] == "sha256-mismatch"
 
 
-def test_component_status_uses_relative_paths_after_portable_move(tmp_path: Path, monkeypatch):
+def test_component_status_invalidates_hash_cache_after_same_stat_tamper(
+    tmp_path: Path,
+    monkeypatch,
+):
+    payload = b"good-model"
+    metadata = {
+        "filename": "index-tts2_5-q8_0.gguf",
+        "repositoryPath": "IndexTTS2.5-GGUF/index-tts2_5-q8_0.gguf",
+        "revision": "d" * 40,
+        "size": len(payload),
+        "sha256": hashlib.sha256(payload).hexdigest(),
+        "url": "https://example.invalid/model",
+    }
+    monkeypatch.setattr(manager, "_model_metadata", lambda _quantization: metadata)
+    monkeypatch.setattr(
+        manager.urllib.request, "urlopen", lambda *args, **kwargs: _Response(payload)
+    )
+    result = manager.install_model(tmp_path, "q8_0")
+    model = Path(result["modelPath"])
+    assert manager.component_status(tmp_path, verify_hash=True)["modelReady"] is True
+    original = model.stat()
+
+    model.write_bytes(b"evil-model")
+    os.utime(model, ns=(original.st_atime_ns, original.st_mtime_ns))
+
+    status = manager.component_status(tmp_path, verify_hash=True)
+    assert status["modelReady"] is False
+    assert status["modelIntegrity"] == "sha256-mismatch"
+
+
+def test_component_status_rejects_manifest_path_outside_component_root(tmp_path: Path):
+    root = manager._component_root(tmp_path)
+    root.mkdir(parents=True)
+    outside = tmp_path / "outside.exe"
+    outside.write_bytes(b"trusted-looking")
+    manifest = {
+        "schemaVersion": manager.COMPONENT_SCHEMA_VERSION,
+        "release": "v1",
+        "backend": "cpu",
+        "executable": str(outside),
+        "executableSize": outside.stat().st_size,
+        "executableSha256": hashlib.sha256(outside.read_bytes()).hexdigest(),
+    }
+    (root / "current-runtime.json").write_text(json.dumps(manifest), encoding="utf-8")
+
+    status = manager.component_status(tmp_path, verify_hash=True)
+
+    assert status["runtimeReady"] is False
+    assert status["runtimeIntegrity"] == "missing"
+    assert status["executable"] == ""
+
+
+def test_install_model_rejects_invalid_full_part_before_disk_preflight(
+    tmp_path: Path,
+    monkeypatch,
+):
+    payload = b"good-model"
+    metadata = {
+        "filename": "index-tts2_5-q8_0.gguf",
+        "repositoryPath": "IndexTTS2.5-GGUF/index-tts2_5-q8_0.gguf",
+        "revision": "e" * 40,
+        "size": len(payload),
+        "sha256": hashlib.sha256(payload).hexdigest(),
+        "url": "https://example.invalid/model",
+    }
+    root = manager._component_root(tmp_path)
+    target = root / "models" / manager.AUDIOCPP_MODEL_FOLDER / metadata["filename"]
+    part = target.with_suffix(target.suffix + ".download.part")
+    part.parent.mkdir(parents=True)
+    part.write_bytes(b"evil-model")
+    monkeypatch.setattr(manager, "_model_metadata", lambda _quantization: metadata)
+    monkeypatch.setattr(
+        manager.shutil,
+        "disk_usage",
+        lambda _path: SimpleNamespace(free=manager.DISK_RESERVE_BYTES + 1),
+    )
+    monkeypatch.setattr(
+        manager,
+        "_download",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("download must not start")
+        ),
+    )
+
+    with pytest.raises(RuntimeError, match="空间不足"):
+        manager.install_model(tmp_path, "q8_0")
+
+    assert not part.exists()
+
+
+def test_component_status_ignores_non_object_manifests(tmp_path: Path):
+    root = manager._component_root(tmp_path)
+    root.mkdir(parents=True)
+    (root / "current-runtime.json").write_text("[]", encoding="utf-8")
+
+    status = manager.component_status(tmp_path)
+
+    assert status["runtimeReady"] is False
+    assert status["runtimeIntegrity"] == "manifest-invalid"
+
+
+def test_component_status_uses_relative_paths_after_portable_move(
+    tmp_path: Path, monkeypatch
+):
     payload = b"portable-model"
     metadata = {
         "filename": "index-tts2_5-q8_0.gguf",
@@ -162,7 +281,9 @@ def test_component_status_uses_relative_paths_after_portable_move(tmp_path: Path
         "url": "https://example.invalid/model",
     }
     monkeypatch.setattr(manager, "_model_metadata", lambda _quantization: metadata)
-    monkeypatch.setattr(manager.urllib.request, "urlopen", lambda *args, **kwargs: _Response(payload))
+    monkeypatch.setattr(
+        manager.urllib.request, "urlopen", lambda *args, **kwargs: _Response(payload)
+    )
     original = tmp_path / "original"
     moved = tmp_path / "moved"
     manager.install_model(original, "q8_0")
@@ -197,7 +318,9 @@ def test_runtime_update_keeps_previous_install_when_staging_copy_fails(
     }
     monkeypatch.setattr(manager, "_request_json", lambda _url: release)
     monkeypatch.setattr(manager.os, "name", "nt")
-    monkeypatch.setattr(manager.urllib.request, "urlopen", lambda *args, **kwargs: _Response(data))
+    monkeypatch.setattr(
+        manager.urllib.request, "urlopen", lambda *args, **kwargs: _Response(data)
+    )
     first = manager.install_runtime(tmp_path, "cpu")
     executable = Path(first["executable"])
     original_copytree = manager.shutil.copytree

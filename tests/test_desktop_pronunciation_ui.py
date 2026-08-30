@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import wave
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -23,6 +24,15 @@ from desktop_webui import (
     upsert_pronunciation_entry,
 )
 from indextts.pronunciation import PronunciationValidationError
+
+
+def _write_test_wav(path: Path, *, sample: int = 100, frames: int = 240) -> Path:
+    with wave.open(str(path), "wb") as audio:
+        audio.setnchannels(1)
+        audio.setsampwidth(2)
+        audio.setframerate(24000)
+        audio.writeframes(int(sample).to_bytes(2, "little", signed=True) * frames)
+    return path
 
 
 class _FakeTokenizer:
@@ -94,8 +104,7 @@ def test_desktop_builds_complete_pronunciation_workspace(tmp_path, monkeypatch):
     config = demo.get_config_file()
     config_text = json.dumps(config, ensure_ascii=False)
     labels = {
-        component.get("props", {}).get("label")
-        for component in config["components"]
+        component.get("props", {}).get("label") for component in config["components"]
     }
     values = {
         component.get("props", {}).get("value")
@@ -106,7 +115,8 @@ def test_desktop_builds_complete_pronunciation_workspace(tmp_path, monkeypatch):
         component
         for component in config["components"]
         if component.get("type") == "accordion"
-        and component.get("props", {}).get("label") == "多音字使用方法与发音设置（默认展开）"
+        and component.get("props", {}).get("label")
+        == "多音字使用方法与发音设置（默认展开）"
     )
     dictionary_language = next(
         component
@@ -163,7 +173,9 @@ def test_desktop_builds_complete_pronunciation_workspace(tmp_path, monkeypatch):
     assert "生成后逐句自动 ASR 校对" in labels
     assert "回写字幕时间" in labels
     assert "回写字幕文本" in labels
-    assert "可编辑时间轴（表格与下方可拖拽轨道双向同步；最后一列可逐句改情感）" in labels
+    assert (
+        "可编辑时间轴（表格与下方可拖拽轨道双向同步；最后一列可逐句改情感）" in labels
+    )
     assert "参考缓存条目、容量与命中统计" in labels
     assert "__t8TimelineEditorInstalled" in config_text
     assert "t8-timeline-drag-payload" in config_text
@@ -191,12 +203,19 @@ def test_desktop_builds_complete_pronunciation_workspace(tmp_path, monkeypatch):
     assert "上下文情感自动标注（先建议，确认后才生成）" in config_text
     assert "分析上下文并填入建议" in config_text
     assert len([item for item in config["dependencies"] if item.get("cancels")]) == 2
-    assert pronunciation_dictionary_path(data_dir) == data_dir / "pronunciation_dictionary.yaml"
+    assert (
+        pronunciation_dictionary_path(data_dir)
+        == data_dir / "pronunciation_dictionary.yaml"
+    )
 
-    batch_help = describe_dialogue_timing_settings("batch", "overlay", False, "native", 180, 300)
+    batch_help = describe_dialogue_timing_settings(
+        "batch", "overlay", False, "native", 180, 300
+    )
     assert "普通批量台词重叠" in batch_help
     assert "多句可能从 0 秒同时播放" in batch_help
-    srt_help = describe_dialogue_timing_settings("srt", "shift", True, "exact", 180, 200)
+    srt_help = describe_dialogue_timing_settings(
+        "srt", "shift", True, "exact", 180, 200
+    )
     assert "强制精确" in srt_help
     assert "可能丢失句尾" in srt_help
 
@@ -205,7 +224,9 @@ def test_desktop_builds_complete_pronunciation_workspace(tmp_path, monkeypatch):
         for block in demo.fns.values()
         if getattr(block.fn, "__name__", "") == "preview_dialogue_event"
     )
-    rows, timeline_html, status = preview("batch", "旁白|这是预览测试|ZH|1.0", "旁白", "ZH")
+    rows, timeline_html, status = preview(
+        "batch", "旁白|这是预览测试|ZH|1.0", "旁白", "ZH"
+    )
     assert rows[0][1:3] == ["旁白", "ZH"]
     assert "总时长" in timeline_html
     assert "已解析 1 条台词" in status
@@ -230,7 +251,13 @@ def test_desktop_builds_complete_pronunciation_workspace(tmp_path, monkeypatch):
     monkeypatch.setattr(
         desktop_webui,
         "transcribe_audio_file",
-        lambda *args, **kwargs: {"text": "流式生成回归测试", "model": "tiny", "device": "cpu", "backend": "openai_whisper", "word_timestamps": []},
+        lambda *args, **kwargs: {
+            "text": "流式生成回归测试",
+            "model": "tiny",
+            "device": "cpu",
+            "backend": "openai_whisper",
+            "word_timestamps": [],
+        },
     )
     asr_fn = next(
         block.fn
@@ -252,8 +279,7 @@ def test_single_generation_can_reuse_saved_voice_without_uploading(tmp_path):
     data_dir = tmp_path / "user-data"
     output_dir.mkdir()
     data_dir.mkdir()
-    source = tmp_path / "narrator.wav"
-    source.write_bytes(b"saved voice")
+    source = _write_test_wav(tmp_path / "narrator.wav")
     saved = VoiceLibrary(data_dir).save("旁白", source)
 
     demo = build_app(_FakeTTS(), output_dir, data_dir, verbose=False)
@@ -283,8 +309,7 @@ def test_single_generation_can_reuse_saved_voice_without_uploading(tmp_path):
         for block in demo.fns.values()
         if getattr(block.fn, "__name__", "") == "save_voice_event"
     )
-    second_source = tmp_path / "role-b.wav"
-    second_source.write_bytes(b"second saved voice")
+    second_source = _write_test_wav(tmp_path / "role-b.wav", sample=200)
     save_result = save_saved_voice(
         "角色B",
         str(second_source),
@@ -481,12 +506,9 @@ def test_desktop_dialogue_routes_saved_emotions_per_role(tmp_path):
     data_dir = tmp_path / "user-data"
     output_dir.mkdir()
     data_dir.mkdir()
-    voice_a = tmp_path / "a.wav"
-    voice_b = tmp_path / "b.wav"
-    emotion_b = tmp_path / "b-emotion.wav"
-    voice_a.write_bytes(b"a")
-    voice_b.write_bytes(b"b")
-    emotion_b.write_bytes(b"emotion")
+    voice_a = _write_test_wav(tmp_path / "a.wav", sample=100)
+    voice_b = _write_test_wav(tmp_path / "b.wav", sample=200)
+    emotion_b = _write_test_wav(tmp_path / "b-emotion.wav", sample=300)
     library = VoiceLibrary(data_dir)
     library.save(
         "角色A",
@@ -508,7 +530,9 @@ def test_desktop_dialogue_routes_saved_emotions_per_role(tmp_path):
         for block in demo.fns.values()
         if getattr(block.fn, "__name__", "") == "generate_dialogue_event"
     )
-    inputs = [getattr(component, "value", None) for component in generate_dialogue.inputs]
+    inputs = [
+        getattr(component, "value", None) for component in generate_dialogue.inputs
+    ]
     inputs[0] = "batch"
     inputs[1] = (
         "角色A|高兴地出发。|ZH|1.0\n"
@@ -560,7 +584,11 @@ def test_saved_dialogue_can_be_retimed_and_rewritten_without_tts(tmp_path):
         task_id,
         script_type="srt",
         script=script,
-        settings={"default_role": "旁白", "default_language": "ZH", "postprocess_preset": "off"},
+        settings={
+            "default_role": "旁白",
+            "default_language": "ZH",
+            "postprocess_preset": "off",
+        },
         line_count=1,
     )
     clip = output_dir / task_id / "0001_旁白.wav"
@@ -599,8 +627,7 @@ def test_edited_timeline_row_can_be_regenerated_alone_and_merged(tmp_path):
     data_dir = tmp_path / "user-data"
     output_dir.mkdir()
     data_dir.mkdir()
-    voice = tmp_path / "voice.wav"
-    voice.write_bytes(b"voice")
+    voice = _write_test_wav(tmp_path / "voice.wav")
     VoiceLibrary(data_dir).save("贞贞", voice)
     tts = _CapturingTTS()
     demo = build_app(tts, output_dir, data_dir, verbose=False)
@@ -687,7 +714,9 @@ def test_dropdown_dictionary_editor_adds_updates_and_deletes_entries():
     assert rows[1] == ["minute", "EN", "M IH1 . N AH0 T", True, False]
 
     with pytest.raises(PronunciationValidationError, match="已存在"):
-        upsert_pronunciation_entry(rows, None, "Minute", "EN", "M IH1 N AH0 T", True, False)
+        upsert_pronunciation_entry(
+            rows, None, "Minute", "EN", "M IH1 N AH0 T", True, False
+        )
     with pytest.raises(PronunciationValidationError, match="声调"):
         upsert_pronunciation_entry(rows, None, "错误", "ZH", "BAD9", True, True)
 

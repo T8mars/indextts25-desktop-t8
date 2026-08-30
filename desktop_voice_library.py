@@ -10,6 +10,7 @@ import shutil
 import tempfile
 import threading
 import time
+import unicodedata
 import uuid
 import wave
 import zipfile
@@ -30,6 +31,7 @@ MAX_VOICE_BUNDLE_TOTAL_BYTES = 4 * 1024**3
 MAX_VOICE_BUNDLE_MEMBERS = 1024
 MAX_VOICE_PROFILES = 256
 MAX_VOICE_MANIFEST_BYTES = 4 * 1024**2
+VOICE_DISK_RESERVE_BYTES = 512 * 1024**2
 _VOICE_LIBRARY_LOCK = threading.RLock()
 
 
@@ -87,9 +89,24 @@ def safe_voice_file_stem(value: str, fallback: str = "voice") -> str:
 
 def _safe_member(value: str) -> PurePosixPath:
     candidate = PurePosixPath(str(value).replace("\\", "/"))
-    if candidate.is_absolute() or not candidate.parts or any(part in {"", ".", ".."} for part in candidate.parts):
+    if (
+        candidate.is_absolute()
+        or not candidate.parts
+        or any(part in {"", ".", ".."} for part in candidate.parts)
+    ):
         raise ValueError(f"音色包包含不安全路径：{value}")
     return candidate
+
+
+def _portable_member_key(value: str) -> str:
+    member = _safe_member(value)
+    normalized_parts = []
+    for part in member.parts:
+        normalized = unicodedata.normalize("NFC", part).rstrip(" .").casefold()
+        if not normalized:
+            raise ValueError(f"音色包包含 Windows 不兼容路径：{value}")
+        normalized_parts.append(normalized)
+    return "/".join(normalized_parts)
 
 
 def _validated_bundle_manifest(
@@ -102,11 +119,21 @@ def _validated_bundle_manifest(
         raise ValueError("音色包文件数量超过安全上限。")
     if any(member.file_size > MAX_VOICE_BUNDLE_MEMBER_BYTES for member in members):
         raise ValueError("音色包包含超过 2 GiB 的单个文件。")
-    if sum(max(0, member.file_size) for member in members) > MAX_VOICE_BUNDLE_TOTAL_BYTES:
+    if (
+        sum(max(0, member.file_size) for member in members)
+        > MAX_VOICE_BUNDLE_TOTAL_BYTES
+    ):
         raise ValueError("音色包解压后总大小超过 4 GiB。")
-    normalized_names = [_safe_member(member.filename).as_posix() for member in members if not member.is_dir()]
+    normalized_names = [
+        _safe_member(member.filename).as_posix()
+        for member in members
+        if not member.is_dir()
+    ]
     if len(normalized_names) != len(set(normalized_names)):
         raise ValueError("音色包包含重复文件名。")
+    portable_names = [_portable_member_key(name) for name in normalized_names]
+    if len(portable_names) != len(set(portable_names)):
+        raise ValueError("音色包包含 Windows 下会互相覆盖的文件名。")
     try:
         manifest_info = archive.getinfo("manifest.json")
     except KeyError as exc:
@@ -117,7 +144,10 @@ def _validated_bundle_manifest(
         manifest = json.loads(archive.read(manifest_info).decode("utf-8"))
     except (UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise ValueError("音色包 manifest.json 缺失或损坏。") from exc
-    if not isinstance(manifest, dict) or manifest.get("schemaVersion") != VOICE_BUNDLE_SCHEMA_VERSION:
+    if (
+        not isinstance(manifest, dict)
+        or manifest.get("schemaVersion") != VOICE_BUNDLE_SCHEMA_VERSION
+    ):
         raise ValueError("不支持的音色包版本。")
     profiles = manifest.get("profiles")
     if not isinstance(profiles, list) or not profiles:
@@ -125,11 +155,22 @@ def _validated_bundle_manifest(
     if len(profiles) > MAX_VOICE_PROFILES:
         raise ValueError("单个音色包最多包含 256 个角色。")
     expected = {"manifest.json"}
+    profile_names: set[str] = set()
+    profile_ids: set[str] = set()
     for raw in profiles:
         if not isinstance(raw, dict):
             raise ValueError("音色包角色数据格式无效。")
-        if not str(raw.get("name") or "").strip():
+        profile_name = str(raw.get("name") or "").strip()
+        if not profile_name:
             raise ValueError("音色包包含空角色名称。")
+        profile_id = str(raw.get("profile_id") or "").strip()
+        name_key = unicodedata.normalize("NFC", profile_name).casefold()
+        id_key = unicodedata.normalize("NFC", profile_id).casefold()
+        if name_key in profile_names or (id_key and id_key in profile_ids):
+            raise ValueError("音色包包含重复角色名称或角色 ID。")
+        profile_names.add(name_key)
+        if id_key:
+            profile_ids.add(id_key)
         speaker = str(raw.get("audio_path") or "")
         if not speaker:
             raise ValueError("音色包角色缺少音色参考音频。")
@@ -159,37 +200,45 @@ def _copy_or_link(source: str, destination: str) -> str:
 
 
 def _write_portable_wav(source: Path, target: Path) -> None:
-    """Copy WAV inputs atomically and normalize every other codec to PCM WAV."""
+    """Decode and atomically normalize supported audio to mono 24 kHz PCM WAV."""
 
     target.parent.mkdir(parents=True, exist_ok=True)
     temporary = target.with_name(f".{target.name}.{uuid.uuid4().hex}.tmp")
     try:
-        if source.suffix.lower() in {".wav", ".wave"}:
-            shutil.copy2(source, temporary)
-        else:
-            try:
-                import av
-            except ImportError as exc:
-                raise RuntimeError("转换音色音频需要 PyAV；请修复整合包音频依赖。") from exc
-            try:
-                with (
-                    av.open(str(source)) as container,
-                    wave.open(str(temporary), "wb") as output,
-                ):
-                    audio_streams = [stream for stream in container.streams if stream.type == "audio"]
-                    if not audio_streams:
-                        raise ValueError("文件中没有可解码的音频流。")
-                    output.setnchannels(1)
-                    output.setsampwidth(2)
-                    output.setframerate(24000)
-                    resampler = av.AudioResampler(format="s16", layout="mono", rate=24000)
-                    for frame in container.decode(audio=0):
-                        for converted in resampler.resample(frame):
-                            output.writeframes(converted.to_ndarray().tobytes())
-                    for converted in resampler.resample(None):
-                        output.writeframes(converted.to_ndarray().tobytes())
-            except Exception as exc:
-                raise ValueError(f"无法把参考音频转换成便携 WAV：{source.name}（{exc}）") from exc
+        try:
+            import av
+        except ImportError as exc:
+            raise RuntimeError("转换音色音频需要 PyAV；请修复整合包音频依赖。") from exc
+        try:
+            written_bytes = 0
+            with (
+                av.open(str(source)) as container,
+                wave.open(str(temporary), "wb") as output,
+            ):
+                audio_streams = [
+                    stream for stream in container.streams if stream.type == "audio"
+                ]
+                if not audio_streams:
+                    raise ValueError("文件中没有可解码的音频流。")
+                output.setnchannels(1)
+                output.setsampwidth(2)
+                output.setframerate(24000)
+                resampler = av.AudioResampler(format="s16", layout="mono", rate=24000)
+                for frame in container.decode(audio=0):
+                    for converted in resampler.resample(frame):
+                        payload = converted.to_ndarray().tobytes()
+                        output.writeframes(payload)
+                        written_bytes += len(payload)
+                for converted in resampler.resample(None):
+                    payload = converted.to_ndarray().tobytes()
+                    output.writeframes(payload)
+                    written_bytes += len(payload)
+            if written_bytes <= 0:
+                raise ValueError("音频中没有可用采样。")
+        except Exception as exc:
+            raise ValueError(
+                f"无法把参考音频转换成便携 WAV：{source.name}（{exc}）"
+            ) from exc
         temporary.replace(target)
     finally:
         temporary.unlink(missing_ok=True)
@@ -258,7 +307,9 @@ class VoiceLibrary:
     def _save(self, payload: dict[str, dict]) -> None:
         self.root.mkdir(parents=True, exist_ok=True)
         temporary = self.manifest_path.with_suffix(".tmp")
-        temporary.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+        temporary.write_text(
+            json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
         temporary.replace(self.manifest_path)
 
     def _rebase_audio_paths(self, old_root: Path, new_root: Path) -> None:
@@ -286,7 +337,9 @@ class VoiceLibrary:
 
         with _VOICE_LIBRARY_LOCK:
             self.root.parent.mkdir(parents=True, exist_ok=True)
-            with tempfile.TemporaryDirectory(prefix=".t8_voice_transaction_", dir=self.root.parent) as temporary:
+            with tempfile.TemporaryDirectory(
+                prefix=".t8_voice_transaction_", dir=self.root.parent
+            ) as temporary:
                 transaction_data = Path(temporary) / "data"
                 staged = VoiceLibrary(transaction_data)
                 if self.root.is_dir():
@@ -301,7 +354,9 @@ class VoiceLibrary:
                 except Exception:
                     raise
                 staged._rebase_audio_paths(staged.audio_dir, self.audio_dir)
-                backup = self.root.with_name(f".{self.root.name}.backup-{uuid.uuid4().hex}")
+                backup = self.root.with_name(
+                    f".{self.root.name}.backup-{uuid.uuid4().hex}"
+                )
                 had_original = self.root.exists()
                 if had_original:
                     self.root.replace(backup)
@@ -354,7 +409,9 @@ class VoiceLibrary:
         result: list[VoiceProfile] = []
         for profile in self.list():
             profile_tags = {item.casefold() for item in profile.tags}
-            searchable = "\n".join((profile.name, profile.language, profile.notes, *profile.tags)).casefold()
+            searchable = "\n".join(
+                (profile.name, profile.language, profile.notes, *profile.tags)
+            ).casefold()
             if needle and needle not in searchable:
                 continue
             if favorites_only and not profile.favorite:
@@ -368,7 +425,10 @@ class VoiceLibrary:
     def get(self, name_or_id: str) -> VoiceProfile:
         needle = str(name_or_id).strip().casefold()
         for profile in self.list():
-            if profile.profile_id.casefold() == needle or profile.name.casefold() == needle:
+            if (
+                profile.profile_id.casefold() == needle
+                or profile.name.casefold() == needle
+            ):
                 return profile
         raise KeyError(f"角色音色不存在：{name_or_id}")
 
@@ -419,7 +479,10 @@ class VoiceLibrary:
                 item_id
                 for item_id, value in payload.items()
                 if replace_needle
-                and (item_id.casefold() == replace_needle or str(value.get("name", "")).casefold() == replace_needle)
+                and (
+                    item_id.casefold() == replace_needle
+                    or str(value.get("name", "")).casefold() == replace_needle
+                )
             ),
             None,
         )
@@ -436,7 +499,9 @@ class VoiceLibrary:
         if replace_id and name_match_id and replace_id != name_match_id:
             raise ValueError(f"角色名称已存在：{clean_name}")
         profile_id = (
-            replace_id or name_match_id or hashlib.sha256(clean_name.casefold().encode("utf-8")).hexdigest()[:16]
+            replace_id
+            or name_match_id
+            or hashlib.sha256(clean_name.casefold().encode("utf-8")).hexdigest()[:16]
         )
         safe_stem = safe_voice_file_stem(clean_name, profile_id)[:48]
         self.audio_dir.mkdir(parents=True, exist_ok=True)
@@ -445,7 +510,9 @@ class VoiceLibrary:
             _write_portable_wav(source, target)
         emotion_target = ""
         if emotion_source is not None:
-            emotion_target_path = self.audio_dir / f"{safe_stem}-{profile_id}-emotion.wav"
+            emotion_target_path = (
+                self.audio_dir / f"{safe_stem}-{profile_id}-emotion.wav"
+            )
             if emotion_source != emotion_target_path:
                 _write_portable_wav(emotion_source, emotion_target_path)
             emotion_target = str(emotion_target_path)
@@ -522,9 +589,14 @@ class VoiceLibrary:
     ) -> Path:
         selected = list(self.list())
         if names is not None:
-            needles = {str(item).strip().casefold() for item in names if str(item).strip()}
+            needles = {
+                str(item).strip().casefold() for item in names if str(item).strip()
+            }
             selected = [
-                item for item in selected if item.name.casefold() in needles or item.profile_id.casefold() in needles
+                item
+                for item in selected
+                if item.name.casefold() in needles
+                or item.profile_id.casefold() in needles
             ]
         if not selected:
             raise ValueError("没有可导出的角色音色。")
@@ -533,37 +605,44 @@ class VoiceLibrary:
             target = target.with_name(target.name + VOICE_BUNDLE_SUFFIX)
         target.parent.mkdir(parents=True, exist_ok=True)
         manifest_profiles: list[dict[str, Any]] = []
-        with zipfile.ZipFile(target, "w", compression=zipfile.ZIP_DEFLATED) as archive:
-            for profile in selected:
-                value = profile.to_dict()
-                for field_name, suffix in (
-                    ("audio_path", "speaker"),
-                    ("emotion_audio_path", "emotion"),
-                ):
-                    source_value = str(value.get(field_name) or "")
-                    if not source_value:
-                        value[field_name] = ""
-                        continue
-                    source = Path(source_value).resolve()
-                    if not source.is_file():
-                        raise FileNotFoundError(f"音色包文件不存在：{source}")
-                    archive_name = f"audio/{profile.profile_id}-{suffix}-{_safe_archive_name(source.name)}"
-                    archive.write(source, archive_name)
-                    value[field_name] = archive_name
-                manifest_profiles.append(value)
-            archive.writestr(
-                "manifest.json",
-                json.dumps(
-                    {
-                        "schemaVersion": VOICE_BUNDLE_SCHEMA_VERSION,
-                        "format": "T8star-Aix IndexTTS 2.5 Voice Bundle",
-                        "createdAt": time.strftime("%Y-%m-%d %H:%M:%S"),
-                        "profiles": manifest_profiles,
-                    },
-                    ensure_ascii=False,
-                    indent=2,
-                ),
-            )
+        temporary_target = target.with_name(f".{target.name}.{uuid.uuid4().hex}.tmp")
+        try:
+            with zipfile.ZipFile(
+                temporary_target, "w", compression=zipfile.ZIP_DEFLATED
+            ) as archive:
+                for profile in selected:
+                    value = profile.to_dict()
+                    for field_name, suffix in (
+                        ("audio_path", "speaker"),
+                        ("emotion_audio_path", "emotion"),
+                    ):
+                        source_value = str(value.get(field_name) or "")
+                        if not source_value:
+                            value[field_name] = ""
+                            continue
+                        source = Path(source_value).resolve()
+                        if not source.is_file():
+                            raise FileNotFoundError(f"音色包文件不存在：{source}")
+                        archive_name = f"audio/{profile.profile_id}-{suffix}-{_safe_archive_name(source.name)}"
+                        archive.write(source, archive_name)
+                        value[field_name] = archive_name
+                    manifest_profiles.append(value)
+                archive.writestr(
+                    "manifest.json",
+                    json.dumps(
+                        {
+                            "schemaVersion": VOICE_BUNDLE_SCHEMA_VERSION,
+                            "format": "T8star-Aix IndexTTS 2.5 Voice Bundle",
+                            "createdAt": time.strftime("%Y-%m-%d %H:%M:%S"),
+                            "profiles": manifest_profiles,
+                        },
+                        ensure_ascii=False,
+                        indent=2,
+                    ),
+                )
+            temporary_target.replace(target)
+        finally:
+            temporary_target.unlink(missing_ok=True)
         return target
 
     def import_bundle(
@@ -599,7 +678,18 @@ class VoiceLibrary:
                 bundle_name=archive_path.name,
             )
             profiles = manifest["profiles"]
-            with tempfile.TemporaryDirectory(prefix="t8_voice_import_") as temporary:
+            extracted_size = sum(
+                max(0, int(item.file_size)) for item in archive.infolist()
+            )
+            self.root.parent.mkdir(parents=True, exist_ok=True)
+            if (
+                shutil.disk_usage(self.root.parent).free
+                < extracted_size + VOICE_DISK_RESERVE_BYTES
+            ):
+                raise ValueError("音色包解压空间不足，已保留至少 512 MiB 安全空间。")
+            with tempfile.TemporaryDirectory(
+                prefix="t8_voice_import_", dir=self.root.parent
+            ) as temporary:
                 temporary_root = Path(temporary).resolve()
                 referenced = {
                     str(raw.get(field_name) or "")
@@ -608,7 +698,9 @@ class VoiceLibrary:
                     if str(raw.get(field_name) or "")
                 }
                 for member_name in referenced:
-                    archive.extract(_safe_member(member_name).as_posix(), temporary_root)
+                    archive.extract(
+                        _safe_member(member_name).as_posix(), temporary_root
+                    )
                 for raw in profiles:
                     name = str(raw.get("name") or "").strip()
                     existing = None
@@ -637,7 +729,10 @@ class VoiceLibrary:
                                 raise ValueError(f"角色“{name}”缺少音色参考音频。")
                             return None
                         resolved = (temporary_root / relative).resolve()
-                        if temporary_root not in resolved.parents or not resolved.is_file():
+                        if (
+                            temporary_root not in resolved.parents
+                            or not resolved.is_file()
+                        ):
                             raise ValueError(f"角色“{name}”的音频路径无效。")
                         return resolved
 
@@ -654,13 +749,17 @@ class VoiceLibrary:
                             emotion_audio=emotion,
                             emotion_vector=raw.get("emotion_vector"),
                             emotion_use_random=raw.get("emotion_use_random", False),
-                            pronunciation_dictionary=raw.get("pronunciation_dictionary", ""),
+                            pronunciation_dictionary=raw.get(
+                                "pronunciation_dictionary", ""
+                            ),
                             tags=raw.get("tags"),
                             favorite=raw.get("favorite", False),
                             notes=raw.get("notes", ""),
                             quality=raw.get("quality"),
                             replace_name_or_id=(
-                                existing.profile_id if existing is not None and conflict == "replace" else None
+                                existing.profile_id
+                                if existing is not None and conflict == "replace"
+                                else None
                             ),
                         )
                     )

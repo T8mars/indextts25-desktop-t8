@@ -25,7 +25,7 @@ const {
 } = require("./runtime_profiles");
 
 const APP_TITLE = "T8star-Aix · IndexTTS 2.5";
-const COMFY_NODE_VERSION = "0.20.3";
+const COMFY_NODE_VERSION = "0.20.9";
 const MODEL_DOWNLOAD_PROGRESS_PREFIX = "@@T8_MODEL_PROGRESS@@";
 const MODEL_URLS = {
   huggingface: "https://huggingface.co/t8star/IndexTTS-2.5-Comfy",

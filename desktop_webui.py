@@ -91,7 +91,7 @@ from runtime_metrics import (
 
 
 APP_TITLE = "T8star-Aix · IndexTTS 2.5"
-DESKTOP_VERSION = "0.21.1"
+DESKTOP_VERSION = "0.21.2"
 MODEL_MANIFEST = json.loads(
     (Path(__file__).resolve().parent / "desktop_model_manifest.json").read_text(encoding="utf-8")
 )
