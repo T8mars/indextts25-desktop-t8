@@ -896,6 +896,9 @@ class IndexTTS2:
               **generation_kwargs):
         print(">> starting inference...")
         self._set_gr_progress(0, "starting inference...")
+        segment_collector = generation_kwargs.pop("segment_collector", None)
+        if segment_collector is not None and not hasattr(segment_collector, "append"):
+            raise TypeError("segment_collector must provide append()")
         target_duration = normalize_target_duration(target_duration)
         diffusion_steps = int(diffusion_steps)
         inference_cfg_rate = float(inference_cfg_rate)
@@ -983,6 +986,7 @@ class IndexTTS2:
         )
 
         self._set_gr_progress(0.1, "text processing...")
+        language_code = str(lang).upper()
         lang_prefix = f'<|{lang.lower()}|> '
         text = self.text_process.clean_pattern.sub(lambda x: self.text_process.char_rep_map[x.group()], text)
 
@@ -1177,6 +1181,16 @@ class IndexTTS2:
                 wav = torch.clamp(32767 * wav, -32767.0, 32767.0)
                 if stream_return or seg_idx == segments_count - 1:
                     wav = fade_out_pcm_tail(wav, sampling_rate)
+                if segment_collector is not None:
+                    segment_collector.append({
+                        "index": seg_idx + 1,
+                        "text": segments[seg_idx],
+                        "language": language_code,
+                        "token_count": int(segment_token_weights[seg_idx]),
+                        "sample_rate": sampling_rate,
+                        "duration_seconds": wav.shape[-1] / sampling_rate,
+                        "waveform": wav.detach().cpu().clone(),
+                    })
                 if verbose:
                     print(f"wav shape: {wav.shape}", "min:", wav.min(), "max:", wav.max())
                 # wavs.append(wav[:, :-512])

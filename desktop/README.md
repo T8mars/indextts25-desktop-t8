@@ -28,6 +28,7 @@ Windows Electron desktop integration for IndexTTS 2.5. The packaged application 
 - rewritten SRT export using original timing or the generated audio's actual timeline
 - editable millisecond timeline table plus draggable/resizable tracks, ASR word-boundary snapping, and no-inference re-mixing
 - reference-condition cache statistics and safe clearing for this application's own `safetensors` entries
+- conservative cross-segment speech-rate anomaly detection with selective retry of only a collapsed segment
 - bundled FlashAttention 2.8.3, Triton Windows 3.4.0.post21, and DeepSpeed 0.17.5 Windows acceleration wheels with automatic fallback
 - explicit auto/BF16/FP16/FP32 selection before model loading, plus native-BF16 fallback detection
 - optional CPU placement for Wav2Vec/CAMPPlus reference encoders and fast default-emotion condition reuse
@@ -37,7 +38,7 @@ Windows Electron desktop integration for IndexTTS 2.5. The packaged application 
 - opt-in audio.cpp component manager for verified Windows CUDA/Vulkan/CPU runtimes plus Q8/F16/original GGUF downloads
 
 The large model files are intentionally external. On first launch, select a complete IndexTTS 2.5 model directory.
-Version 0.21.2 is aligned to code revision `ee40fa7d`, ComfyUI Node 0.20.9, and model bundle `1.0.0` at revision `14166a74`. It adds transactional project/voice-bundle import and export, Windows-portable archive collision checks, normalized portable WAV storage, stricter optional-component manifest containment and integrity verification, and safer disk-space/resume handling. It provides separate signed update channels: GitHub Releases for the app layer and Hugging Face for the complete external model bundle. Automatic checks are read-only; download and install remain explicit user actions. App updates and model manifests are verified with Ed25519 before their file paths, hashes, or revisions are trusted. Model repair shows the current file, overall and phase progress, transferred bytes, live speed, ETA, and available disk space while preserving resumable Hugging Face downloads. It hashes all 26 main and auxiliary files and reports the exact failing file before the Start button is enabled. No benchmark, model load, model download, update download, install, or acceleration mode starts automatically.
+Version 0.22.0 is aligned to code revision `ee40fa7d`, ComfyUI Node 0.21.0, and model bundle `1.0.0` at revision `14166a74`. Long-text synthesis now measures the actual rate of each internal segment, establishes a median baseline only after two stable segments, and selectively regenerates a later segment only when its rate collapses below 45% of that baseline. A retry is accepted only when it is materially closer to the baseline without becoming too fast; short lines, ordinary emotional slowing, deterministic sampling, and native target duration are left alone. It retains the 0.21.2 transactional project/voice-bundle import and export, Windows-portable archive collision checks, normalized portable WAV storage, strict optional-component manifest containment and integrity verification, and safer disk-space/resume handling. Signed app and model updates remain explicit user actions verified with Ed25519. No benchmark, model load, model download, update download, install, or acceleration mode starts automatically.
 The launcher validates official model file sizes, while the downloader performs full SHA-256 verification.
 This release also supports running the portable package from Windows paths containing Chinese characters.
 AAC/M4A and other compressed reference audio is decoded by the bundled PyAV runtime, without requiring a system FFmpeg installation. Streaming previews are also encoded by bundled PyAV, so Gradio no longer calls an external `ffmpeg` or `ffprobe` executable and cannot fail with `[WinError 2]` merely because those programs are absent from `PATH`.
@@ -205,7 +206,7 @@ npm run make
 ```
 
 This builds only `@electron-forge/maker-zip`. The unpacked application is still
-available under `desktop/out/T8star-Aix-IndexTTS-2.5-v0.21.2-win32-x64` for local testing.
+available under `desktop/out/T8star-Aix-IndexTTS-2.5-v0.22.0-win32-x64` for local testing.
 The bundled runtime contains tens of thousands of small files, so Squirrel/NuGet
 can spend a long time repeatedly rewriting a multi-gigabyte package. It is not the
 recommended user distribution. If an installer is specifically required, build it

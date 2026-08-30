@@ -1,14 +1,22 @@
 # T8star-Aix IndexTTS 2.5 开发路线图
 
 本文档记录桌面整合包与 ComfyUI 节点的共同开发范围、依赖政策和验收标准。当前公开基线为
-**Desktop 0.21.2 / ComfyUI Node 0.20.9**。
+**Desktop 0.22.0 / ComfyUI Node 0.21.0**。
 
 | 发行物 | 当前版本 | 本版主要内容 |
 | --- | --- | --- |
-| Windows Electron 整合包 | 0.21.2 | 音色/项目包事务保护、便携路径校验、签名自动更新 |
-| ComfyUI V3 节点 | 0.20.9 | 33 组工作流、Registry 扫描兼容门禁、模型与下载加固 |
+| Windows Electron 整合包 | 0.22.0 | 跨段语速异常保护、异常段单独重做、签名自动更新 |
+| ComfyUI V3 节点 | 0.21.0 | 跨段语速报告与选择性重做、33 组工作流 |
 | 固定官方核心 | `ee40fa7d` | 未发现必须更换的 revision |
 | 固定模型镜像 | `14166a74` | Hugging Face 独立下载，26 个主模型与辅助文件全部校验 |
+
+## Desktop v0.22.0 / Node v0.21.0
+
+- [x] 每个内部长文本分段记录语言感知文字单位、真实时长和单位/秒。
+- [x] 至少两个稳定分段后建立中位语速基线，仅在后续分段低于基线 45% 时标记异常。
+- [x] 只用更小 Token 上限和独立 seed 重做异常段；候选未明显改善或变得过快时保留原段。
+- [x] 普通情绪放慢、短句、确定性采样和原生目标时长模式不强行调整。
+- [x] Desktop 报告和 ComfyUI 状态均输出可审计的跨段语速明细。
 
 ## Desktop v0.21.2 / Node v0.20.9
 
@@ -17,7 +25,7 @@
 - [x] 保存音色统一解码为单声道 24 kHz PCM WAV，并拒绝无有效采样的输入。
 - [x] Desktop audio.cpp 可选组件严格限制在用户数据目录内，清单、大小和 SHA-256 缺一不可。
 - [x] 启动器版本展示同步到 Desktop 0.21.2 / Node 0.20.9。
-- [x] Node 0.20.9 增加 Pylint 4 Fatal/Astroid CI 门禁并完成 Linux、Windows 双平台测试。
+- [x] Node 0.20.9 增加 Pylint 4 Fatal/Astroid CI 门禁，完成 Linux、Windows 双平台测试并在 Registry 激活。
 
 ## Desktop v0.21.0 / Node v0.20.0（历史）
 

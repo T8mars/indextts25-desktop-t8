@@ -68,6 +68,10 @@ from timeline_tools import (
     timeline_rows,
 )
 from indextts.infer_v2_5 import IndexTTS2
+from indextts.speech_rate_guard import (
+    assess_segment_speech_rates,
+    retry_candidate_improves_rate,
+)
 from indextts.utils.reference_condition_cache import ReferenceConditionCache
 from indextts.pronunciation import (
     ANNOTATION_PATTERN,
@@ -91,7 +95,7 @@ from runtime_metrics import (
 
 
 APP_TITLE = "T8star-Aix · IndexTTS 2.5"
-DESKTOP_VERSION = "0.21.2"
+DESKTOP_VERSION = "0.22.0"
 MODEL_MANIFEST = json.loads(
     (Path(__file__).resolve().parent / "desktop_model_manifest.json").read_text(encoding="utf-8")
 )
@@ -1305,6 +1309,7 @@ def build_app(
         accel_disabled = False
         cache_risk_guarded = False
         long_text_guard_reports: list[dict] = []
+        segment_rate_guard_reports: list[dict] = []
 
         def result_to_waveform(result):
             if not isinstance(result, tuple) or len(result) != 2:
@@ -1349,6 +1354,7 @@ def build_app(
         ):
             tts.gr_progress = progress
             waveforms = []
+            block_segment_records: list[list[dict]] = []
             sample_rate = None
             native_chunk_durations = (
                 allocate_native_chunk_durations(plan, native_target_seconds)
@@ -1357,7 +1363,11 @@ def build_app(
             )
             with safe_gpt_acceleration(sampling_values, plan) as (disabled, guarded):
                 for block_index, chunk in enumerate(plan.chunks):
+                    latest_segment_records: list[dict] = []
+
                     def generate_with_limit(limit: int):
+                        nonlocal latest_segment_records
+                        latest_segment_records = []
                         return tts.infer(
                             spk_audio_prompt=prompt_audio,
                             text=chunk.text,
@@ -1387,6 +1397,7 @@ def build_app(
                             diffusion_steps=diffusion_steps,
                             inference_cfg_rate=inference_cfg_rate,
                             cfm_temperature=cfm_temperature,
+                            segment_collector=latest_segment_records,
                         )
 
                     block_token_count = len(
@@ -1416,6 +1427,180 @@ def build_app(
                     elif sample_rate != block_rate:
                         raise RuntimeError("停顿语音块的采样率不一致。")
                     waveforms.append(waveform)
+                    normalized_records: list[dict] = []
+                    for raw_record in latest_segment_records:
+                        record_rate = int(raw_record.get("sample_rate") or block_rate)
+                        if record_rate != block_rate:
+                            raise RuntimeError("内部文本分段的采样率不一致。")
+                        record_waveform = torch.as_tensor(
+                            raw_record.get("waveform")
+                        ).detach().cpu()
+                        if record_waveform.ndim == 1:
+                            record_waveform = record_waveform.unsqueeze(0)
+                        elif record_waveform.ndim != 2:
+                            record_waveform = record_waveform.reshape(1, -1)
+                        record_waveform = record_waveform.float()
+                        if (
+                            record_waveform.numel()
+                            and float(record_waveform.abs().max()) > 2.0
+                        ):
+                            record_waveform = record_waveform / 32768.0
+                        normalized_records.append(
+                            {
+                                **raw_record,
+                                "index": len(
+                                    [
+                                        item
+                                        for records in block_segment_records
+                                        for item in records
+                                    ]
+                                )
+                                + len(normalized_records)
+                                + 1,
+                                "speech_block": block_index + 1,
+                                "language": language,
+                                "sample_rate": block_rate,
+                                "duration_seconds": (
+                                    record_waveform.shape[-1] / block_rate
+                                ),
+                                "waveform": record_waveform.clamp(-1, 1).contiguous(),
+                            }
+                        )
+                    if not normalized_records:
+                        normalized_records.append(
+                            {
+                                "index": sum(len(item) for item in block_segment_records)
+                                + 1,
+                                "speech_block": block_index + 1,
+                                "text": chunk.text,
+                                "language": language,
+                                "sample_rate": block_rate,
+                                "duration_seconds": waveform.shape[-1] / block_rate,
+                                "waveform": waveform,
+                            }
+                        )
+                    block_segment_records.append(normalized_records)
+
+                flat_records = [
+                    record for records in block_segment_records for record in records
+                ]
+                rate_reports = assess_segment_speech_rates(flat_records)
+                if native_target_seconds is None and len(flat_records) >= 3:
+                    retry_limit = max(
+                        20,
+                        min(
+                            max(20, int(plan.max_tokens) - 1),
+                            int(round(int(plan.max_tokens) * 2 / 3)),
+                        ),
+                    )
+                    for rate_report in rate_reports:
+                        if not rate_report.get("suspect"):
+                            continue
+                        rate_report["retried"] = False
+                        if not bool(do_sample):
+                            rate_report["retry_skipped"] = "deterministic_sampling"
+                            continue
+                        position = int(rate_report["position"])
+                        record = flat_records[position]
+                        try:
+                            retry_result = tts.infer(
+                                spk_audio_prompt=prompt_audio,
+                                text=str(record["text"]),
+                                output_path=None,
+                                lang=language,
+                                emo_audio_prompt=(
+                                    emotion_audio if emotion_mode == 1 else None
+                                ),
+                                emo_alpha=float(emotion_weight),
+                                emo_vector=emo_vector,
+                                use_emo_text=emotion_mode == 3,
+                                emo_text=(emotion_text or "").strip() or None,
+                                use_random=bool(random_emotion),
+                                verbose=verbose,
+                                do_sample=True,
+                                temperature=float(temperature),
+                                top_p=float(top_p),
+                                top_k=int(top_k) if int(top_k) > 0 else None,
+                                num_beams=int(num_beams),
+                                repetition_penalty=float(repetition_penalty),
+                                length_penalty=float(length_penalty),
+                                max_mel_tokens=int(max_mel_tokens),
+                                max_text_tokens_per_segment=retry_limit,
+                                interval_silence=int(segment_silence_ms),
+                                text_normalization=False,
+                                duration_factor=float(factor),
+                                seed=(
+                                    seed
+                                    + int(seed_offset)
+                                    + 100_003
+                                    + position
+                                ),
+                                diffusion_steps=diffusion_steps,
+                                inference_cfg_rate=inference_cfg_rate,
+                                cfm_temperature=cfm_temperature,
+                            )
+                            retry_waveform, retry_rate = result_to_waveform(retry_result)
+                            if retry_rate != sample_rate:
+                                raise RuntimeError("语速异常段重试采样率不一致。")
+                            retry_units_per_second = (
+                                float(rate_report["speech_units"])
+                                / max(
+                                    1e-6,
+                                    retry_waveform.shape[-1] / retry_rate,
+                                )
+                            )
+                            accepted = retry_candidate_improves_rate(
+                                float(rate_report["units_per_second"]),
+                                retry_units_per_second,
+                                float(rate_report["baseline_units_per_second"]),
+                            )
+                            rate_report.update(
+                                retried=True,
+                                retry_limit=retry_limit,
+                                retry_duration_seconds=round(
+                                    retry_waveform.shape[-1] / retry_rate, 4
+                                ),
+                                retry_units_per_second=round(
+                                    retry_units_per_second, 4
+                                ),
+                                accepted=accepted,
+                            )
+                            if accepted:
+                                record["waveform"] = retry_waveform
+                                record["duration_seconds"] = (
+                                    retry_waveform.shape[-1] / retry_rate
+                                )
+                        except Exception as retry_error:
+                            rate_report.update(
+                                retried=True,
+                                accepted=False,
+                                retry_error=(
+                                    str(retry_error).strip()
+                                    or type(retry_error).__name__
+                                ),
+                            )
+                    if any(item.get("accepted") for item in rate_reports):
+                        silence_samples = round(
+                            sample_rate * int(segment_silence_ms) / 1000
+                        )
+                        for block_index, records in enumerate(block_segment_records):
+                            rebuilt: list[torch.Tensor] = []
+                            for record_index, record in enumerate(records):
+                                rebuilt.append(record["waveform"])
+                                if (
+                                    record_index < len(records) - 1
+                                    and silence_samples > 0
+                                ):
+                                    rebuilt.append(
+                                        torch.zeros(
+                                            (record["waveform"].shape[0], silence_samples),
+                                            dtype=record["waveform"].dtype,
+                                        )
+                                    )
+                            waveforms[block_index] = torch.cat(rebuilt, dim=-1)
+                for rate_report in rate_reports:
+                    rate_report["seed_offset"] = int(seed_offset)
+                segment_rate_guard_reports.extend(rate_reports)
             assert sample_rate is not None
             combined = concatenate_with_pauses(
                 waveforms,
@@ -1503,15 +1688,26 @@ def build_app(
                 str(language).upper() in {"EN", "ES"}
                 and any(int(segment["token_count"]) >= 32 for segment in plan.segments)
             )
+            segment_rate_guard_required = (
+                not native_requested
+                and bool(do_sample)
+                and len(plan.segments) >= 3
+            )
             stream_effective = (
                 bool(stream_preview)
                 and target_duration_mode in {"off", "native"}
                 and retry_count == 0
                 and not long_latin_guard_required
+                and not segment_rate_guard_required
             )
             stream_note = ""
             if bool(stream_preview) and not stream_effective:
-                if long_latin_guard_required:
+                if segment_rate_guard_required:
+                    stream_note = (
+                        "多段长文本需要先完成跨段语速异常检测与异常段单独重做；"
+                        "本次自动关闭流式试听，仅输出校验后的最终音频。"
+                    )
+                elif long_latin_guard_required:
                     stream_note = (
                         "长英文/西语需要在返回前完成异常检测和自动缩短分段重试；"
                         "本次自动关闭流式试听，仅输出校验后的最终音频。"
@@ -1724,6 +1920,15 @@ def build_app(
             metrics += "；长英文/西语保护=" + json.dumps(
                 latin_guard_reports, ensure_ascii=False
             )
+        rate_guard_reports = [
+            item
+            for item in segment_rate_guard_reports
+            if item.get("eligible") or item.get("suspect")
+        ]
+        if rate_guard_reports:
+            metrics += "；跨段语速保护=" + json.dumps(
+                rate_guard_reports, ensure_ascii=False
+            )
         if runtime_note:
             metrics += "；" + runtime_note
         if stream_note:
@@ -1739,6 +1944,7 @@ def build_app(
             "file": str(target),
             "metrics": metrics,
             "performance": performance,
+            "segment_rate_guard": rate_guard_reports,
         })
         memory_report = apply_memory_policy()
         metrics += "；模型生命周期=" + json.dumps(memory_report, ensure_ascii=False)
@@ -3885,6 +4091,12 @@ def build_app(
                 gr.Markdown(
                     "**停顿写法：** 文本中可直接插入 `<pause=0.5>`（秒）或 `<pause=500ms>`；"
                     "显式停顿在所有预设下都有效。标点预设会真实拆分语音块并插入静音。"
+                )
+                gr.Markdown(
+                    "**跨段语速保护（自动）**：长文本至少形成 3 个有效分段后，"
+                    "以前两段及后续稳定段的中位语速为基线；只有某段突然降到基线 45% 以下"
+                    "才会单独重做该段，而且新结果明显更接近基线时才替换。普通情绪放慢、"
+                    "短句和原生目标时长模式不会被强行拉速；详情写入生成报告。"
                 )
                 with gr.Row():
                     pause_preset = gr.Dropdown(
