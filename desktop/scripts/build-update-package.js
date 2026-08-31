@@ -23,6 +23,8 @@ const APP_RESOURCE_FILES = [
   "desktop_generation_controls.py",
   "desktop_model_lifecycle.py",
   "desktop_streaming_audio.py",
+  "desktop_candidate_workspace.py",
+  "desktop_job_queue.py",
   "desktop_tasks.py",
   "desktop_project_bundle.py",
   "audio_quality.py",
@@ -41,6 +43,7 @@ const APP_RESOURCE_FILES = [
   "segment_rate_workspace.py",
   "desktop_model_download.py",
   "desktop_model_manifest.json",
+  "desktop_runtime_manifest.json",
   "desktop_acceleration_manifest.json",
   "portable-update-helper.ps1",
   "LICENSE",
@@ -188,6 +191,29 @@ async function main() {
 
   const model = JSON.parse(fs.readFileSync(path.join(projectRoot, "desktop_model_manifest.json"), "utf8"));
   const runtime = readOptionalJson(path.join(projectRoot, "desktop_runtime_manifest.json"), null);
+  const defaultRuntimePackage = runtime
+    ? path.join(desktopRoot, "out", `runtime-v${runtime.runtimeVersion}`, "desktop-runtime-package.json")
+    : "";
+  const runtimePackagePath = argumentValue("--runtime-package", defaultRuntimePackage);
+  const runtimePackage = runtimePackagePath && fs.existsSync(runtimePackagePath)
+    ? JSON.parse(fs.readFileSync(runtimePackagePath, "utf8"))
+    : null;
+  if (runtimePackage) {
+    if (!runtime || runtimePackage.version !== runtime.runtimeVersion) {
+      throw new Error("Runtime package descriptor does not match desktop_runtime_manifest.json.");
+    }
+    const runtimeAssetRoot = path.dirname(runtimePackagePath);
+    for (const part of runtimePackage.parts || []) {
+      const source = path.join(runtimeAssetRoot, part.assetName);
+      if (process.argv.includes("--bundle-runtime-parts")) {
+        if (!fs.existsSync(source) || fs.statSync(source).size !== Number(part.size)) {
+          throw new Error(`Runtime package part is missing or has changed: ${part.assetName}`);
+        }
+        const destination = path.join(outputRoot, part.assetName);
+        if (path.resolve(source) !== path.resolve(destination)) fs.copyFileSync(source, destination);
+      }
+    }
+  }
   const releaseConfig = readOptionalJson(path.join(projectRoot, "desktop_release_config.json"), {});
   const channel = version.includes("-") ? "beta" : "stable";
   const manifest = {
@@ -210,7 +236,8 @@ async function main() {
         size: Number(releaseConfig.fullPortable?.size || 0),
         sha256: String(releaseConfig.fullPortable?.sha256 || ""),
         urls: Array.isArray(releaseConfig.fullPortable?.urls) ? releaseConfig.fullPortable.urls : []
-      }
+      },
+      ...(runtimePackage ? { runtime: runtimePackage } : {})
     },
     model: {
       repository: model.modelRepository,
@@ -245,12 +272,30 @@ async function main() {
   const release = {
     tag_name: `v${version}`,
     assets: [
-      { name: assetName, size: archiveSize, browser_download_url: `https://example.invalid/${assetName}` }
+      { name: assetName, size: archiveSize, browser_download_url: `https://example.invalid/${assetName}` },
+      ...((runtimePackage?.parts || []).map((part) => ({
+        name: part.assetName,
+        size: part.size,
+        browser_download_url: part.url
+      })))
     ]
   };
   validateUpdateManifest(manifest, release);
   fs.rmSync(payloadRoot, { recursive: true, force: true });
-  console.log(JSON.stringify({ version, sourceMode, archivePath, archiveSize, manifestPath, signaturePath, files: files.length }, null, 2));
+  console.log(JSON.stringify({
+    version,
+    sourceMode,
+    archivePath,
+    archiveSize,
+    manifestPath,
+    signaturePath,
+    files: files.length,
+    runtimePackage: runtimePackage ? {
+      version: runtimePackage.version,
+      parts: runtimePackage.parts.length,
+      archiveSize: runtimePackage.archiveSize
+    } : null
+  }, null, 2));
 }
 
 main().catch((error) => {

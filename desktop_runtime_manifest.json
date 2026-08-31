@@ -1,0 +1,17 @@
+{
+  "schemaVersion": 1,
+  "runtimeVersion": "1.0.0",
+  "platform": "win32-x64",
+  "repository": "T8mars/indextts25-desktop-t8",
+  "releaseTag": "runtime-v1.0.0",
+  "revision": "py31020-torch280-cu128-20260830",
+  "required": false,
+  "pythonVersion": "3.10.20",
+  "torchVersion": "2.8.0+cu128",
+  "cudaRuntime": "12.8",
+  "roots": [
+    "resources/cpython-3.10.20-windows-x86_64-none",
+    "resources/site-packages",
+    "resources/desktop_runtime_manifest.json"
+  ]
+}

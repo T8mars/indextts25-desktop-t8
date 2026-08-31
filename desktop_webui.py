@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import gc
+import html as html_lib
 import json
 import shutil
 import threading
@@ -21,6 +22,7 @@ import torchaudio
 
 from audio_quality import analyze_reference_audio, prepare_reference_audio, waveform_html
 from candidate_quality import combined_candidate_score, select_best_candidate, technical_audio_review
+from desktop_candidate_workspace import CandidateWorkspace
 from context_emotion import suggest_context_emotions
 from audiocpp_backend import (
     AUDIOCPP_MODEL_REPOSITORY,
@@ -33,6 +35,7 @@ from audiocpp_component_manager import (
     install_runtime as install_audiocpp_runtime,
 )
 from desktop_project_bundle import export_project, import_project
+from desktop_job_queue import DesktopJobQueue
 from desktop_voice_library import VoiceLibrary, VoiceProfile, safe_voice_file_stem
 from desktop_presets import delete_preset, list_presets, load_preset, save_preset
 from desktop_tasks import (
@@ -47,7 +50,9 @@ from desktop_generation_controls import (
     apply_duration_policy,
     build_desktop_plan,
     concatenate_with_pauses,
+    normalize_preflight_text,
     postprocess_waveform,
+    preflight_plan_rows,
     run_with_long_text_guard,
 )
 from desktop_model_lifecycle import DesktopModelLifecycle
@@ -65,6 +70,7 @@ from timeline_tools import (
     TIMELINE_HEADERS,
     apply_timeline_drag_payload,
     apply_timeline_edits,
+    move_timeline_row,
     render_timeline_html,
     rewrite_srt,
     timeline_rows,
@@ -117,7 +123,7 @@ from segment_rate_workspace import (
 
 
 APP_TITLE = "T8star-Aix · IndexTTS 2.5"
-DESKTOP_VERSION = "0.22.3"
+DESKTOP_VERSION = "0.23.0"
 MODEL_MANIFEST = json.loads(
     (Path(__file__).resolve().parent / "desktop_model_manifest.json").read_text(encoding="utf-8")
 )
@@ -456,6 +462,22 @@ CSS = """
 .t8-action-dock button { min-height: 52px !important; font-weight: 760 !important; }
 .t8-action-dock .t8-generate { min-width: 210px !important; }
 .t8-action-dock .t8-stop { min-width: 132px !important; }
+.t8-dock-progress-host {
+  flex: 1 1 420px !important;
+  min-width: 280px !important;
+}
+.t8-dock-progress { display: grid; gap: 6px; width: 100%; }
+.t8-dock-progress-copy { display: flex; justify-content: space-between; gap: 12px; font-size: 12px; }
+.t8-dock-progress-copy strong { font-size: 13px; }
+.t8-dock-progress-copy span { opacity: .72; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.t8-dock-progress progress { width: 100%; height: 10px; accent-color: #ff3d9b; }
+.t8-reference-health { margin-top: 8px !important; }
+.t8-reference-summary { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; padding: 9px 11px; border: 1px solid rgba(89,125,255,.2); border-radius: 11px; background: rgba(89,125,255,.045); font-size: 12px; }
+.t8-reference-summary strong { font-size: 13px; }
+.t8-reference-summary.good strong { color: #14804a; }
+.t8-reference-summary.warn strong { color: #b45309; }
+.t8-reference-summary.bad strong { color: #b91c1c; }
+.t8-reference-summary span { opacity: .78; }
 .t8-dialogue-preview { max-height: 430px !important; overflow: auto !important; }
 .t8-timeline { padding: 14px; border: 1px solid rgba(251,114,153,.28); border-radius: 14px; background: rgba(255,255,255,.68); overflow: hidden; }
 .t8-timeline-scale { display: flex; justify-content: space-between; font-size: 11px; opacity: .7; margin-bottom: 8px; }
@@ -511,6 +533,8 @@ CSS = """
     padding: 10px !important;
   }
   .t8-action-dock > :first-child { display: none !important; }
+  .t8-dock-progress-host { min-width: 120px !important; }
+  .t8-dock-progress-copy span { display: none; }
   .t8-action-dock button {
     flex: 1 1 0 !important;
     width: auto !important;
@@ -887,6 +911,58 @@ def delete_pronunciation_entry(rows, selected_index) -> list[list[object]]:
     return entries_to_rows(entries)
 
 
+def render_dialogue_dock_progress(
+    completed: int = 0,
+    total: int = 0,
+    phase: str = "就绪",
+    detail: str = "等待开始生成",
+) -> str:
+    """Render persistent, accessible progress for the fixed dialogue action dock."""
+
+    safe_total = max(0, int(total or 0))
+    safe_completed = max(0, min(int(completed or 0), safe_total)) if safe_total else 0
+    percent = round(safe_completed * 100 / safe_total) if safe_total else 0
+    phase_text = html_lib.escape(str(phase or "处理中"))
+    detail_text = html_lib.escape(str(detail or ""))
+    return (
+        '<div class="t8-dock-progress" role="progressbar" '
+        f'aria-valuemin="0" aria-valuemax="100" aria-valuenow="{percent}">'
+        '<div class="t8-dock-progress-copy">'
+        f'<strong>{phase_text} · {percent}%</strong>'
+        f'<span title="{detail_text}">{detail_text}</span>'
+        '</div>'
+        f'<progress max="100" value="{percent}">{percent}%</progress>'
+        '</div>'
+    )
+
+
+def render_reference_quality_summary(quality: dict | None = None, *, prepared: bool = False) -> str:
+    """Render a compact always-visible summary; detailed diagnostics stay collapsed."""
+
+    if not quality:
+        return (
+            '<div class="t8-reference-summary">'
+            '<strong>智能参考音频助手</strong>'
+            '<span>选择音色后自动检测；详细裁剪与波形按需展开</span>'
+            '</div>'
+        )
+    score = max(0, min(100, int(quality.get("score") or 0)))
+    grade = str(quality.get("grade") or "未知")
+    state_class = "good" if score >= 85 else "warn" if score >= 65 else "bad"
+    duration = float(quality.get("duration_seconds") or 0.0)
+    snr = float(quality.get("snr_estimate_db") or 0.0)
+    issues = [str(item) for item in quality.get("issues") or []]
+    issue_text = "；".join(issues[:2]) if issues else "未发现明显质量问题"
+    prefix = "已自动裁剪 · " if prepared else "原始参考 · "
+    return (
+        f'<div class="t8-reference-summary {state_class}">'
+        f'<strong>{prefix}{score}/100 · {html_lib.escape(grade)}</strong>'
+        f'<span>{duration:.1f}s · 估算 SNR {snr:.1f}dB</span>'
+        f'<span>{html_lib.escape(issue_text)}</span>'
+        '</div>'
+    )
+
+
 def build_app(
     tts: IndexTTS2,
     output_dir: Path,
@@ -908,16 +984,71 @@ def build_app(
     )
     exact_vocab_path = next((path for path in exact_vocab_candidates if path.is_file()), None)
     voice_library = VoiceLibrary(data_dir)
+    candidate_workspace = CandidateWorkspace(data_dir, output_dir)
+    queue_notice = ""
+    queue_path = data_dir / "task_queue.json"
+    try:
+        job_queue = DesktopJobQueue(queue_path)
+    except ValueError as exc:
+        backup = queue_path.with_name(
+            f"task_queue.corrupt-{time.strftime('%Y%m%d-%H%M%S')}.json"
+        )
+        if queue_path.exists():
+            queue_path.replace(backup)
+            queue_notice = f"旧队列损坏，已备份到 {backup.name}：{exc}"
+        job_queue = DesktopJobQueue(queue_path)
     audiocpp_initial_status = audiocpp_component_status(data_dir)
     runtime_fallback_used = False
     runtime_fallback_note = ""
     initial_tts = tts
     lifecycle = DesktopModelLifecycle(initial_tts, model_factory or (lambda: initial_tts))
-    memory_policy = {
+    memory_policy_path = data_dir / "memory_policy.json"
+    memory_policy_defaults = {
         "release_after_generation": False,
         "idle_seconds": 600.0,
         "recycle_after_generations": 0,
     }
+    try:
+        stored_memory_policy = json.loads(memory_policy_path.read_text(encoding="utf-8"))
+    except (OSError, TypeError, json.JSONDecodeError):
+        stored_memory_policy = {}
+
+    def memory_policy_number(name, default, *, minimum, maximum, integer=False):
+        try:
+            value = float(stored_memory_policy.get(name, default))
+        except (TypeError, ValueError, OverflowError):
+            value = float(default)
+        value = max(float(minimum), min(float(maximum), value))
+        return int(value) if integer else value
+
+    memory_policy = {
+        "release_after_generation": bool(
+            stored_memory_policy.get("release_after_generation", memory_policy_defaults["release_after_generation"])
+        ),
+        "idle_seconds": memory_policy_number(
+            "idle_seconds",
+            memory_policy_defaults["idle_seconds"],
+            minimum=0,
+            maximum=86400,
+        ),
+        "recycle_after_generations": memory_policy_number(
+            "recycle_after_generations",
+            memory_policy_defaults["recycle_after_generations"],
+            minimum=0,
+            maximum=1000,
+            integer=True,
+        ),
+    }
+    lifecycle.schedule_idle(memory_policy["idle_seconds"])
+
+    def save_memory_policy() -> None:
+        memory_policy_path.parent.mkdir(parents=True, exist_ok=True)
+        temporary = memory_policy_path.with_suffix(".json.tmp")
+        temporary.write_text(
+            json.dumps(memory_policy, ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8",
+        )
+        temporary.replace(memory_policy_path)
 
     def ensure_model():
         nonlocal tts
@@ -932,11 +1063,18 @@ def build_app(
         return report
 
     def update_memory_policy_event(release_after, idle_seconds, recycle_after):
+        try:
+            idle_value = max(0.0, min(86400.0, float(idle_seconds)))
+            recycle_value = max(0, min(1000, int(recycle_after)))
+        except (TypeError, ValueError, OverflowError) as exc:
+            raise gr.Error("显存策略必须填写有效数字。") from exc
         memory_policy.update(
             release_after_generation=bool(release_after),
-            idle_seconds=max(0.0, float(idle_seconds)),
-            recycle_after_generations=max(0, int(recycle_after)),
+            idle_seconds=idle_value,
+            recycle_after_generations=recycle_value,
         )
+        save_memory_policy()
+        lifecycle.schedule_idle(memory_policy["idle_seconds"])
         return json.dumps(
             {"policy": memory_policy, "runtime": lifecycle.status()},
             ensure_ascii=False,
@@ -1266,6 +1404,8 @@ def build_app(
     def preview_segments_event(
         text: str,
         language: str,
+        pronunciation_rows,
+        text_normalization: bool,
         segmentation_mode: str,
         max_tokens: int,
         pause_preset: str,
@@ -1277,9 +1417,25 @@ def build_app(
         source = str(text or "").strip()
         if not source:
             raise gr.Error("请先输入需要预览的文本。")
+        try:
+            pronunciation_result = process_pronunciation_text(
+                source,
+                language,
+                parse_rows(pronunciation_rows, language),
+                strict=False,
+                pinyin_vocab_path=exact_vocab_path,
+            )
+        except PronunciationValidationError as exc:
+            raise gr.Error(f"发音标注校验失败：{exc}") from exc
+        normalized_text = normalize_preflight_text(
+            tts,
+            pronunciation_result.text,
+            language,
+            bool(text_normalization),
+        )
         plan = build_desktop_plan(
             tts,
-            source,
+            normalized_text,
             language,
             segmentation_mode,
             int(max_tokens),
@@ -1288,22 +1444,21 @@ def build_app(
             int(sentence_pause_ms),
             int(paragraph_pause_ms),
         )
-        rows = [
-            [
-                item["index"],
-                item["speech_block"],
-                item["token_count"],
-                item["pause_before_ms"],
-                item["pause_after_ms"],
-                item["text"],
-            ]
-            for item in plan.segments
-        ]
-        return rows, (
+        rows = preflight_plan_rows(plan)
+        estimated_seconds = sum(float(row[3]) for row in rows) + plan.total_pause_ms / 1000
+        risky = sum(1 for row in rows if str(row[4]).startswith(("中", "高")))
+        return rows, normalized_text, (
             f"共 {len(plan.segments)} 个 Token 分段 / {len(plan.chunks)} 个停顿语音块；"
             f"有效上限 {plan.max_tokens} Token，外加停顿 {plan.total_pause_ms}ms；"
-            "GPT 合成提示 KV Cache 修复已启用。"
+            f"预计总时长约 {estimated_seconds:.1f}s，需留意 {risky} 段。"
+            "预计时长仅用于生成前排查，最终时长以实际音频为准。"
         )
+
+    def apply_preflight_text_event(preflight_text):
+        value = str(preflight_text or "").strip()
+        if not value:
+            raise gr.Error("请先运行长文本预检。")
+        return value, "已把预检文本应用到正文；可继续编辑，确认后再生成。"
 
     def change_emotion_mode(mode: int):
         return (
@@ -2861,6 +3016,14 @@ def build_app(
             item = report_map.get(line.index)
             if not item:
                 continue
+            # A report from the previous order/text must never lend its audio
+            # duration or ASR timing to newly edited content.
+            if item.get("text") is not None and str(item.get("text")) != line.text:
+                continue
+            if item.get("role") is not None and str(item.get("role")) != line.role:
+                continue
+            if item.get("language") is not None and str(item.get("language")).upper() != line.language:
+                continue
             timeline = dict(item.get("timeline") or {})
             if line.start_ms is not None and line.end_ms is not None:
                 timeline.update(
@@ -2906,6 +3069,46 @@ def build_app(
             status,
             drag["index"],
         )
+
+    def move_dialogue_line_event(
+        script_type,
+        script,
+        default_role,
+        default_language,
+        edited_rows,
+        selected_line_number,
+        generation_report,
+        direction,
+    ):
+        try:
+            parsed = parse_dialogue(script_type, script, default_role, default_language)
+            apply_timeline_edits(parsed, edited_rows)
+            moved_rows, new_line_number, moved = move_timeline_row(
+                edited_rows,
+                selected_line_number,
+                int(direction),
+            )
+            lines = apply_timeline_edits(parsed, moved_rows)
+        except (TypeError, ValueError) as exc:
+            raise gr.Error(str(exc)) from exc
+        if not moved:
+            edge = "第一条" if int(direction) < 0 else "最后一条"
+            status = f"所选台词已经是{edge}，顺序未改变。"
+        else:
+            action = "上移" if int(direction) < 0 else "下移"
+            status = (
+                f"已将所选台词{action}到第 {new_line_number} 条，并自动重新编号。"
+                "角色、语言、台词和情感已一起移动；原有 SRT 时间槽保持原位。"
+            )
+        # Previous reports describe audio from the old order, so do not bind
+        # their durations or ASR results to the reordered text.
+        return moved_rows, render_timeline_html(lines), status, new_line_number
+
+    def move_dialogue_line_up_event(*args):
+        return move_dialogue_line_event(*args, -1)
+
+    def move_dialogue_line_down_event(*args):
+        return move_dialogue_line_event(*args, 1)
 
     def suggest_dialogue_emotions_event(
         script_type,
@@ -3159,9 +3362,44 @@ def build_app(
             raise gr.Error(f"参考音频检测失败：{str(exc).strip() or type(exc).__name__}") from exc
         return (
             output_path,
+            render_reference_quality_summary(
+                report["prepared"],
+                prepared=bool(report.get("trimmed")),
+            ),
             json.dumps(report, ensure_ascii=False, indent=2),
             waveform_html(display_waveform, sample_rate),
         )
+
+    def analyze_reference_event(audio_path):
+        if not audio_path:
+            return (
+                render_reference_quality_summary(),
+                "",
+                '<div class="t8-timeline-empty">选择音色后显示参考音频波形。</div>',
+            )
+        try:
+            waveform, sample_rate = load_audio_file(audio_path)
+            quality = analyze_reference_audio(waveform, sample_rate)
+            report = {
+                "original": quality,
+                "prepared": quality,
+                "trimmed": False,
+                "selected_start_seconds": 0.0,
+                "selected_end_seconds": quality["duration_seconds"],
+            }
+            return (
+                render_reference_quality_summary(quality),
+                json.dumps(report, ensure_ascii=False, indent=2),
+                waveform_html(waveform, sample_rate),
+            )
+        except Exception as exc:
+            message = str(exc).strip() or type(exc).__name__
+            return (
+                '<div class="t8-reference-summary bad"><strong>参考音频无法读取</strong>'
+                f'<span>{html_lib.escape(message)}</span></div>',
+                json.dumps({"error": message}, ensure_ascii=False, indent=2),
+                '<div class="t8-timeline-empty">音频读取失败，无法显示波形。</div>',
+            )
 
     def probe_audiocpp_event(executable):
         if not str(executable or "").strip():
@@ -3436,6 +3674,16 @@ def build_app(
         if missing:
             raise gr.Error("请先在“角色音色库”中保存这些角色：" + "、".join(missing))
 
+        total_lines = len(lines)
+
+        def dock_progress(completed: int, phase: str, detail: str):
+            return (
+                *(gr.skip() for _ in range(9)),
+                render_dialogue_dock_progress(completed, total_lines, phase, detail),
+            )
+
+        yield dock_progress(0, "正在准备", f"共 {total_lines} 条台词，正在校验任务与音色")
+
         run_id = resume_task_id or f"dialogue_{time.strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:8]}"
         session_dir = output_dir / run_id
         session_dir.mkdir(parents=True, exist_ok=bool(resume_task_id))
@@ -3555,6 +3803,11 @@ def build_app(
 
         for offset, line in enumerate(lines):
             progress((offset / max(len(lines), 1)), desc=f"生成第 {offset + 1}/{len(lines)} 条：{line.role}")
+            yield dock_progress(
+                offset,
+                f"正在生成 {offset + 1}/{total_lines}",
+                f"当前角色：{line.role}｜{line.text[:36]}",
+            )
             profile = profiles[line.role]
             target = session_dir / (
                 f"{line.index:04d}_{safe_voice_file_stem(profile.name, profile.profile_id)}.wav"
@@ -3596,6 +3849,11 @@ def build_app(
                         report=cached_report,
                     )
                 report_lines.append(cached_report)
+                yield dock_progress(
+                    offset + 1,
+                    f"已恢复 {offset + 1}/{total_lines}",
+                    f"已复用角色 {line.role} 的缓存音频",
+                )
                 continue
             ensure_model()
             task = update_task_line(
@@ -3940,6 +4198,11 @@ def build_app(
                 file=str(target),
                 report=line_report,
             )
+            yield dock_progress(
+                offset + 1,
+                f"已完成 {offset + 1}/{total_lines}",
+                f"角色 {line.role} 已生成，任务进度已保存",
+            )
 
         assert sample_rate is not None
         mixed, placements = compose_timeline(
@@ -4044,7 +4307,7 @@ def build_app(
         task["rewritten_srt_file"] = str(rewritten_srt_path)
         task = set_task_status(output_dir, task, "completed")
         progress(1, desc="多角色配音完成")
-        return (
+        yield (
             str(combined),
             str(archive),
             str(rewritten_srt_path),
@@ -4055,6 +4318,12 @@ def build_app(
             "已生成 ASR 校对报告、回写字幕和可编辑时间轴。",
             render_timeline_html(lines, report_lines),
             str(combined),
+            render_dialogue_dock_progress(
+                total_lines,
+                total_lines,
+                "生成完成",
+                f"{total_lines} 条台词已合并，可直接试听或下载",
+            ),
         )
 
     def rebuild_dialogue_timeline_event(
@@ -4084,8 +4353,45 @@ def build_app(
 
         clips, clip_paths, report_lines = [], [], []
         sample_rate = None
+        parsed_by_index = {line.index: line for line in parsed}
+        changed_audio_lines = []
         for line in lines:
             saved_line = (task.get("lines") or {}).get(str(line.index)) or {}
+            saved_report = dict(saved_line.get("report") or {})
+            original = parsed_by_index[line.index]
+            expected = {
+                "role": saved_report.get("role", original.role),
+                "language": str(saved_report.get("language", original.language)).upper(),
+                "text": saved_report.get("text", original.text),
+                "duration_factor": float(
+                    saved_report.get("duration_factor", original.duration_factor)
+                ),
+                "emotion_mode": saved_report.get("emotion_mode", original.emotion_mode),
+                "emotion_text": saved_report.get("emotion_text", original.emotion_text),
+                "emotion_vector": (
+                    tuple(saved_report.get("emotion_vector"))
+                    if saved_report.get("emotion_vector") is not None
+                    else original.emotion_vector
+                ),
+                "emotion_strength": float(
+                    saved_report.get("emotion_strength", original.emotion_strength)
+                ),
+                "emotion_use_random": bool(
+                    saved_report.get("emotion_use_random", original.emotion_use_random)
+                ),
+            }
+            if (
+                line.role != expected["role"]
+                or line.language != expected["language"]
+                or line.text != expected["text"]
+                or abs(line.duration_factor - expected["duration_factor"]) > 1e-9
+                or line.emotion_mode != expected["emotion_mode"]
+                or line.emotion_text != expected["emotion_text"]
+                or line.emotion_vector != expected["emotion_vector"]
+                or abs(line.emotion_strength - expected["emotion_strength"]) > 1e-9
+                or line.emotion_use_random != expected["emotion_use_random"]
+            ):
+                changed_audio_lines.append(line.index)
             clip_path = Path(str(saved_line.get("file") or ""))
             if saved_line.get("status") != "completed" or not clip_path.is_file():
                 raise gr.Error(f"任务第 {line.index} 条音频缺失，请先继续未完成任务。")
@@ -4096,7 +4402,13 @@ def build_app(
                 raise gr.Error("逐句音频采样率不一致，无法重新混音。")
             clips.append(waveform.unsqueeze(0))
             clip_paths.append(clip_path)
-            report_lines.append(dict(saved_line.get("report") or {**line.to_dict()}))
+            report_lines.append(saved_report or {**line.to_dict()})
+        if changed_audio_lines:
+            numbers = "、".join(str(item) for item in changed_audio_lines)
+            raise gr.Error(
+                f"第 {numbers} 条修改了角色、语言、台词、情感或时长系数，旧音频已不匹配。"
+                "请先单句重做这些台词，或重新生成全部台词；仅调整开始/结束时间时才可直接重新混音。"
+            )
         assert sample_rate is not None
         mixed, placements = compose_timeline(
             clips,
@@ -4181,7 +4493,238 @@ def build_app(
             f"任务 {task_id} 已按编辑后的时间轴重新混音；未重新执行 TTS。",
             render_timeline_html(lines, report_lines),
             str(combined),
+            render_dialogue_dock_progress(
+                len(lines),
+                len(lines),
+                "重新混音完成",
+                "已按编辑时间轴重新合并，未重复执行 TTS",
+            ),
         )
+
+    def queue_json_value(value):
+        if isinstance(value, Path):
+            return str(value)
+        if isinstance(value, dict):
+            if "data" in value and isinstance(value.get("data"), list):
+                return [queue_json_value(item) for item in value["data"]]
+            return {str(key): queue_json_value(item) for key, item in value.items()}
+        if isinstance(value, (list, tuple)):
+            return [queue_json_value(item) for item in value]
+        if hasattr(value, "values") and hasattr(value.values, "tolist"):
+            return queue_json_value(value.values.tolist())
+        if hasattr(value, "item") and callable(value.item):
+            try:
+                return value.item()
+            except (TypeError, ValueError):
+                pass
+        return value
+
+    def queue_snapshot(selected=None):
+        choices = job_queue.choices()
+        values = {value for _label, value in choices}
+        selected_value = selected if selected in values else (choices[0][1] if choices else None)
+        return job_queue.rows(), gr.update(choices=choices, value=selected_value)
+
+    def enqueue_single_event(*inputs):
+        values = list(inputs)
+        prompt = str(values[0] or "").strip() if values else ""
+        source = str(inputs[1] or "").strip() if len(inputs) > 1 else ""
+        language = str(inputs[2] or "ZH").strip().upper() if len(inputs) > 2 else "ZH"
+        if not prompt:
+            raise gr.Error("加入队列前请先选择或上传音色参考。")
+        if not source:
+            raise gr.Error("加入队列前请输入需要合成的文本。")
+        asset_dir = data_dir / "queue_assets" / uuid.uuid4().hex
+        try:
+            for input_index, filename in ((0, "speaker_reference"), (5, "emotion_reference")):
+                if input_index >= len(values) or not values[input_index]:
+                    continue
+                source_path = Path(str(values[input_index])).resolve()
+                if not source_path.is_file():
+                    raise ValueError(f"队列参考音频不存在：{source_path}")
+                suffix = source_path.suffix.lower() or ".wav"
+                asset_dir.mkdir(parents=True, exist_ok=True)
+                target_path = asset_dir / f"{filename}{suffix}"
+                shutil.copy2(source_path, target_path)
+                values[input_index] = str(target_path)
+        except (OSError, ValueError) as exc:
+            shutil.rmtree(asset_dir, ignore_errors=True)
+            raise gr.Error(f"无法保存队列参考音频：{exc}") from exc
+        summary = f"{language} · {source.replace(chr(10), ' ')[:80]}"
+        try:
+            job = job_queue.enqueue(
+                "single",
+                {"inputs": queue_json_value(values)},
+                summary,
+            )
+        except ValueError as exc:
+            shutil.rmtree(asset_dir, ignore_errors=True)
+            raise gr.Error(str(exc)) from exc
+        rows, selector = queue_snapshot(job["job_id"])
+        return rows, selector, f"已加入单句任务 {job['job_id']}；可到“任务队列”统一执行。"
+
+    def enqueue_dialogue_event(*inputs):
+        script_type = str(inputs[0] or "batch") if inputs else "batch"
+        script = str(inputs[1] or "").strip() if len(inputs) > 1 else ""
+        if not script:
+            raise gr.Error("加入队列前请先导入或填写台词。")
+        try:
+            parsed = parse_dialogue(script_type, script, inputs[2], inputs[3])
+            apply_timeline_edits(parsed, inputs[4])
+        except (IndexError, ValueError) as exc:
+            raise gr.Error(str(exc)) from exc
+        kind = "srt" if script_type == "srt" else "dialogue"
+        summary = f"{len(parsed)} 条 · {parsed[0].text[:70]}"
+        try:
+            job = job_queue.enqueue(
+                kind,
+                {"inputs": queue_json_value([*inputs, "", 0])},
+                summary,
+            )
+        except ValueError as exc:
+            raise gr.Error(str(exc)) from exc
+        rows, selector = queue_snapshot(job["job_id"])
+        label = "SRT" if kind == "srt" else "多角色"
+        return rows, selector, f"已加入{label}任务 {job['job_id']}；可到“任务队列”统一执行。"
+
+    def refresh_job_queue_event(selected=None):
+        rows, selector = queue_snapshot(selected)
+        pending_count = len(job_queue.pending())
+        return rows, selector, f"队列已刷新：{pending_count} 个任务等待执行。"
+
+    def cancel_queue_job_event(job_id):
+        try:
+            job = job_queue.get(str(job_id or ""))
+            if job.get("status") == "running":
+                raise ValueError("当前运行任务请使用“停止队列执行”；等待中的任务可单独取消。")
+            job_queue.cancel(job["job_id"])
+        except ValueError as exc:
+            raise gr.Error(str(exc)) from exc
+        rows, selector = queue_snapshot(job["job_id"])
+        return rows, selector, f"已取消任务 {job['job_id']}。"
+
+    def retry_queue_job_event(job_id):
+        try:
+            job = job_queue.retry(str(job_id or ""))
+        except ValueError as exc:
+            raise gr.Error(str(exc)) from exc
+        rows, selector = queue_snapshot(job["job_id"])
+        return rows, selector, f"任务 {job['job_id']} 已重新加入等待队列。"
+
+    def run_job_queue_event():
+        pending = job_queue.pending()
+        if not pending:
+            rows, selector = queue_snapshot()
+            yield rows, selector, "队列中没有等待执行的任务。", load_history(output_dir)
+            return
+        total = len(pending)
+        active_job_id = ""
+        try:
+            for position, queued_job in enumerate(pending, 1):
+                active_job_id = queued_job["job_id"]
+                current = job_queue.get(active_job_id)
+                if current.get("status") != "pending":
+                    continue
+                job_queue.update(active_job_id, "running", error="")
+                rows, selector = queue_snapshot(active_job_id)
+                yield (
+                    rows,
+                    selector,
+                    f"正在执行 {position}/{total}：{current['summary']}",
+                    load_history(output_dir),
+                )
+                try:
+                    final_result = None
+                    inputs = list((current.get("payload") or {}).get("inputs") or [])
+                    if current.get("kind") == "single":
+                        for final_result in generate(*inputs):
+                            pass
+                        result_path = str(final_result[1] or "") if final_result else ""
+                    else:
+                        for final_result in generate_dialogue_event(*inputs):
+                            pass
+                        result_path = str(final_result[0] or "") if final_result else ""
+                    latest = job_queue.get(active_job_id)
+                    if latest.get("status") == "running":
+                        job_queue.update(active_job_id, "completed", result=result_path, error="")
+                    message = f"已完成 {position}/{total}：{current['summary']}"
+                except GeneratorExit:
+                    raise
+                except Exception as exc:
+                    job_queue.update(active_job_id, "failed", error=str(exc))
+                    message = (
+                        f"第 {position}/{total} 个任务失败，已记录并继续后续任务：{exc}"
+                    )
+                rows, selector = queue_snapshot(active_job_id)
+                yield rows, selector, message, load_history(output_dir)
+                active_job_id = ""
+        except GeneratorExit:
+            if active_job_id:
+                latest = job_queue.get(active_job_id)
+                if latest.get("status") == "running":
+                    job_queue.update(active_job_id, "cancelled", error="用户停止了队列执行。")
+            raise
+        finally:
+            if active_job_id:
+                try:
+                    latest = job_queue.get(active_job_id)
+                    if latest.get("status") == "running":
+                        job_queue.update(active_job_id, "cancelled", error="队列执行已停止。")
+                except ValueError:
+                    pass
+
+    def refresh_candidate_workspace_event(candidate_files):
+        try:
+            choices = candidate_workspace.choices(candidate_files)
+        except ValueError as exc:
+            raise gr.Error(str(exc)) from exc
+        if not choices:
+            return (
+                gr.update(choices=[], value=None),
+                None,
+                3,
+                "",
+                "本次没有 A/B 候选；在高级生成参数中把“追加候选数量”设为 1–3。",
+            )
+        selected = choices[0][1]
+        review = candidate_workspace.review_for(selected) or {}
+        return (
+            gr.update(choices=choices, value=selected),
+            selected,
+            int(review.get("rating", 3)),
+            str(review.get("note", "")),
+            f"已载入 {len(choices)} 个候选；可逐个试听、评分并收藏。",
+        )
+
+    def select_candidate_event(candidate_file):
+        if not candidate_file:
+            return None, 3, "", "请选择一个候选。"
+        try:
+            review = candidate_workspace.review_for(candidate_file) or {}
+        except ValueError as exc:
+            raise gr.Error(str(exc)) from exc
+        rating = int(review.get("rating", 3))
+        note = str(review.get("note", ""))
+        status = f"正在试听 {Path(candidate_file).name}"
+        if review:
+            status += f"；已保存 {rating} 星评分。"
+        return str(candidate_file), rating, note, status
+
+    def save_candidate_review_event(candidate_file, rating, note, favorite=False):
+        if not candidate_file:
+            raise gr.Error("请先选择一个 A/B 候选。")
+        try:
+            review = candidate_workspace.save_review(
+                candidate_file,
+                rating,
+                note,
+                favorite=bool(favorite),
+            )
+        except ValueError as exc:
+            raise gr.Error(str(exc)) from exc
+        if review["favorite_file"]:
+            return f"已保存 {review['rating']} 星评分，并收藏到 {review['favorite_file']}。"
+        return f"已保存 {review['rating']} 星评分；原候选文件保持不变。"
 
     theme = gr.themes.Soft(
         primary_hue="pink",
@@ -4201,7 +4744,7 @@ def build_app(
                 <p class="t8-credit">整合制作：B站 @T8star-Aix</p>
               </div>
             </section>
-            """
+"""
         )
 
         with gr.Row(elem_classes=["t8-desktop-toolbar"]):
@@ -4245,6 +4788,10 @@ def build_app(
                         sources=["upload", "microphone"],
                         type="filepath",
                         elem_classes=["t8-prompt-audio"],
+                    )
+                    reference_quality_summary = gr.HTML(
+                        render_reference_quality_summary(),
+                        elem_classes=["t8-reference-health"],
                     )
                 with gr.Column(scale=2):
                     text = gr.TextArea(
@@ -4649,15 +5196,26 @@ def build_app(
                         step=0.01,
                         label="质检通过阈值",
                     )
-                segment_preview_button = gr.Button("预览长文本分段")
+                with gr.Row():
+                    segment_preview_button = gr.Button("生成前预检长文本", variant="secondary")
+                    apply_preflight_text_button = gr.Button("将预检文本应用到正文")
+                segment_preflight_text = gr.TextArea(
+                    label="实际归一化文本（可编辑后应用到正文）",
+                    lines=5,
+                    interactive=True,
+                    placeholder="点击“生成前预检长文本”后显示数字、日期、发音词典处理结果",
+                )
                 segment_preview_table = gr.Dataframe(
-                    headers=["段号", "语音块", "Token 数", "段前停顿ms", "段后停顿ms", "分段文本"],
-                    datatype=["number", "number", "number", "number", "number", "str"],
+                    headers=[
+                        "段号", "语音块", "Token 数", "预计时长(s)", "风险",
+                        "段前停顿ms", "段后停顿ms", "分段文本",
+                    ],
+                    datatype=["number", "number", "number", "number", "str", "number", "number", "str"],
                     interactive=False,
                     wrap=True,
-                    label="官方 Token 分段预览",
+                    label="Token / 预计时长 / 风险预检",
                 )
-                segment_preview_status = gr.Markdown("生成前可先查看长文本会如何切分。")
+                segment_preview_status = gr.Markdown("生成前可检查实际文本、分段、预计时长和风险。")
 
             with gr.Row(elem_classes=["t8-action-dock", "t8-single-action-dock"]):
                 gr.Markdown("**语音生成**　确认音色与文本后即可开始；任务运行时可随时停止。")
@@ -4666,6 +5224,12 @@ def build_app(
                     variant="primary",
                     elem_classes=["t8-generate"],
                     min_width=210,
+                    scale=0,
+                )
+                enqueue_single_button = gr.Button(
+                    "加入队列",
+                    variant="secondary",
+                    min_width=110,
                     scale=0,
                 )
                 stop_button = gr.Button(
@@ -4683,11 +5247,30 @@ def build_app(
                 format="wav",
             )
             output_audio = gr.Audio(label="最终生成结果", type="filepath")
-            candidate_audio_files = gr.Files(
-                label="全部候选音频（可分别试听、下载或用于单段替换）",
-                file_types=["audio"],
-                interactive=False,
-            )
+            with gr.Accordion("声音 A/B 候选试听、评分与收藏 · 生成后按需展开", open=False):
+                gr.Markdown(
+                    "在高级生成参数中把“追加候选数量”设为 1–3 后，系统会保留所有候选并自动选优。"
+                    "这里可逐个试听，记录 1–5 星主观评分；收藏会复制到用户数据目录，避免后续清理丢失。"
+                )
+                candidate_audio_files = gr.Files(
+                    label="全部候选音频",
+                    file_types=["audio"],
+                    interactive=False,
+                )
+                with gr.Row():
+                    candidate_ab_select = gr.Dropdown(label="选择候选 A / B / C / D")
+                    candidate_ab_rating = gr.Slider(
+                        1, 5, value=3, step=1, label="主观评分（星）"
+                    )
+                candidate_ab_audio = gr.Audio(label="当前候选试听", type="filepath")
+                candidate_ab_note = gr.Textbox(
+                    label="评分备注",
+                    placeholder="例如：A 更像原音色，B 情绪更自然",
+                )
+                with gr.Row():
+                    save_candidate_review_button = gr.Button("保存评分")
+                    favorite_candidate_button = gr.Button("保存评分并收藏音频", variant="primary")
+                candidate_ab_status = gr.Markdown("生成候选后会自动载入这里。")
             with gr.Accordion("跨段语速审计与内部单段重做 · 生成后按需展开", open=False):
                 gr.Markdown(
                     "生成多段长文本后，这里按真实音频时长显示每个内部段的语速。"
@@ -5090,13 +5673,27 @@ def build_app(
             with gr.Row(elem_classes=["t8-dialogue-tools"]):
                 preview_dialogue_button = gr.Button("解析并检查角色")
                 refresh_timeline_button = gr.Button("手动刷新可视化时间轴")
+                move_dialogue_line_up_button = gr.Button("↑ 上移所选台词")
+                move_dialogue_line_down_button = gr.Button("↓ 下移所选台词")
             with gr.Row(elem_classes=["t8-action-dock", "t8-dialogue-action-dock"]):
-                gr.Markdown("**多角色配音**　先解析并确认角色；生成后可随时停止排队或当前任务。")
+                dialogue_dock_progress = gr.HTML(
+                    render_dialogue_dock_progress(
+                        phase="多角色配音",
+                        detail="先解析并确认角色；任务运行时这里会持续显示进度",
+                    ),
+                    elem_classes=["t8-dock-progress-host"],
+                )
                 generate_dialogue_button = gr.Button(
                     "生成全部台词",
                     variant="primary",
                     elem_classes=["t8-generate"],
                     min_width=210,
+                    scale=0,
+                )
+                enqueue_dialogue_button = gr.Button(
+                    "加入队列",
+                    variant="secondary",
+                    min_width=110,
                     scale=0,
                 )
                 stop_dialogue_button = gr.Button(
@@ -5109,7 +5706,11 @@ def build_app(
             dialogue_status = gr.Markdown("请先在“角色音色库”保存脚本中使用的角色。")
             dialogue_preview = gr.Dataframe(
                 headers=TIMELINE_HEADERS,
-                datatype=["number", "str", "str", "number", "number", "number", "str", "str"],
+                # Time cells are text on purpose: Gradio numeric cells coerce
+                # blanks to 0 after a queued run, which can corrupt untimed
+                # batch scripts on the second generation. Validation remains
+                # strict in apply_timeline_edits().
+                datatype=["number", "str", "str", "str", "str", "number", "str", "str"],
                 type="array",
                 interactive=True,
                 wrap=True,
@@ -5253,25 +5854,25 @@ def build_app(
                 "- `gpt_accel`：需要 FlashAttention + Triton；不兼容采样参数会自动走普通 GPT。\n"
                 "- `deepspeed`：仅显式选择时使用；Windows 包固定使用兼容的 FP16 GPT 内核，初始化失败会自动回退。"
             )
-            with gr.Accordion("模型与显存生命周期", open=True):
+            with gr.Accordion("模型与显存生命周期 · 默认空闲 10 分钟自动释放", open=False):
                 gr.Markdown(
                     "这里只管理本整合包加载的 IndexTTS 2.5 模型，不会清理其他程序。"
                     "手动或自动释放后，下次生成会自动重新加载模型。"
                 )
                 with gr.Row():
                     release_after_generation = gr.Checkbox(
-                        value=False,
+                        value=memory_policy["release_after_generation"],
                         label="每次生成后释放模型",
                     )
                     idle_release_seconds = gr.Number(
-                        value=600,
+                        value=memory_policy["idle_seconds"],
                         minimum=0,
                         maximum=86400,
                         precision=0,
                         label="空闲自动释放（秒，0=关闭）",
                     )
                     recycle_after_generations = gr.Number(
-                        value=0,
+                        value=memory_policy["recycle_after_generations"],
                         minimum=0,
                         maximum=1000,
                         precision=0,
@@ -5287,7 +5888,7 @@ def build_app(
                     lines=12,
                     interactive=False,
                 )
-            with gr.Accordion("参考条件缓存管理", open=True):
+            with gr.Accordion("参考条件缓存管理", open=False):
                 gr.Markdown(
                     "音色和情感参考编码结果会按音频内容、模型版本、精度及参考设备隔离缓存。"
                     "重复使用同一参考音频可跳过参考编码；清理缓存不会删除原音频或模型。"
@@ -5313,7 +5914,7 @@ def build_app(
                 "其文本归一化实现与官方 Python 路径并非所有边界输入都完全一致，"
                 "请先对中文、英语、日语、西语和阿语做试听对比。"
             )
-            with gr.Accordion("一键安装 / 更新可选组件", open=True):
+            with gr.Accordion("一键安装 / 更新可选组件 · 按需展开", open=False):
                 with gr.Row():
                     audiocpp_install_backend = gr.Dropdown(
                         choices=[
@@ -5406,6 +6007,40 @@ def build_app(
                 interactive=False,
                 wrap=True,
             )
+
+        with gr.Tab("任务队列"):
+            gr.Markdown(
+                "单句、多角色和 SRT 共用一个顺序队列；配置保存在用户数据目录，"
+                "关闭桌面程序后仍会保留，未完成任务下次可继续。"
+            )
+            with gr.Accordion("队列使用说明 · 按需展开", open=False):
+                gr.Markdown(
+                    "先在语音生成或多角色页设置好参数并点击“加入队列”，然后回到这里统一执行。"
+                    "任务按加入顺序逐个运行；失败不会丢失，可选中后重新排队。"
+                )
+            with gr.Row():
+                run_job_queue_button = gr.Button("执行全部等待任务", variant="primary")
+                stop_job_queue_button = gr.Button("停止队列执行", variant="stop")
+                refresh_job_queue_button = gr.Button("刷新队列")
+            job_queue_status = gr.Markdown(
+                queue_notice or f"当前有 {len(job_queue.pending())} 个任务等待执行。"
+            )
+            job_queue_table = gr.Dataframe(
+                headers=["任务编号", "类型", "状态", "摘要", "结果文件", "错误", "更新时间"],
+                value=job_queue.rows(),
+                datatype=["str", "str", "str", "str", "str", "str", "str"],
+                interactive=False,
+                wrap=True,
+                label="持久任务队列",
+            )
+            with gr.Row():
+                queue_job_select = gr.Dropdown(
+                    choices=job_queue.choices(),
+                    label="选择任务",
+                    allow_custom_value=False,
+                )
+                retry_queue_job_button = gr.Button("失败/取消任务重新排队")
+                cancel_queue_job_button = gr.Button("取消等待任务", variant="stop")
 
         return_launcher_button.click(
             fn=None,
@@ -5582,7 +6217,18 @@ def build_app(
                 reference_maximum_seconds,
                 reference_padding_ms,
             ],
-            outputs=[prompt_audio, reference_quality_report, reference_waveform],
+            outputs=[
+                prompt_audio,
+                reference_quality_summary,
+                reference_quality_report,
+                reference_waveform,
+            ],
+            queue=False,
+        )
+        prompt_audio.change(
+            analyze_reference_event,
+            inputs=prompt_audio,
+            outputs=[reference_quality_summary, reference_quality_report, reference_waveform],
             queue=False,
         )
         single_voice_select.change(
@@ -5681,6 +6327,8 @@ def build_app(
             inputs=[
                 text,
                 language,
+                dictionary_table,
+                text_normalization,
                 segmentation_mode,
                 max_text_tokens,
                 pause_preset,
@@ -5688,7 +6336,13 @@ def build_app(
                 sentence_pause_ms,
                 paragraph_pause_ms,
             ],
-            outputs=[segment_preview_table, segment_preview_status],
+            outputs=[segment_preview_table, segment_preflight_text, segment_preview_status],
+            queue=False,
+        )
+        apply_preflight_text_button.click(
+            apply_preflight_text_event,
+            inputs=segment_preflight_text,
+            outputs=[text, segment_preview_status],
             queue=False,
         )
         save_voice_button.click(
@@ -5831,6 +6485,33 @@ def build_app(
                 dialogue_report,
             ],
             outputs=[dialogue_timeline_visual, dialogue_status],
+            queue=False,
+        )
+        dialogue_move_inputs = [
+            dialogue_type,
+            dialogue_script,
+            dialogue_default_role,
+            dialogue_default_language,
+            dialogue_preview,
+            retry_dialogue_line_number,
+            dialogue_report,
+        ]
+        dialogue_move_outputs = [
+            dialogue_preview,
+            dialogue_timeline_visual,
+            dialogue_status,
+            retry_dialogue_line_number,
+        ]
+        move_dialogue_line_up_button.click(
+            move_dialogue_line_up_event,
+            inputs=dialogue_move_inputs,
+            outputs=dialogue_move_outputs,
+            queue=False,
+        )
+        move_dialogue_line_down_button.click(
+            move_dialogue_line_down_event,
+            inputs=dialogue_move_inputs,
+            outputs=dialogue_move_outputs,
             queue=False,
         )
         dialogue_preview.input(
@@ -6022,6 +6703,12 @@ def build_app(
             segment_rate_select,
             segment_manifest_state,
         ]
+        enqueue_single_button.click(
+            enqueue_single_event,
+            inputs=generation_inputs,
+            outputs=[job_queue_table, queue_job_select, job_queue_status],
+            queue=False,
+        )
 
         def bind_generation(button):
             event = button.click(
@@ -6041,9 +6728,41 @@ def build_app(
                 ],
                 queue=False,
             )
+            event.then(
+                refresh_candidate_workspace_event,
+                inputs=candidate_audio_files,
+                outputs=[
+                    candidate_ab_select,
+                    candidate_ab_audio,
+                    candidate_ab_rating,
+                    candidate_ab_note,
+                    candidate_ab_status,
+                ],
+                queue=False,
+            )
             return event
 
         generation_event = bind_generation(generate_button)
+        candidate_ab_select.change(
+            select_candidate_event,
+            inputs=candidate_ab_select,
+            outputs=[candidate_ab_audio, candidate_ab_rating, candidate_ab_note, candidate_ab_status],
+            queue=False,
+        )
+        save_candidate_review_button.click(
+            save_candidate_review_event,
+            inputs=[candidate_ab_select, candidate_ab_rating, candidate_ab_note],
+            outputs=candidate_ab_status,
+            queue=False,
+        )
+        favorite_candidate_button.click(
+            lambda candidate, rating, note: save_candidate_review_event(
+                candidate, rating, note, True
+            ),
+            inputs=[candidate_ab_select, candidate_ab_rating, candidate_ab_note],
+            outputs=candidate_ab_status,
+            queue=False,
+        )
         segment_rate_select.change(
             load_segment_artifacts_event,
             inputs=[segment_manifest_state, segment_rate_select],
@@ -6138,7 +6857,14 @@ def build_app(
             dialogue_task_status,
             dialogue_timeline_visual,
             dialogue_combined_download,
+            dialogue_dock_progress,
         ]
+        enqueue_dialogue_button.click(
+            enqueue_dialogue_event,
+            inputs=dialogue_common_inputs,
+            outputs=[job_queue_table, queue_job_select, job_queue_status],
+            queue=False,
+        )
         refresh_dialogue_tasks_button.click(
             lambda: gr.update(choices=task_choices(output_dir)),
             outputs=dialogue_task_select,
@@ -6227,6 +6953,34 @@ def build_app(
         stop_dialogue_button.click(
             fn=None,
             cancels=[dialogue_generation_event, resume_dialogue_event, retry_dialogue_event, rebuild_dialogue_event],
+            queue=False,
+        )
+        refresh_job_queue_button.click(
+            refresh_job_queue_event,
+            inputs=queue_job_select,
+            outputs=[job_queue_table, queue_job_select, job_queue_status],
+            queue=False,
+        )
+        retry_queue_job_button.click(
+            retry_queue_job_event,
+            inputs=queue_job_select,
+            outputs=[job_queue_table, queue_job_select, job_queue_status],
+            queue=False,
+        )
+        cancel_queue_job_button.click(
+            cancel_queue_job_event,
+            inputs=queue_job_select,
+            outputs=[job_queue_table, queue_job_select, job_queue_status],
+            queue=False,
+        )
+        run_job_queue = run_job_queue_button.click(
+            run_job_queue_event,
+            outputs=[job_queue_table, queue_job_select, job_queue_status, history],
+            concurrency_limit=1,
+        )
+        stop_job_queue_button.click(
+            fn=None,
+            cancels=[run_job_queue],
             queue=False,
         )
 

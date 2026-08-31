@@ -6,6 +6,7 @@ from dialogue_runtime import DialogueLine
 from timeline_tools import (
     apply_timeline_drag_payload,
     apply_timeline_edits,
+    move_timeline_row,
     render_timeline_html,
     rewrite_srt,
     timeline_rows,
@@ -34,6 +35,43 @@ def test_editable_timeline_rows_are_validated_and_applied():
     rows[1][4] = ""
     with pytest.raises(ValueError, match="同时填写"):
         apply_timeline_edits(_lines(), rows)
+
+
+def test_untimed_batch_rows_survive_repeated_gradio_round_trip():
+    original = [DialogueLine(1, "旁白", "重复生成", "ZH")]
+    rows = timeline_rows(original)
+    assert rows[0][3:5] == ["", ""]
+
+    # Older/current Gradio Dataframe versions may turn both empty numeric
+    # cells into zero after the first queued generation.
+    rows[0][3:5] = [0, 0]
+    edited = apply_timeline_edits(original, rows)
+    assert edited[0].start_ms is None
+    assert edited[0].end_ms is None
+
+
+def test_authored_zero_length_timeline_is_still_rejected():
+    rows = timeline_rows(_lines())
+    rows[0][3:5] = [0, 0]
+    with pytest.raises(ValueError, match="结束时间"):
+        apply_timeline_edits(_lines(), rows)
+
+
+def test_move_timeline_row_moves_content_but_preserves_srt_slots():
+    rows = timeline_rows(_lines())
+    moved, selected, changed = move_timeline_row(rows, 2, -1)
+
+    assert changed is True
+    assert selected == 1
+    assert [row[0] for row in moved] == [1, 2]
+    assert [row[6] for row in moved] == ["second line", "第一句"]
+    assert [row[1] for row in moved] == ["旁白", "小明"]
+    assert [(row[3], row[4]) for row in moved] == [(0, 1000), (1200, 2200)]
+
+    unchanged, selected, changed = move_timeline_row(moved, 1, -1)
+    assert changed is False
+    assert selected == 1
+    assert unchanged == moved
 
 
 def test_srt_rewrite_uses_actual_timing_and_only_passed_asr_text():

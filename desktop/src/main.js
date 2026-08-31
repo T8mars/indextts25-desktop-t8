@@ -10,7 +10,9 @@ const { createDiagnosticReport } = require("./diagnostic_report");
 const {
   compareVersions,
   createDownloadTask,
+  assembleFileParts,
   extractAndVerifyUpdate,
+  extractAndVerifyRuntimeUpdate,
   normalizeChannel,
   resolveDesktopUpdate,
   resolveModelBundleUpdate,
@@ -25,13 +27,14 @@ const {
 } = require("./runtime_profiles");
 
 const APP_TITLE = "T8star-Aix · IndexTTS 2.5";
-const COMFY_NODE_VERSION = "0.21.4";
+const COMFY_NODE_VERSION = "0.22.0";
 const MODEL_DOWNLOAD_PROGRESS_PREFIX = "@@T8_MODEL_PROGRESS@@";
 const MODEL_URLS = {
   huggingface: "https://huggingface.co/t8star/IndexTTS-2.5-Comfy",
   modelscope: "https://modelscope.cn/models/IndexTeam/IndexTTS-2.5"
 };
 let modelManifestCache = null;
+let runtimeManifestCache = null;
 
 let mainWindow = null;
 let pythonProcess = null;
@@ -113,6 +116,7 @@ async function checkForUpdates() {
   const sources = await Promise.allSettled([
     resolveDesktopUpdate({
       currentVersion: app.getVersion(),
+      currentRuntimeVersion: runtimeManifest().runtimeVersion,
       channel: state.updateChannel || "stable"
     }),
     fetchText("https://api.github.com/repos/index-tts/index-tts/commits/main"),
@@ -198,9 +202,13 @@ async function checkForUpdates() {
   report.summary = errors.length === 4
     ? "检查失败，请确认网络后重试。"
     : report.desktop.updateAvailable && report.desktop.manualOnly
-      ? `发现 Desktop ${report.desktop.latest}；当前版本需要打开 Release 页面手动更新。`
-      : report.desktop.updateAvailable
+      ? "发现桌面程序或运行库更新；当前版本需要打开 Release 页面手动更新。"
+      : report.desktop.desktopUpdateAvailable && report.desktop.runtimeUpdateAvailable
+        ? `发现 Desktop ${report.desktop.latest} 与运行库 ${report.desktop.latestRuntime}，可分层下载并安全安装。`
+      : report.desktop.desktopUpdateAvailable
         ? `发现 Desktop ${report.desktop.latest}，可在启动器内下载并安全安装。`
+      : report.desktop.runtimeUpdateAvailable
+        ? `发现运行库 ${report.desktop.latestRuntime}，可分卷续传并安全安装。`
     : updates
       ? `发现 ${updates} 项上游或节点更新；不会自动覆盖模型和运行库。`
       : "当前未发现新版本。";
@@ -222,6 +230,26 @@ function modelManifest() {
   );
   modelManifestCache = JSON.parse(fs.readFileSync(manifestPath, "utf8"));
   return modelManifestCache;
+}
+
+function runtimeManifest() {
+  if (runtimeManifestCache) return runtimeManifestCache;
+  const manifestPath = path.join(
+    app.isPackaged ? process.resourcesPath : projectRoot(),
+    "desktop_runtime_manifest.json"
+  );
+  try {
+    const parsed = JSON.parse(fs.readFileSync(manifestPath, "utf8"));
+    const version = String(parsed.runtimeVersion || "").replace(/^v/i, "");
+    if (parsed.schemaVersion !== 1 || !/^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/.test(version)) {
+      throw new Error("invalid schema or runtimeVersion");
+    }
+    runtimeManifestCache = { ...parsed, runtimeVersion: version };
+  } catch (error) {
+    appendLog(`Runtime manifest unavailable: ${error.message}`);
+    runtimeManifestCache = { schemaVersion: 1, runtimeVersion: "0.0.0", roots: [] };
+  }
+  return runtimeManifestCache;
 }
 
 const INSTALLED_MODEL_MANIFEST = ".t8star-model-bundle.json";
@@ -423,60 +451,182 @@ function updateDownloadState(patch) {
   updateState({ updateDownload: { ...(state.updateDownload || {}), ...patch } });
 }
 
+function requiredUpdateDiskBytes(appPackage, runtimePackage) {
+  const appFiles = (appPackage?.files || []).reduce((sum, entry) => sum + Number(entry.size || 0), 0);
+  const downloadBytes = Number(appPackage?.size || 0) + Number(runtimePackage?.archiveSize || 0);
+  const runtimeFiles = Number(runtimePackage?.unpackedSize || 0);
+  // Keep download parts, the assembled archive, verified payload and rollback
+  // backup at the same time. The 1 GiB reserve avoids filling the system disk.
+  return downloadBytes + Number(runtimePackage?.archiveSize || 0) +
+    (appFiles + runtimeFiles) * 2 + 1024 * 1024 * 1024;
+}
+
+function assertUpdateDiskSpace(directory, requiredBytes) {
+  if (typeof fs.statfsSync !== "function") return;
+  try {
+    const stats = fs.statfsSync(directory, { bigint: true });
+    const available = Number(stats.bavail * stats.bsize);
+    if (Number.isFinite(available) && available < requiredBytes) {
+      const needGiB = (requiredBytes / (1024 ** 3)).toFixed(1);
+      const freeGiB = (available / (1024 ** 3)).toFixed(1);
+      throw new Error(`更新至少需要约 ${needGiB} GiB 可用空间（当前 ${freeGiB} GiB），用于下载、校验与回滚备份。`);
+    }
+  } catch (error) {
+    if (/更新至少需要/.test(error.message)) throw error;
+    appendLog(`Update disk preflight unavailable: ${error.message}`);
+  }
+}
+
+function mergeVerifiedPayloadLayers(layers, destination) {
+  fs.rmSync(destination, { recursive: true, force: true });
+  fs.mkdirSync(destination, { recursive: true });
+  const files = [];
+  const seen = new Map();
+  for (const layer of layers) {
+    if (!layer) continue;
+    for (const entry of layer.files) {
+      const key = String(entry.path).toLowerCase();
+      const previous = seen.get(key);
+      if (previous) {
+        if (previous.path !== entry.path || previous.size !== entry.size || previous.sha256 !== entry.sha256) {
+          throw new Error(`程序层与运行库层包含冲突文件：${entry.path}`);
+        }
+        continue;
+      }
+      seen.set(key, entry);
+      const source = path.join(layer.payloadRoot, ...entry.path.split("/"));
+      const target = path.join(destination, ...entry.path.split("/"));
+      fs.mkdirSync(path.dirname(target), { recursive: true });
+      fs.copyFileSync(source, target, fs.constants.COPYFILE_EXCL);
+      files.push(entry);
+    }
+  }
+  return files.sort((left, right) => left.path.localeCompare(right.path, "en"));
+}
+
 async function downloadDesktopUpdate() {
   if (updateDownloadTask) return state;
   if (!state.updateReport?.desktop) await checkForUpdates();
   const desktopUpdate = state.updateReport?.desktop;
-  if (!desktopUpdate?.updateAvailable) throw new Error("当前没有可下载的桌面更新。");
-  if (desktopUpdate.manualOnly || !desktopUpdate.manifest?.portableApp) {
+  if (!desktopUpdate?.updateAvailable) throw new Error("当前没有可下载的桌面或运行库更新。");
+  if (desktopUpdate.manualOnly || !desktopUpdate.manifest) {
     if (desktopUpdate.releaseUrl) await shell.openExternal(desktopUpdate.releaseUrl);
     throw new Error("该版本需要从 Release 页面下载完整包后手动更新。");
   }
   const targetVersion = safeUpdateVersion(desktopUpdate.latest);
-  const packageInfo = desktopUpdate.manifest.portableApp;
-  const stagingDirectory = path.join(updatesDirectory(), `v${targetVersion}`);
-  const archivePath = path.join(stagingDirectory, packageInfo.assetName);
+  const appPackage = desktopUpdate.desktopUpdateAvailable
+    ? desktopUpdate.manifest.portableApp
+    : null;
+  const runtimePackage = desktopUpdate.runtimeUpdateAvailable
+    ? desktopUpdate.manifest.runtimePackage
+    : null;
+  if (!appPackage && !runtimePackage) throw new Error("更新清单没有当前设备需要的可安装分层包。");
+  const targetRuntimeVersion = runtimePackage?.version || runtimeManifest().runtimeVersion;
+  const stagingDirectory = path.join(
+    updatesDirectory(),
+    `desktop-v${targetVersion}-runtime-v${safeUpdateVersion(targetRuntimeVersion)}`
+  );
   fs.mkdirSync(stagingDirectory, { recursive: true });
+  assertUpdateDiskSpace(stagingDirectory, requiredUpdateDiskBytes(appPackage, runtimePackage));
+  const totalDownloadBytes = Number(appPackage?.size || 0) + Number(runtimePackage?.archiveSize || 0);
   let lastProgressAt = 0;
+  let completedDownloadBytes = 0;
   updateState({
     updateReady: false,
     updateDownload: {
       status: "downloading",
       version: targetVersion,
       received: 0,
-      total: packageInfo.size,
+      total: totalDownloadBytes,
       percent: 0,
-      message: `正在下载 Desktop ${targetVersion}…`
+      message: runtimePackage
+        ? `正在下载 Desktop ${targetVersion} / 运行库 ${targetRuntimeVersion}…`
+        : `正在下载 Desktop ${targetVersion}…`
     },
     message: `正在下载 Desktop ${targetVersion} 更新包…`
   });
-  updateDownloadTask = createDownloadTask({
-    url: packageInfo.url,
-    destination: archivePath,
-    expectedSize: packageInfo.size,
-    expectedSha256: packageInfo.sha256,
-    onProgress: ({ received, total }) => {
+  const downloadAsset = async (asset, destination, label) => {
+    updateDownloadTask = createDownloadTask({
+      url: asset.url,
+      destination,
+      expectedSize: asset.size,
+      expectedSha256: asset.sha256,
+      onProgress: ({ received, total }) => {
       const now = Date.now();
       if (now - lastProgressAt < 200 && received < total) return;
       lastProgressAt = now;
-      const percent = total ? Math.min(100, Math.round(received * 1000 / total) / 10) : 0;
-      updateDownloadState({ received, total, percent, message: `正在下载 Desktop ${targetVersion}：${percent}%` });
-    }
-  });
-  try {
+        const aggregateReceived = completedDownloadBytes + received;
+        const percent = totalDownloadBytes
+          ? Math.min(100, Math.round(aggregateReceived * 1000 / totalDownloadBytes) / 10)
+          : 0;
+        updateDownloadState({
+          received: aggregateReceived,
+          total: totalDownloadBytes,
+          percent,
+          message: `${label}：${percent}%`
+        });
+      }
+    });
     await updateDownloadTask.promise;
-    updateDownloadState({ status: "verifying", percent: 100, message: "下载完成，正在解压并逐文件校验…" });
-    const payloadRoot = await extractAndVerifyUpdate(
-      archivePath,
-      stagingDirectory,
-      packageInfo.files
-    );
+    completedDownloadBytes += Number(asset.size);
+  };
+  try {
+    let appLayer = null;
+    let runtimeLayer = null;
+    const archivePaths = [];
+    if (appPackage) {
+      const appArchivePath = path.join(stagingDirectory, appPackage.assetName);
+      await downloadAsset(appPackage, appArchivePath, `正在下载程序层 Desktop ${targetVersion}`);
+      archivePaths.push(appArchivePath);
+      updateDownloadState({ status: "verifying", message: "程序层下载完成，正在逐文件校验…" });
+      const appPayloadRoot = await extractAndVerifyUpdate(
+        appArchivePath,
+        path.join(stagingDirectory, "app-layer"),
+        appPackage.files
+      );
+      appLayer = { payloadRoot: appPayloadRoot, files: appPackage.files };
+    }
+    if (runtimePackage) {
+      const partPaths = [];
+      for (let index = 0; index < runtimePackage.parts.length; index += 1) {
+        const part = runtimePackage.parts[index];
+        const partPath = path.join(stagingDirectory, part.assetName);
+        await downloadAsset(
+          part,
+          partPath,
+          `正在下载运行库分卷 ${index + 1}/${runtimePackage.parts.length}`
+        );
+        partPaths.push(partPath);
+      }
+      updateDownloadState({ status: "verifying", percent: 100, message: "分卷下载完成，正在合并并校验运行库…" });
+      const runtimeArchivePath = path.join(stagingDirectory, runtimePackage.archiveName);
+      await assembleFileParts({
+        partPaths,
+        destination: runtimeArchivePath,
+        expectedSize: runtimePackage.archiveSize,
+        expectedSha256: runtimePackage.archiveSha256,
+        onProgress: ({ written, total }) => updateDownloadState({
+          message: `正在合并运行库分卷：${Math.round(written * 100 / Math.max(1, total))}%`
+        })
+      });
+      archivePaths.push(runtimeArchivePath);
+      runtimeLayer = await extractAndVerifyRuntimeUpdate(
+        runtimeArchivePath,
+        path.join(stagingDirectory, "runtime-layer"),
+        runtimePackage
+      );
+    }
+    updateDownloadState({ status: "verifying", percent: 100, message: "正在合并分层载荷并进行最终校验…" });
+    const payloadRoot = path.join(stagingDirectory, "prepared-payload");
+    const files = mergeVerifiedPayloadLayers([appLayer, runtimeLayer], payloadRoot);
+    await verifyPayloadFiles(payloadRoot, files);
     preparedDesktopUpdate = {
       targetVersion,
+      targetRuntimeVersion,
       stagingDirectory,
-      archivePath,
+      archivePaths,
       payloadRoot,
-      files: packageInfo.files,
+      files,
       releaseUrl: desktopUpdate.releaseUrl
     };
     fs.writeFileSync(
@@ -489,12 +639,14 @@ async function downloadDesktopUpdate() {
       updateDownload: {
         status: "ready",
         version: targetVersion,
-        received: packageInfo.size,
-        total: packageInfo.size,
+        received: totalDownloadBytes,
+        total: totalDownloadBytes,
         percent: 100,
         message: "更新已校验，可以退出并安装。"
       },
-      message: `Desktop ${targetVersion} 已下载并通过校验。`
+      message: runtimePackage
+        ? `Desktop ${targetVersion} / 运行库 ${targetRuntimeVersion} 已下载并通过校验。`
+        : `Desktop ${targetVersion} 已下载并通过校验。`
     });
   } catch (error) {
     updateState({
@@ -535,8 +687,9 @@ async function installDesktopUpdate() {
     defaultId: 0,
     cancelId: 1,
     title: `安装 Desktop ${preparedDesktopUpdate.targetVersion}`,
-    message: "程序将退出、替换已声明的程序文件并重新启动。",
-    detail: "模型、音色库、预设、生成记录和用户设置不会被覆盖；若新版本未通过启动检查会自动回滚。"
+    message: "程序将退出、替换已声明的程序/运行库文件并重新启动。",
+    detail: `目标运行库 ${preparedDesktopUpdate.targetRuntimeVersion || runtimeManifest().runtimeVersion}。` +
+      "模型、音色库、预设、生成记录和用户设置不会被覆盖；若新版本未通过启动检查会自动回滚。"
   });
   if (confirmation.response !== 0) return state;
 
@@ -552,6 +705,7 @@ async function installDesktopUpdate() {
     parentPid: process.pid,
     currentVersion: app.getVersion(),
     targetVersion: preparedDesktopUpdate.targetVersion,
+    targetRuntimeVersion: preparedDesktopUpdate.targetRuntimeVersion,
     installRoot: updateInstallRoot(),
     updatesRoot: updatesDirectory(),
     payloadRoot: preparedDesktopUpdate.payloadRoot,

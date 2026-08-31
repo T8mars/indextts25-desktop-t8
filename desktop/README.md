@@ -12,6 +12,7 @@ Windows Electron desktop integration for IndexTTS 2.5. The packaged application 
 - complete 2.5 sampling, segmentation and text-normalization controls
 - reproducible seed plus CFM diffusion-step, CFG-strength, and noise-temperature controls
 - language-aware automatic segmentation with token/pause preview
+- generation preflight with inspectable normalized text, estimated duration, token pressure, risk flags, and explicit apply-to-source
 - long English/Spanish output guards that retry a smaller segment when mel-token exhaustion or an implausible duration is detected
 - punctuation presets and explicit `<pause=0.5>` / `<pause=500ms>` silence
 - one-pass native target duration plus legacy natural, pad-only, and sample-exact modes
@@ -23,11 +24,16 @@ Windows Electron desktop integration for IndexTTS 2.5. The packaged application 
 - per-line emotion overrides for the same role (text description, eight-dimensional vector, speaker-following, or role-default inheritance)
 - context-aware per-line emotion suggestions that fill the editable timeline without starting synthesis
 - crash-safe dialogue task manifests, restart/resume, and selected-line regeneration
+- one persistent FIFO queue shared by single-voice, multi-role, and SRT work, with restart recovery, cancellation, and retry
 - complete `.indextts-project.zip` export/import containing task state, per-line audio, combined audio, subtitles/reports, and referenced voice bundles
 - local Whisper ASR proofreading with OpenAI/faster-whisper backends, CER/WER, normalized diffs, and word timestamps
 - rewritten SRT export using original timing or the generated audio's actual timeline
 - editable millisecond timeline table plus draggable/resizable tracks, ASR word-boundary snapping, and no-inference re-mixing
+- selected-line up/down reordering that moves role/language/text/emotion together while keeping authored SRT time slots chronological
 - reference-condition cache statistics and safe clearing for this application's own `safetensors` entries
+- automatic reference-audio quality summary plus opt-in detailed analysis/cropping
+- persisted model-memory policy with manual release, idle release, generation-count recycling, and lazy reload
+- collapsed A/B candidate auditioning with 1–5 star reviews, notes, and durable favorites
 - conservative cross-segment speech-rate anomaly detection with selective retry of only a collapsed segment
 - visual internal-segment rate audit with original/retry/current audio previews and one-click segment-only regeneration
 - deterministic five-language real-model quality regression with optional CER/WER and baseline comparison
@@ -36,7 +42,7 @@ Windows Electron desktop integration for IndexTTS 2.5. The packaged application 
 - explicit auto/BF16/FP16/FP32 selection before model loading, plus native-BF16 fallback detection
 - optional CPU placement for Wav2Vec/CAMPPlus reference encoders and fast default-emotion condition reuse
 - no-model acceleration preflight with per-mode availability/reason, exact bundled dependency versions, refresh, and JSON diagnostic export
-- signed GitHub Release app-layer updates with resumable download, exact-file verification, explicit install confirmation, and automatic rollback
+- signed layered GitHub Release updates for the app and split runtime, with resumable download, per-part/archive/file verification, explicit install confirmation, and automatic rollback
 - live model scan/download/verification progress with current file, speed, ETA, conservative disk-space preflight, resumable repair, and precise failure details
 - local-only experimental audio.cpp node that accepts user-supplied CLI/GGUF absolute paths and never installs components
 - independently configurable output and user-data directories, with saved paths and direct open-folder actions
@@ -45,7 +51,7 @@ Windows Electron desktop integration for IndexTTS 2.5. The packaged application 
 - direct WebUI actions for returning to setup, opening outputs, opening user data, and opening the exact log directory
 
 The large model files are intentionally external. On first launch, select a complete IndexTTS 2.5 model directory.
-Version 0.22.3 is aligned to code revision `ee40fa7d`, ComfyUI Node 0.21.4, and model bundle `1.0.0` at revision `14166a74`. It fixes the Gradio streaming-audio frontend mount that could leave the workspace stuck on `Loading`, adds a real Chinese number/year normalization probe, keeps generation controls fixed at the viewport bottom, and collapses advanced single-voice and dialogue workspaces by default. Output and user-data locations can now be moved independently from the launcher, and returning from the WebUI stops the model cleanly. Streaming synthesis catches optional acceleration failures, reloads the normal model, and completes the task instead of surfacing raw PyTorch/Triton errors. The launcher recommends the balanced profile on high-VRAM GPUs; experimental GPT acceleration remains an explicit manual choice. Known NVIDIA `waves_per_eu` mismatches receive an actionable diagnostic and safe fallback. OpenAI Whisper is pinned to `20250625`: ZH/EN/JA/ES use `base`, while AR uses the materially more accurate `small` baseline. Weekly GPU QA serializes formal 8 GB and 24 GB profiles and publishes CER/WER, RTF, and peak-VRAM trend artifacts. Signed app and model updates remain explicit user actions verified with Ed25519. No benchmark, model load, model download, update download, install, or acceleration mode starts automatically.
+Version 0.23.0 is paired with ComfyUI Node 0.22.0 and model bundle `1.0.0` at revision `14166a74`. It adds a restart-safe FIFO queue, long-text preflight, reference-audio quality guidance, persisted model-memory policies, collapsed A/B candidate review, and selected-line up/down reordering. Fixed-bottom controls now expose live progress, and repeat dialogue generation preserves untimed rows instead of turning them into authored `0/0` slots. Desktop updates are split into signed app/runtime layers with resume, full verification, health checks, and rollback; models remain independent on Hugging Face. Advanced and engineering workspaces stay collapsed by default. Optional acceleration failures still reload the normal model and complete the task. No benchmark, model load, model download, update download, install, or acceleration mode starts automatically.
 The launcher validates official model file sizes, while the downloader performs full SHA-256 verification.
 The output directory and user-data directory can be moved independently from the launcher. Voice-library entries,
 presets, dialogue tasks, ASR caches, benchmarks, and logs follow the configured user-data directory; generated WAVs
@@ -118,7 +124,9 @@ is not silently cut off. One-pass native length regulation, natural overrun, leg
 available as explicit choices with truncation warnings.
 
 The generation page defaults to language-aware segmentation: EN/ES 60, AR 80, JA 100, and ZH 120 tokens.
-The preview table shows speech-block IDs, planned token counts, and external silence before synthesis. Punctuation pause
+The preflight panel shows the actual normalized/pronunciation-resolved text, speech-block IDs, planned token counts,
+estimated duration, risk flags, and external silence before synthesis. Its text remains editable and only replaces the
+main input after an explicit apply action. Punctuation pause
 presets perform real chunked inference and silence insertion; explicit pause tags work even when the preset is off.
 Target duration can use the native length regulator in one pass. The generation page streams completed model chunks to
 an autoplay preview while separately saving the final WAV; legacy two-pass duration modes wait for the final result to
@@ -130,7 +138,13 @@ timeline and ZIP archive. The preview table is editable and synchronized with th
 drag either handle to resize it, and release near another line boundary or an ASR word timestamp to snap. Hold Alt while
 dragging to bypass snapping. A drag immediately updates the table and selects that line, so text, role, language, timing,
 or emotion can be changed and only that line regenerated and merged. The edited timeline can also be re-mixed without
-running IndexTTS again.
+running IndexTTS again. Selecting a table row also enables one-click up/down ordering; content and emotion move as a
+unit while source SRT time slots stay in chronological positions.
+
+The `任务队列` tab persists single-voice, dialogue, and SRT parameter snapshots in `task_queue.json`. A process restart
+recovers interrupted work to `pending` without auto-starting inference. Failed/cancelled work can be retried. Optional
+generation candidates are kept in a collapsed A/B workspace for audition, star rating, notes, and copying favorites to
+`candidate_favorites/`.
 
 ### Context-aware per-line emotion suggestions
 
@@ -175,8 +189,8 @@ for long-text or multi-pause-block requests that could hit the upstream syntheti
 
 ## Chinese polyphone quick start
 
-The pronunciation section is expanded by default and includes an in-app Chinese guide plus a
-one-click example. The shortest workflow is to write an inline annotation directly in the target text:
+The pronunciation section is collapsed by default and includes an in-app Chinese guide plus a
+one-click example when opened. The shortest workflow is to write an inline annotation directly in the target text:
 
 ```text
 小明<要求|YAO4 QIU2>这个题的答案是多少。今天的<行程|XING2 CHENG2>顺利。
@@ -254,6 +268,7 @@ or through the `T8STAR_INDEXTTS_MODEL_DIR` environment variable.
 cd desktop
 npm run package
 npm run verify:runtime
+npm run build:runtime
 npm run build:update
 ```
 
@@ -271,7 +286,7 @@ npm run make
 ```
 
 This builds only `@electron-forge/maker-zip`. The unpacked application is still
-available under `desktop/out/T8star-Aix-IndexTTS-2.5-v0.22.3-win32-x64` for local testing.
+available under `desktop/out/T8star-Aix-IndexTTS-2.5-v0.23.0-win32-x64` for local testing.
 The bundled runtime contains tens of thousands of small files, so Squirrel/NuGet
 can spend a long time repeatedly rewriting a multi-gigabyte package. It is not the
 recommended user distribution. If an installer is specifically required, build it
@@ -284,10 +299,14 @@ npm run make:installer
 Neither distribution includes `checkpoints`; users select or download the complete
 IndexTTS 2.5 model directory from the launcher.
 
-`npm run build:update` reads the verified packaged resources, builds an app-layer ZIP, writes its exact manifest, and
+`npm run build:runtime` creates a separately versioned Python/Torch/CUDA layer and splits it into GitHub-safe assets
+below 2 GiB. Use `npm run release:runtime` only after the packaged runtime passes real startup verification; it is the
+explicit, GitHub-writing form. `npm run build:update` reads the verified packaged resources, builds an app-layer ZIP,
+writes its exact manifest, optionally pins the published runtime-layer descriptor, and
 signs it with `T8_UPDATE_PRIVATE_KEY_BASE64`, `T8_UPDATE_PRIVATE_KEY_FILE`, or the private key passed with
 `--private-key`. The private key must never be committed. `.github/workflows/desktop-release.yml` can alternatively
 build the same source-only patch on `windows-latest`; configure the repository secret
 `T8_UPDATE_PRIVATE_KEY_BASE64` before creating a `v<package version>` tag. The full multi-gigabyte portable archive is
 kept on the external distribution mirror because it exceeds GitHub Releases' per-file limit; its URL and SHA-256 can be
-placed in `desktop_release_config.json` when available.
+placed in `desktop_release_config.json` when available. Models remain separate on Hugging Face. See
+[`docs/DESKTOP_LAYERED_UPDATE.md`](../docs/DESKTOP_LAYERED_UPDATE.md) for the release, verification, resume, and rollback flow.

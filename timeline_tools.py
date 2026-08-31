@@ -28,8 +28,8 @@ def timeline_rows(lines: Sequence[DialogueLine]) -> list[list[Any]]:
             line.index,
             line.role,
             line.language,
-            line.start_ms,
-            line.end_ms,
+            "" if line.start_ms is None else line.start_ms,
+            "" if line.end_ms is None else line.end_ms,
             line.duration_factor,
             line.text,
             format_emotion_override(line),
@@ -46,6 +46,59 @@ def _table_data(rows) -> list:
     if hasattr(rows, "values") and hasattr(rows.values, "tolist"):
         return rows.values.tolist()
     return list(rows)
+
+
+def move_timeline_row(
+    rows,
+    selected_index: int | float | str,
+    direction: int,
+) -> tuple[list[list[Any]], int, bool]:
+    """Move one dialogue row while keeping authored timeline slots in place."""
+
+    data = _table_data(rows)
+    if not data:
+        raise ValueError("请先解析台词，再选择需要调整的行。")
+    if direction not in {-1, 1}:
+        raise ValueError("台词只能上移或下移一行。")
+    try:
+        wanted = int(float(selected_index))
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise ValueError("请先选择需要调整顺序的台词行。") from exc
+
+    normalized: list[list[Any]] = []
+    current_position: int | None = None
+    for position, row in enumerate(data):
+        if isinstance(row, dict):
+            values = [row.get(name) for name in TIMELINE_HEADERS]
+        else:
+            values = list(row)
+        if len(values) < len(TIMELINE_HEADERS):
+            values.extend([""] * (len(TIMELINE_HEADERS) - len(values)))
+        try:
+            row_index = int(float(values[0]))
+        except (TypeError, ValueError, OverflowError) as exc:
+            raise ValueError(f"时间轴第 {position + 1} 行序号无效。") from exc
+        if row_index == wanted:
+            current_position = position
+        normalized.append(values[: len(TIMELINE_HEADERS)])
+    if current_position is None:
+        raise ValueError(f"时间轴中找不到第 {wanted} 条台词，请重新选择。")
+
+    target_position = current_position + direction
+    if target_position < 0 or target_position >= len(normalized):
+        return normalized, wanted, False
+
+    # Subtitle times belong to display positions. Capture them before moving
+    # the content so an SRT keeps its chronological cue order.
+    time_slots = [(row[3], row[4]) for row in normalized]
+    normalized[current_position], normalized[target_position] = (
+        normalized[target_position],
+        normalized[current_position],
+    )
+    for position, row in enumerate(normalized, 1):
+        row[0] = position
+        row[3], row[4] = time_slots[position - 1]
+    return normalized, target_position + 1, True
 
 
 def _optional_ms(value, label: str) -> int | None:
@@ -96,8 +149,22 @@ def apply_timeline_edits(
             raise ValueError(f"时间轴第 {position} 行角色和台词不能为空。")
         if language not in {"ZH", "EN", "JA", "ES", "AR"}:
             raise ValueError(f"时间轴第 {position} 行语言无效：{language}")
+        original = next(line for line in original_lines if line.index == index)
         start_ms = _optional_ms(values[3], f"时间轴第 {position} 行开始时间")
         end_ms = _optional_ms(values[4], f"时间轴第 {position} 行结束时间")
+        # Gradio's numeric Dataframe has historically round-tripped an empty
+        # pair as 0/0 after a queued function completes.  A batch line without
+        # authored timing must stay untimed; otherwise the next click is
+        # rejected as a zero-length slot and the UI appears to erase every
+        # timestamp.  Real SRT timing is never 0/0, so this recovery is narrow.
+        if (
+            original.start_ms is None
+            and original.end_ms is None
+            and start_ms == 0
+            and end_ms == 0
+        ):
+            start_ms = None
+            end_ms = None
         if (start_ms is None) != (end_ms is None):
             raise ValueError(f"时间轴第 {position} 行开始和结束时间必须同时填写或同时留空。")
         if start_ms is not None and end_ms <= start_ms:
@@ -108,7 +175,6 @@ def apply_timeline_edits(
             raise ValueError(f"时间轴第 {position} 行时长系数无效。") from exc
         if not 0.5 <= duration_factor <= 2.0:
             raise ValueError(f"时间轴第 {position} 行时长系数必须在 0.5–2.0。")
-        original = next(line for line in original_lines if line.index == index)
         if len(values) >= 8:
             emotion = parse_emotion_override(values[7], index=index)
         else:
@@ -353,6 +419,7 @@ __all__ = [
     "apply_timeline_edits",
     "apply_timeline_drag_payload",
     "format_srt_timestamp",
+    "move_timeline_row",
     "render_timeline_html",
     "rewrite_srt",
     "timeline_json",

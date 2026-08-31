@@ -306,6 +306,7 @@ def test_desktop_builds_complete_pronunciation_workspace(tmp_path, monkeypatch):
         "参考音频检测与裁剪 · 默认使用安全设置",
         "情感与声音表现 · 默认跟随音色",
         "高级生成参数 · 默认设置可直接使用",
+        "声音 A/B 候选试听、评分与收藏 · 生成后按需展开",
         "跨段语速审计与内部单段重做 · 生成后按需展开",
         "格式说明与真实示例 · 新手需要时展开",
         "时间与 SRT 适配 · 普通批量默认顺延、间隔 200ms",
@@ -314,22 +315,27 @@ def test_desktop_builds_complete_pronunciation_workspace(tmp_path, monkeypatch):
         "可拖拽时间轴 · 解析后按需展开",
         "字幕、逐句文件与生成报告 · 生成后展开",
         "任务恢复、单句重试与工程管理 · 按需展开",
+        "模型与显存生命周期 · 默认空闲 10 分钟自动释放",
+        "一键安装 / 更新可选组件 · 按需展开",
+        "队列使用说明 · 按需展开",
     ]:
         assert accordion_states[collapsed_label] is False
     cancellation_dependencies = [
         item for item in config["dependencies"] if item.get("cancels")
     ]
-    assert len(cancellation_dependencies) == 2
+    assert len(cancellation_dependencies) == 3
     single_stop_id = button_ids["停止语音任务"]
     dialogue_stop_id = button_ids["停止多角色任务"]
+    queue_stop_id = button_ids["停止队列执行"]
     stop_dependencies = {
         target_id: dependency
         for dependency in cancellation_dependencies
         for target_id, _event_name in dependency.get("targets", [])
-        if target_id in {single_stop_id, dialogue_stop_id}
+        if target_id in {single_stop_id, dialogue_stop_id, queue_stop_id}
     }
     assert len(stop_dependencies[single_stop_id]["cancels"]) == 1
     assert len(stop_dependencies[dialogue_stop_id]["cancels"]) == 4
+    assert len(stop_dependencies[queue_stop_id]["cancels"]) == 1
     assert (
         pronunciation_dictionary_path(data_dir)
         == data_dir / "pronunciation_dictionary.yaml"
@@ -364,7 +370,7 @@ def test_desktop_builds_complete_pronunciation_workspace(tmp_path, monkeypatch):
         if getattr(block.fn, "__name__", "") == "generate"
     )
     inputs = [getattr(component, "value", None) for component in generate_block.inputs]
-    inputs[0] = "fake-prompt.wav"
+    inputs[0] = str(_write_test_wav(tmp_path / "queue-prompt.wav"))
     inputs[1] = "流式生成回归测试"
     inputs[4] = 0
     inputs[9] = []
@@ -766,7 +772,7 @@ def test_desktop_dialogue_routes_saved_emotions_per_role(tmp_path):
     inputs[2] = "角色A"
     inputs[3] = "ZH"
     inputs[4] = []
-    result = generate_dialogue.fn(*inputs)
+    result = list(generate_dialogue.fn(*inputs))[-1]
 
     assert len(tts.calls) == 3
     first, second, third = tts.calls
@@ -845,6 +851,138 @@ def test_saved_dialogue_can_be_retimed_and_rewritten_without_tts(tmp_path):
     assert "未重新执行 TTS" in result[6]
     assert "总时长 1.20s" in result[7]
 
+    with pytest.raises(Exception, match="旧音频已不匹配"):
+        rebuild(
+            task_id,
+            [[1, "旁白", "ZH", 200, 1200, 1.0, "已经换成另一句。"]],
+            "overlay",
+            0,
+            "actual",
+            "original",
+            True,
+        )
+
+
+def test_memory_policy_recovers_from_bad_values_and_persists_updates(tmp_path):
+    output_dir = tmp_path / "outputs"
+    data_dir = tmp_path / "user-data"
+    output_dir.mkdir()
+    data_dir.mkdir()
+    (data_dir / "memory_policy.json").write_text(
+        json.dumps({"idle_seconds": "not-a-number", "recycle_after_generations": None}),
+        encoding="utf-8",
+    )
+    demo = build_app(_FakeTTS(), output_dir, data_dir, verbose=False)
+    update_policy = next(
+        block.fn
+        for block in demo.fns.values()
+        if getattr(block.fn, "__name__", "") == "update_memory_policy_event"
+    )
+    report = json.loads(update_policy(True, 120, 3))
+
+    assert report["policy"] == {
+        "release_after_generation": True,
+        "idle_seconds": 120.0,
+        "recycle_after_generations": 3,
+    }
+    saved = json.loads((data_dir / "memory_policy.json").read_text(encoding="utf-8"))
+    assert saved == report["policy"]
+
+
+def test_persistent_queue_replays_single_generation_after_enqueue(tmp_path):
+    output_dir = tmp_path / "outputs"
+    data_dir = tmp_path / "user-data"
+    output_dir.mkdir()
+    data_dir.mkdir()
+    demo = build_app(_FakeTTS(), output_dir, data_dir, verbose=False)
+    generate_block = next(
+        block
+        for block in demo.fns.values()
+        if getattr(block.fn, "__name__", "") == "generate"
+    )
+    enqueue = next(
+        block.fn
+        for block in demo.fns.values()
+        if getattr(block.fn, "__name__", "") == "enqueue_single_event"
+    )
+    run_queue = next(
+        block.fn
+        for block in demo.fns.values()
+        if getattr(block.fn, "__name__", "") == "run_job_queue_event"
+    )
+    inputs = [getattr(component, "value", None) for component in generate_block.inputs]
+    by_label = {
+        getattr(component, "label", None): index
+        for index, component in enumerate(generate_block.inputs)
+    }
+    inputs[0] = str(_write_test_wav(tmp_path / "queue-prompt.wav"))
+    inputs[1] = "持久队列真实回放。"
+    inputs[4] = 0
+    inputs[9] = []
+    inputs[by_label["边生成边试听"]] = False
+    queued_rows, _selector, status = enqueue(*inputs)
+    assert queued_rows[0][2] == "pending"
+    assert "已加入单句任务" in status
+
+    queue_outputs = list(run_queue())
+    final_rows = queue_outputs[-1][0]
+    assert final_rows[0][2] == "completed"
+    assert Path(final_rows[0][4]).is_file()
+    saved_queue = json.loads((data_dir / "task_queue.json").read_text(encoding="utf-8"))
+    assert saved_queue["jobs"][0]["status"] == "completed"
+    queued_prompt = Path(saved_queue["jobs"][0]["payload"]["inputs"][0])
+    assert data_dir / "queue_assets" in queued_prompt.parents
+    assert queued_prompt.is_file()
+
+
+def test_preflight_and_candidate_ab_events_are_wired_to_collapsed_workspaces(tmp_path):
+    output_dir = tmp_path / "outputs"
+    data_dir = tmp_path / "user-data"
+    output_dir.mkdir()
+    data_dir.mkdir()
+    demo = build_app(_FakeTTS(), output_dir, data_dir, verbose=False)
+
+    preview = next(
+        block.fn
+        for block in demo.fns.values()
+        if getattr(block.fn, "__name__", "") == "preview_segments_event"
+    )
+    rows, normalized, status = preview(
+        "1939年，长文本预检。",
+        "ZH",
+        [],
+        True,
+        "auto",
+        120,
+        "natural",
+        100,
+        300,
+        600,
+    )
+    assert normalized
+    assert len(rows[0]) == 8
+    assert rows[0][3] > 0
+    assert "预计总时长" in status
+
+    candidate_a = data_dir / "quality_candidates" / "test" / "a.wav"
+    candidate_b = data_dir / "quality_candidates" / "test" / "b.wav"
+    candidate_a.parent.mkdir(parents=True)
+    candidate_a.write_bytes(b"RIFF-a")
+    candidate_b.write_bytes(b"RIFF-b")
+    refresh_candidates = next(
+        block.fn
+        for block in demo.fns.values()
+        if getattr(block.fn, "__name__", "") == "refresh_candidate_workspace_event"
+    )
+    selector, selected_audio, rating, note, candidate_status = refresh_candidates(
+        [str(candidate_a), str(candidate_b)]
+    )
+    assert len(selector["choices"]) == 2
+    assert selected_audio == str(candidate_a)
+    assert rating == 3
+    assert note == ""
+    assert "2 个候选" in candidate_status
+
 
 def test_edited_timeline_row_can_be_regenerated_alone_and_merged(tmp_path):
     output_dir = tmp_path / "outputs"
@@ -874,7 +1012,7 @@ def test_edited_timeline_row_can_be_regenerated_alone_and_merged(tmp_path):
     inputs[2] = "贞贞"
     inputs[3] = "ZH"
     inputs[4] = rows
-    generate_block.fn(*inputs)
+    list(generate_block.fn(*inputs))
     assert len(tts.calls) == 2
 
     task_id = next(output_dir.glob("dialogue_*/task.json")).parent.name
@@ -884,12 +1022,13 @@ def test_edited_timeline_row_can_be_regenerated_alone_and_merged(tmp_path):
     retry_inputs[4] = edited_rows
     retry_inputs[-2] = task_id
     retry_inputs[-1] = 2
-    retry_result = generate_block.fn(*retry_inputs)
+    retry_result = list(generate_block.fn(*retry_inputs))[-1]
 
     assert len(tts.calls) == 3
     assert tts.calls[-1]["text"] == "我是你们的贞贞啊啊。"
     assert Path(retry_result[0]).is_file()
-    assert retry_result[-1] == retry_result[0]
+    assert retry_result[-2] == retry_result[0]
+    assert "100%" in retry_result[-1]
     report = json.loads(retry_result[3])
     assert report["lines"][0]["restored_from_task"] is True
     assert report["lines"][1]["text"] == "我是你们的贞贞啊啊。"
@@ -914,6 +1053,26 @@ def test_edited_timeline_row_can_be_regenerated_alone_and_merged(tmp_path):
     )
     assert selected_number == 2
     assert "第 2 条" in selected_status
+    move_up = next(
+        block.fn
+        for block in demo.fns.values()
+        if getattr(block.fn, "__name__", "") == "move_dialogue_line_up_event"
+    )
+    moved_rows, moved_visual, moved_status, moved_number = move_up(
+        "batch",
+        script,
+        "贞贞",
+        "ZH",
+        edited_rows,
+        2,
+        retry_result[3],
+    )
+    assert moved_number == 1
+    assert moved_rows[0][6] == "我是你们的贞贞啊啊。"
+    assert moved_rows[1][6] == "第一句。"
+    assert [row[0] for row in moved_rows] == [1, 2]
+    assert "原有 SRT 时间槽保持原位" in moved_status
+    assert "我是你们的贞贞啊啊" in moved_visual
     refresh_bindings = [
         block
         for block in demo.fns.values()

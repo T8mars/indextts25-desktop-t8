@@ -3,11 +3,14 @@ const fs = require("node:fs");
 const http = require("node:http");
 const https = require("node:https");
 const path = require("node:path");
+const { pipeline } = require("node:stream/promises");
 const yauzl = require("yauzl");
 
 const DESKTOP_REPOSITORY = "T8mars/indextts25-desktop-t8";
 const RELEASE_API = `https://api.github.com/repos/${DESKTOP_REPOSITORY}/releases`;
 const MAX_GITHUB_ASSET_BYTES = 2 * 1024 * 1024 * 1024;
+const MAX_RUNTIME_ARCHIVE_BYTES = 16 * 1024 * 1024 * 1024;
+const MAX_RUNTIME_FILE_MANIFEST_BYTES = 32 * 1024 * 1024;
 const USER_AGENT = "T8star-Aix-IndexTTS25-Desktop-Updater";
 const UPDATE_MANIFEST_ASSET = "desktop-update-manifest.json";
 const UPDATE_SIGNATURE_ASSET = "desktop-update-manifest.sig";
@@ -86,6 +89,93 @@ function releaseAssets(release) {
   return new Map(
     (Array.isArray(release?.assets) ? release.assets : []).map((asset) => [asset.name, asset])
   );
+}
+
+function validateRuntimePackage(source, assets) {
+  if (!source) return null;
+  if (typeof source !== "object" || Array.isArray(source)) {
+    throw new Error("运行时更新包格式无效。");
+  }
+  const version = normalizeVersion(source.version);
+  if (!isSemver(version)) throw new Error("运行时更新包版本号无效。");
+  const archiveName = String(source.archiveName || "").trim();
+  if (!/^desktop-runtime-v[0-9A-Za-z.-]+-win32-x64\.zip$/.test(archiveName)) {
+    throw new Error("运行时更新归档名称无效。");
+  }
+  const archiveSize = Number(source.archiveSize);
+  if (!Number.isSafeInteger(archiveSize) || archiveSize <= 0 || archiveSize > MAX_RUNTIME_ARCHIVE_BYTES) {
+    throw new Error("运行时更新归档大小无效。");
+  }
+  const unpackedSize = Number(source.unpackedSize);
+  if (!Number.isSafeInteger(unpackedSize) || unpackedSize <= 0 || unpackedSize > 64 * 1024 * 1024 * 1024) {
+    throw new Error("运行时更新解压后大小无效。");
+  }
+  const roots = Array.isArray(source.roots)
+    ? source.roots.map((entry) => safeRelativePath(entry))
+    : [];
+  if (!roots.length || roots.some((entry) => !entry.startsWith("resources/"))) {
+    throw new Error("运行时更新必须声明 resources 下的安装目录。");
+  }
+  const rootKeys = new Set(roots.map((entry) => entry.toLowerCase()));
+  if (rootKeys.size !== roots.length || roots.some((entry, index) => (
+    roots.some((other, otherIndex) => index !== otherIndex && entry.toLowerCase().startsWith(`${other.toLowerCase()}/`))
+  ))) {
+    throw new Error("运行时更新目录重复或互相嵌套。");
+  }
+  const fileManifest = source.fileManifest || {};
+  const manifestPath = safeRelativePath(fileManifest.path || "runtime-files.json");
+  if (manifestPath !== "runtime-files.json") throw new Error("运行时逐文件清单路径无效。");
+  const manifestSize = Number(fileManifest.size);
+  if (!Number.isSafeInteger(manifestSize) || manifestSize <= 0 || manifestSize > MAX_RUNTIME_FILE_MANIFEST_BYTES) {
+    throw new Error("运行时逐文件清单大小无效。");
+  }
+  const rawParts = Array.isArray(source.parts) ? source.parts : [];
+  if (!rawParts.length || rawParts.length > 32) throw new Error("运行时更新分卷数量无效。");
+  const seenParts = new Set();
+  let partBytes = 0;
+  const parts = rawParts.map((part, index) => {
+    const assetName = String(part?.assetName || "").trim();
+    if (!assetName || seenParts.has(assetName.toLowerCase())) {
+      throw new Error(`运行时更新分卷 ${index + 1} 名称为空或重复。`);
+    }
+    seenParts.add(assetName.toLowerCase());
+    const releaseAsset = assets.get(assetName);
+    const size = Number(part.size);
+    if (!Number.isSafeInteger(size) || size <= 0 || size >= MAX_GITHUB_ASSET_BYTES) {
+      throw new Error(`运行时更新分卷大小无效或超过 GitHub 2 GiB 限制：${assetName}`);
+    }
+    if (releaseAsset && Number(releaseAsset.size) !== size) {
+      throw new Error(`运行时更新分卷大小与 GitHub Release 不一致：${assetName}`);
+    }
+    const url = String(releaseAsset?.browser_download_url || part?.url || "");
+    const expectedPrefix = `https://github.com/${DESKTOP_REPOSITORY}/releases/download/`;
+    if (!url.startsWith(expectedPrefix) || !url.endsWith(`/${encodeURIComponent(assetName)}`)) {
+      throw new Error(`运行时更新分卷必须来自本项目 GitHub Release：${assetName}`);
+    }
+    partBytes += size;
+    return {
+      assetName,
+      url,
+      size,
+      sha256: assertSha256(part.sha256, `运行时更新分卷 ${assetName}`)
+    };
+  });
+  if (partBytes !== archiveSize) throw new Error("运行时更新分卷总大小与归档大小不一致。");
+  return {
+    version,
+    archiveName,
+    archiveSize,
+    unpackedSize,
+    archiveSha256: assertSha256(source.archiveSha256, "运行时更新归档"),
+    roots,
+    fileManifest: {
+      path: manifestPath,
+      size: manifestSize,
+      sha256: assertSha256(fileManifest.sha256, "运行时逐文件清单")
+    },
+    parts,
+    restartRequired: source.restartRequired !== false
+  };
 }
 
 function canonicalJson(value) {
@@ -260,6 +350,10 @@ function validateUpdateManifest(rawManifest, release) {
   const fullPortableUrls = Array.isArray(rawManifest.packages?.fullPortable?.urls)
     ? rawManifest.packages.fullPortable.urls.filter((url) => /^https:\/\//i.test(String(url)))
     : [];
+  const runtimePackage = validateRuntimePackage(rawManifest.packages?.runtime, assets);
+  if (runtimePackage && runtime?.version && runtimePackage.version !== normalizeVersion(runtime.version)) {
+    throw new Error("运行时更新包版本与运行时元数据不一致。");
+  }
 
   return {
     schemaVersion: 1,
@@ -277,6 +371,7 @@ function validateUpdateManifest(rawManifest, release) {
         : "",
       urls: fullPortableUrls
     },
+    runtimePackage,
     model,
     runtime
   };
@@ -346,6 +441,7 @@ function chooseRelease(releases, channel) {
 
 async function resolveDesktopUpdate({
   currentVersion,
+  currentRuntimeVersion = "0.0.0",
   channel = "stable",
   fetchJson = requestJson,
   fetchText = requestText,
@@ -378,17 +474,32 @@ async function resolveDesktopUpdate({
   } else {
     manifestError = "Release 未提供已签名的桌面更新清单。";
   }
-  const updateAvailable = compareVersions(latestVersion, currentVersion) > 0;
+  const desktopUpdateAvailable = compareVersions(latestVersion, currentVersion) > 0;
+  const installedRuntimeVersion = normalizeVersion(currentRuntimeVersion || "0.0.0");
+  const runtimeUpdateAvailable = Boolean(
+    manifest?.runtimePackage &&
+    compareVersions(manifest.runtimePackage.version, installedRuntimeVersion) > 0
+  );
+  const updateAvailable = desktopUpdateAvailable || runtimeUpdateAvailable;
   const updaterTooOld = Boolean(
     updateAvailable && manifest && compareVersions(currentVersion, manifest.minimumUpdaterVersion) < 0
+  );
+  const automaticCoverage = Boolean(
+    manifest &&
+    (!desktopUpdateAvailable || manifest.portableApp) &&
+    (!runtimeUpdateAvailable || manifest.runtimePackage)
   );
   return {
     current: normalizeVersion(currentVersion),
     latest: latestVersion,
+    currentRuntime: installedRuntimeVersion,
+    latestRuntime: manifest?.runtimePackage?.version || manifest?.runtime?.version || "",
     channel: normalizedChannel,
     updateAvailable,
+    desktopUpdateAvailable,
+    runtimeUpdateAvailable,
     updaterTooOld,
-    manualOnly: !manifest || !manifest.portableApp || updaterTooOld,
+    manualOnly: !automaticCoverage || updaterTooOld,
     releaseUrl: release.html_url,
     releaseName: release.name || `Desktop ${latestVersion}`,
     publishedAt: release.published_at || "",
@@ -437,6 +548,188 @@ function sha256File(filePath) {
     stream.on("error", reject);
     stream.on("end", () => resolve(digest.digest("hex")));
   });
+}
+
+async function assembleFileParts({ partPaths, destination, expectedSize, expectedSha256, onProgress }) {
+  if (!Array.isArray(partPaths) || !partPaths.length) throw new Error("运行时更新没有可合并的分卷。");
+  const temporary = `${destination}.assembling`;
+  fs.mkdirSync(path.dirname(destination), { recursive: true });
+  fs.rmSync(temporary, { force: true });
+  let written = 0;
+  try {
+    for (let index = 0; index < partPaths.length; index += 1) {
+      const partPath = path.resolve(partPaths[index]);
+      if (!fs.existsSync(partPath) || !fs.statSync(partPath).isFile()) {
+        throw new Error(`运行时更新分卷缺失：${partPath}`);
+      }
+      const stream = fs.createReadStream(partPath);
+      stream.on("data", (chunk) => {
+        written += chunk.length;
+        if (typeof onProgress === "function") onProgress({ written, total: Number(expectedSize || 0) });
+      });
+      await pipeline(stream, fs.createWriteStream(temporary, { flags: index === 0 ? "w" : "a" }));
+    }
+    const actualSize = fs.statSync(temporary).size;
+    if (actualSize !== Number(expectedSize)) {
+      throw new Error(`运行时更新归档大小不匹配：${actualSize} != ${expectedSize}`);
+    }
+    if (await sha256File(temporary) !== String(expectedSha256 || "").toLowerCase()) {
+      throw new Error("运行时更新归档 SHA-256 校验失败。");
+    }
+    fs.rmSync(destination, { force: true });
+    fs.renameSync(temporary, destination);
+    return destination;
+  } catch (error) {
+    fs.rmSync(temporary, { force: true });
+    throw error;
+  }
+}
+
+function readZipEntryBuffer(archivePath, expectedEntry, expectedSize) {
+  const target = safeRelativePath(expectedEntry);
+  return new Promise((resolve, reject) => {
+    yauzl.open(archivePath, {
+      lazyEntries: true,
+      decodeStrings: true,
+      validateEntrySizes: true,
+      strictFileNames: true
+    }, (openError, zipFile) => {
+      if (openError) {
+        reject(openError);
+        return;
+      }
+      let settled = false;
+      let found = false;
+      const fail = (error) => {
+        if (settled) return;
+        settled = true;
+        try { zipFile.close(); } catch { /* Already closed. */ }
+        reject(error);
+      };
+      zipFile.on("error", fail);
+      zipFile.on("end", () => {
+        if (settled) return;
+        if (!found) {
+          fail(new Error(`运行时更新 ZIP 缺少 ${target}。`));
+          return;
+        }
+      });
+      zipFile.on("entry", (entry) => {
+        let candidate;
+        try {
+          candidate = safeRelativePath(entry.fileName.replace(/\/$/, ""));
+        } catch (error) {
+          fail(error);
+          return;
+        }
+        if (candidate !== target || entry.fileName.endsWith("/")) {
+          zipFile.readEntry();
+          return;
+        }
+        if (found) {
+          fail(new Error(`运行时更新 ZIP 重复包含 ${target}。`));
+          return;
+        }
+        found = true;
+        if (Number(entry.uncompressedSize) !== Number(expectedSize)) {
+          fail(new Error("运行时逐文件清单大小与签名元数据不一致。"));
+          return;
+        }
+        zipFile.openReadStream(entry, (streamError, stream) => {
+          if (streamError) {
+            fail(streamError);
+            return;
+          }
+          const chunks = [];
+          let received = 0;
+          stream.on("error", fail);
+          stream.on("data", (chunk) => {
+            received += chunk.length;
+            if (received > MAX_RUNTIME_FILE_MANIFEST_BYTES) {
+              stream.destroy(new Error("运行时逐文件清单超过安全大小限制。"));
+              return;
+            }
+            chunks.push(chunk);
+          });
+          stream.on("end", () => {
+            if (settled) return;
+            settled = true;
+            zipFile.close();
+            resolve(Buffer.concat(chunks));
+          });
+        });
+      });
+      zipFile.readEntry();
+    });
+  });
+}
+
+function validateRuntimeFileManifest(rawManifest, runtimePackage) {
+  if (!rawManifest || typeof rawManifest !== "object" || rawManifest.schemaVersion !== 1) {
+    throw new Error("运行时逐文件清单格式无效。");
+  }
+  const runtimeVersion = normalizeVersion(rawManifest.runtimeVersion);
+  if (runtimeVersion !== runtimePackage.version) throw new Error("运行时逐文件清单版本不一致。");
+  const rawFiles = Array.isArray(rawManifest.files) ? rawManifest.files : [];
+  if (!rawFiles.length) throw new Error("运行时逐文件清单为空。");
+  const seen = new Set();
+  let totalSize = 0;
+  const roots = runtimePackage.roots.map((entry) => entry.toLowerCase());
+  const files = rawFiles.map((entry) => {
+    const relativePath = safeRelativePath(entry?.path);
+    const key = relativePath.toLowerCase();
+    if (!roots.some((root) => key === root || key.startsWith(`${root}/`))) {
+      throw new Error(`运行时文件不在声明的安装目录内：${relativePath}`);
+    }
+    if (seen.has(key)) throw new Error(`运行时逐文件清单路径重复：${relativePath}`);
+    seen.add(key);
+    const size = Number(entry?.size);
+    if (!Number.isSafeInteger(size) || size < 0) throw new Error(`运行时文件大小无效：${relativePath}`);
+    totalSize += size;
+    return {
+      path: relativePath,
+      size,
+      sha256: assertSha256(entry?.sha256, `运行时文件 ${relativePath}`)
+    };
+  });
+  if (Number(rawManifest.totalSize) !== totalSize) throw new Error("运行时逐文件清单总大小不一致。");
+  return { schemaVersion: 1, runtimeVersion, totalSize, files };
+}
+
+async function extractAndVerifyRuntimeUpdate(archivePath, stagingDirectory, runtimePackage) {
+  const archive = fs.statSync(archivePath);
+  if (archive.size !== runtimePackage.archiveSize) throw new Error("运行时更新归档大小不一致。");
+  if (await sha256File(archivePath) !== runtimePackage.archiveSha256) {
+    throw new Error("运行时更新归档 SHA-256 校验失败。");
+  }
+  const manifestBuffer = await readZipEntryBuffer(
+    archivePath,
+    runtimePackage.fileManifest.path,
+    runtimePackage.fileManifest.size
+  );
+  if (crypto.createHash("sha256").update(manifestBuffer).digest("hex") !== runtimePackage.fileManifest.sha256) {
+    throw new Error("运行时逐文件清单 SHA-256 校验失败。");
+  }
+  let rawManifest;
+  try {
+    rawManifest = JSON.parse(manifestBuffer.toString("utf8"));
+  } catch (error) {
+    throw new Error(`运行时逐文件清单 JSON 无效：${error.message}`);
+  }
+  const manifest = validateRuntimeFileManifest(rawManifest, runtimePackage);
+  const manifestEntry = {
+    path: runtimePackage.fileManifest.path,
+    size: runtimePackage.fileManifest.size,
+    sha256: runtimePackage.fileManifest.sha256
+  };
+  const payloadRoot = await extractAndVerifyUpdate(
+    archivePath,
+    stagingDirectory,
+    [manifestEntry, ...manifest.files]
+  );
+  fs.rmSync(path.join(payloadRoot, runtimePackage.fileManifest.path), { force: true });
+  await verifyPayloadFiles(payloadRoot, manifest.files);
+  return { payloadRoot, files: manifest.files, runtimeVersion: manifest.runtimeVersion };
 }
 
 function createDownloadTask({ url, destination, expectedSize, expectedSha256, onProgress, allowInsecure = false }) {
@@ -651,6 +944,7 @@ async function extractAndVerifyUpdate(archivePath, stagingDirectory, expectedFil
 module.exports = {
   DESKTOP_REPOSITORY,
   MAX_GITHUB_ASSET_BYTES,
+  MAX_RUNTIME_ARCHIVE_BYTES,
   MODEL_BUNDLE_MANIFEST_URL,
   MODEL_BUNDLE_REPOSITORY,
   MODEL_BUNDLE_SIGNATURE_URL,
@@ -662,7 +956,9 @@ module.exports = {
   chooseRelease,
   compareVersions,
   createDownloadTask,
+  assembleFileParts,
   extractAndVerifyUpdate,
+  extractAndVerifyRuntimeUpdate,
   extractZipSafely,
   normalizeChannel,
   requestJson,
@@ -671,6 +967,7 @@ module.exports = {
   safeRelativePath,
   sha256File,
   validateModelBundleManifest,
+  validateRuntimeFileManifest,
   validateUpdateManifest,
   verifyManifestSignature,
   verifyModelBundleSignature,

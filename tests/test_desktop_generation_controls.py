@@ -9,7 +9,9 @@ from desktop_generation_controls import (
     allocate_native_chunk_durations,
     build_desktop_plan,
     concatenate_with_pauses,
+    normalize_preflight_text,
     postprocess_waveform,
+    preflight_plan_rows,
     run_with_long_text_guard,
     split_speech_chunks,
 )
@@ -46,6 +48,29 @@ def test_desktop_auto_segmentation_and_pause_preview():
     assert plan.chunks[0].pause_after_ms == 500
     assert plan.gpt_accel_risk is False
     assert plan.to_dict()["gpt_accel_cache_fix"] is True
+
+
+def test_long_text_preflight_normalizes_and_marks_risky_segments():
+    import re
+
+    class Processor:
+        clean_pattern = re.compile(r"[。]")
+        char_rep_map = {"。": "."}
+
+        @staticmethod
+        def normalize(text):
+            return text.replace("1939", "一九三九")
+
+    fake = FakeTTS()
+    fake.text_process = Processor()
+    normalized = normalize_preflight_text(fake, "1939年。", "ZH", True)
+    assert normalized == "一九三九年."
+
+    plan = build_desktop_plan(fake, "甲" * 18, "ZH", "custom", 20, "off", 0, 0, 0)
+    rows = preflight_plan_rows(plan)
+    assert rows[0][3] > 0
+    assert rows[0][4].startswith("高")
+    assert rows[0][-1] == "甲" * 13
 
 
 def test_desktop_pause_presets_keep_annotations_atomic():

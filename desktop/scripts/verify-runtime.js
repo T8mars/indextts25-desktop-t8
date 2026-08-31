@@ -122,6 +122,21 @@ if (!fs.existsSync(manifestPath)) {
   process.exit(1);
 }
 const manifest = JSON.parse(fs.readFileSync(manifestPath, "utf8"));
+const runtimeManifestPath = path.join(packagedRoot, "desktop_runtime_manifest.json");
+if (!fs.existsSync(runtimeManifestPath)) {
+  console.error("Packaged runtime layer manifest is missing.");
+  process.exit(1);
+}
+const runtimeManifest = JSON.parse(fs.readFileSync(runtimeManifestPath, "utf8"));
+if (
+  runtimeManifest.schemaVersion !== 1 ||
+  !/^\d+\.\d+\.\d+/.test(runtimeManifest.runtimeVersion || "") ||
+  runtimeManifest.releaseTag !== `runtime-v${runtimeManifest.runtimeVersion}` ||
+  !runtimeManifest.roots?.includes("resources/site-packages")
+) {
+  console.error("Packaged runtime layer manifest is invalid.");
+  process.exit(1);
+}
 if (manifest.codeRevision !== "ee40fa7d6c6b8a2c7f06105f9f1e65775b74868c") {
   console.error(`Unexpected packaged code revision: ${manifest.codeRevision}`);
   process.exit(1);
@@ -239,7 +254,7 @@ if (!audioIoSource.includes("AudioDecoder") || !audioIoSource.includes("AudioEnc
 
 const desktopSource = fs.readFileSync(path.join(packagedRoot, "desktop_webui.py"), "utf8");
 const voiceLibrarySource = fs.readFileSync(path.join(packagedRoot, "desktop_voice_library.py"), "utf8");
-for (const moduleName of ["desktop_presets.py", "desktop_voice_library.py", "desktop_generation_controls.py", "desktop_model_lifecycle.py", "desktop_streaming_audio.py", "desktop_tasks.py", "desktop_project_bundle.py", "desktop_runtime_benchmark.py", "audio_quality.py", "audiocpp_backend.py", "audiocpp_component_manager.py", "candidate_quality.py", "speech_review.py", "timeline_tools.py", "context_emotion.py", "dialogue_runtime.py", "runtime_acceleration.py", "runtime_benchmark.py", "runtime_metrics.py", "segment_rate_workspace.py"]) {
+for (const moduleName of ["desktop_presets.py", "desktop_voice_library.py", "desktop_generation_controls.py", "desktop_model_lifecycle.py", "desktop_streaming_audio.py", "desktop_candidate_workspace.py", "desktop_job_queue.py", "desktop_tasks.py", "desktop_project_bundle.py", "desktop_runtime_benchmark.py", "audio_quality.py", "audiocpp_backend.py", "audiocpp_component_manager.py", "candidate_quality.py", "speech_review.py", "timeline_tools.py", "context_emotion.py", "dialogue_runtime.py", "runtime_acceleration.py", "runtime_benchmark.py", "runtime_metrics.py", "segment_rate_workspace.py"]) {
   if (!fs.existsSync(path.join(packagedRoot, moduleName))) {
     console.error(`Packaged desktop runtime module is missing: ${moduleName}`);
     process.exit(1);

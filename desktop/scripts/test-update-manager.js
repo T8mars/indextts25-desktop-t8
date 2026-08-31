@@ -10,7 +10,9 @@ const {
   canonicalJson,
   compareVersions,
   createDownloadTask,
+  assembleFileParts,
   extractAndVerifyUpdate,
+  extractAndVerifyRuntimeUpdate,
   resolveDesktopUpdate,
   resolveModelBundleUpdate,
   safeRelativePath,
@@ -76,6 +78,26 @@ async function main() {
 
   const fileContent = Buffer.from("verified update payload", "utf8");
   const archiveContent = Buffer.from("fake zip bytes for resumable download", "utf8");
+  const runtimeFileContent = Buffer.from("verified runtime payload", "utf8");
+  const runtimeFileManifest = Buffer.from(JSON.stringify({
+    schemaVersion: 1,
+    runtimeVersion: "1.0.0",
+    totalSize: runtimeFileContent.length,
+    files: [{
+      path: "resources/runtime/test.bin",
+      size: runtimeFileContent.length,
+      sha256: digest(runtimeFileContent)
+    }]
+  }), "utf8");
+  const runtimeArchive = storedZip([
+    { name: "runtime-files.json", body: runtimeFileManifest },
+    { name: "resources/runtime/test.bin", body: runtimeFileContent }
+  ]);
+  const runtimeSplit = Math.ceil(runtimeArchive.length / 2);
+  const runtimeParts = [
+    runtimeArchive.subarray(0, runtimeSplit),
+    runtimeArchive.subarray(runtimeSplit)
+  ];
   const release = {
     tag_name: "v0.19.0",
     name: "Desktop 0.19.0",
@@ -98,7 +120,12 @@ async function main() {
         name: "desktop-app-update-v0.19.0-win32-x64.zip",
         size: archiveContent.length,
         browser_download_url: "https://example.test/desktop-app-update-v0.19.0-win32-x64.zip"
-      }
+      },
+      ...runtimeParts.map((body, index) => ({
+        name: `desktop-runtime-v1.0.0-win32-x64.zip.part0${index + 1}`,
+        size: body.length,
+        browser_download_url: `https://github.com/T8mars/indextts25-desktop-t8/releases/download/v0.19.0/desktop-runtime-v1.0.0-win32-x64.zip.part0${index + 1}`
+      }))
     ]
   };
   const rawManifest = {
@@ -125,6 +152,25 @@ async function main() {
         size: 3845667974,
         sha256: "1".repeat(64),
         urls: ["https://pan.quark.cn/s/example"]
+      },
+      runtime: {
+        version: "1.0.0",
+        archiveName: "desktop-runtime-v1.0.0-win32-x64.zip",
+        archiveSize: runtimeArchive.length,
+        unpackedSize: runtimeFileContent.length,
+        archiveSha256: digest(runtimeArchive),
+        roots: ["resources/runtime"],
+        fileManifest: {
+          path: "runtime-files.json",
+          size: runtimeFileManifest.length,
+          sha256: digest(runtimeFileManifest)
+        },
+        parts: runtimeParts.map((body, index) => ({
+          assetName: `desktop-runtime-v1.0.0-win32-x64.zip.part0${index + 1}`,
+          size: body.length,
+          sha256: digest(body)
+        })),
+        restartRequired: true
       }
     },
     model: {
@@ -133,7 +179,7 @@ async function main() {
       bundleVersion: "1.0.0"
     },
     runtime: {
-      version: "py310-torch280-cu128-1",
+      version: "1.0.0",
       repository: "t8star/IndexTTS-2.5-Desktop-Runtime",
       revision: "main",
       required: false
@@ -144,6 +190,8 @@ async function main() {
   assert.equal(validated.desktopVersion, "0.19.0");
   assert.equal(validated.portableApp.url, release.assets[2].browser_download_url);
   assert.equal(validated.portableApp.files[0].path, "resources/desktop_webui.py");
+  assert.equal(validated.runtimePackage.parts.length, 2);
+  assert.equal(validated.runtimePackage.unpackedSize, runtimeFileContent.length);
   assert.throws(
     () => validateUpdateManifest({ ...rawManifest, desktopVersion: "0.20.0" }, release),
     /不一致/
@@ -163,16 +211,32 @@ async function main() {
 
   const resolved = await resolveDesktopUpdate({
     currentVersion: "0.18.1",
+    currentRuntimeVersion: "0.9.0",
     channel: "stable",
     fetchJson: async (url) => url.endsWith("/latest") ? release : rawManifest,
     fetchText: async () => signature,
     publicKey: signingKeys.publicKey
   });
   assert.equal(resolved.updateAvailable, true);
+  assert.equal(resolved.desktopUpdateAvailable, true);
+  assert.equal(resolved.runtimeUpdateAvailable, true);
   assert.equal(resolved.manualOnly, false);
   assert.equal(resolved.signatureVerified, true);
   assert.equal(resolved.manifest.model.repository, "t8star/IndexTTS-2.5-Comfy");
   assert.equal(resolved.manifest.model.bundleVersion, "1.0.0");
+
+  const runtimeOnly = await resolveDesktopUpdate({
+    currentVersion: "0.19.0",
+    currentRuntimeVersion: "0.9.0",
+    channel: "stable",
+    fetchJson: async (url) => url.endsWith("/latest") ? release : rawManifest,
+    fetchText: async () => signature,
+    publicKey: signingKeys.publicKey
+  });
+  assert.equal(runtimeOnly.desktopUpdateAvailable, false);
+  assert.equal(runtimeOnly.runtimeUpdateAvailable, true);
+  assert.equal(runtimeOnly.updateAvailable, true);
+  assert.equal(runtimeOnly.manualOnly, false);
 
   const untrusted = await resolveDesktopUpdate({
     currentVersion: "0.18.1",
@@ -288,6 +352,29 @@ async function main() {
       /路径|relative path|invalid/i
     );
     assert.equal(fs.existsSync(path.join(temporary, "escaped.txt")), false);
+
+    const runtimePartPaths = runtimeParts.map((body, index) => {
+      const partPath = path.join(temporary, `runtime.part0${index + 1}`);
+      fs.writeFileSync(partPath, body);
+      return partPath;
+    });
+    const assembledRuntime = path.join(temporary, "runtime.zip");
+    await assembleFileParts({
+      partPaths: runtimePartPaths,
+      destination: assembledRuntime,
+      expectedSize: runtimeArchive.length,
+      expectedSha256: digest(runtimeArchive)
+    });
+    const extractedRuntime = await extractAndVerifyRuntimeUpdate(
+      assembledRuntime,
+      path.join(temporary, "runtime-staging"),
+      validated.runtimePackage
+    );
+    assert.equal(extractedRuntime.runtimeVersion, "1.0.0");
+    assert.deepEqual(
+      fs.readFileSync(path.join(extractedRuntime.payloadRoot, "resources", "runtime", "test.bin")),
+      runtimeFileContent
+    );
 
     const symlinkZip = path.join(temporary, "symlink.zip");
     fs.writeFileSync(symlinkZip, storedZip([{

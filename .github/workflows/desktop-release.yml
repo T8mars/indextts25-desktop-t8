@@ -69,9 +69,21 @@ jobs:
         env:
           T8_UPDATE_PRIVATE_KEY_BASE64: ${{ secrets.T8_UPDATE_PRIVATE_KEY_BASE64 }}
           UPDATE_SUMMARY: ${{ inputs.summary }}
+          GH_TOKEN: ${{ github.token }}
         shell: pwsh
         run: |
           $arguments = @('scripts/build-update-package.js', '--source')
+          $runtimeMetadata = Get-Content ../desktop_runtime_manifest.json -Raw | ConvertFrom-Json
+          $runtimeDirectory = Join-Path $env:RUNNER_TEMP 'desktop-runtime-descriptor'
+          New-Item -ItemType Directory -Force -Path $runtimeDirectory | Out-Null
+          gh release download $runtimeMetadata.releaseTag `
+            --pattern 'desktop-runtime-package.json' `
+            --dir $runtimeDirectory
+          if ($LASTEXITCODE -eq 0) {
+            $arguments += @('--runtime-package', (Join-Path $runtimeDirectory 'desktop-runtime-package.json'))
+          } else {
+            Write-Warning "Runtime descriptor is not published yet; building a signed app-only update."
+          }
           if (-not [string]::IsNullOrWhiteSpace($env:UPDATE_SUMMARY)) {
             $arguments += @('--summary', $env:UPDATE_SUMMARY)
           }

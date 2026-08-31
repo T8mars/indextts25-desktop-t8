@@ -285,7 +285,9 @@ function renderUpdateReport(report, busy) {
   elements.downloadUpdateButton.disabled = Boolean(busy) || downloading;
   elements.downloadUpdateButton.textContent = report?.desktop?.manualOnly
     ? "打开 Release 手动更新"
-    : "下载并校验更新";
+    : report?.desktop?.runtimeUpdateAvailable
+      ? "下载并校验程序/运行库分层更新"
+      : "下载并校验更新";
   elements.updateModelButton.hidden = !report?.officialModel?.updateAvailable;
   elements.updateModelButton.disabled = Boolean(busy) || currentState.phase === "downloading";
   elements.updateModelButton.textContent = report?.officialModel?.latest
@@ -297,7 +299,8 @@ function renderUpdateReport(report, busy) {
   }
   elements.updateSummary.textContent = report.summary || "检查完成。";
   const rows = [
-    ["桌面程序", report.desktop?.current, report.desktop?.latest, report.desktop?.updateAvailable],
+    ["桌面程序", report.desktop?.current, report.desktop?.latest, report.desktop?.desktopUpdateAvailable],
+    ["Python / CUDA 运行库", report.desktop?.currentRuntime, report.desktop?.latestRuntime, report.desktop?.runtimeUpdateAvailable],
     ["ComfyUI 节点", report.node?.bundled, report.node?.latest, report.node?.updateAvailable],
     ["官方代码", report.officialCode?.pinned, report.officialCode?.latest, report.officialCode?.updateAvailable],
     ["T8star 模型包", report.officialModel?.pinned, report.officialModel?.latest, report.officialModel?.updateAvailable]
@@ -309,7 +312,7 @@ function renderUpdateReport(report, busy) {
     title.textContent = `${available ? "↑" : "✓"} ${label}`;
     const detail = document.createElement("span");
     const shorten = (value) => String(value || "未知").length > 16 ? String(value).slice(0, 12) : String(value || "未知");
-    const signatureNote = label === "桌面程序" && report.desktop?.updateAvailable
+    const signatureNote = ["桌面程序", "Python / CUDA 运行库"].includes(label) && available
       ? report.desktop?.signatureVerified ? " · 签名有效" : " · 仅手动更新"
       : "";
     detail.textContent = `当前 ${shorten(current)} · 最新 ${shorten(latest)}${signatureNote}`;

@@ -319,6 +319,89 @@ def build_desktop_plan(
     return DesktopGenerationPlan(language, limit, chunks, tuple(segments), pause_preset)
 
 
+def normalize_preflight_text(tts: Any, text: str, language: str, enabled: bool = True) -> str:
+    """Mirror the model's target-text normalization for an inspectable preview."""
+
+    source = str(text or "").strip()
+    if not source or not enabled:
+        return source
+    language_code = str(language or "ZH").strip().upper()
+    processor = getattr(tts, "text_process", None)
+    try:
+        if processor is not None and hasattr(processor, "clean_pattern"):
+            source = processor.clean_pattern.sub(
+                lambda match: processor.char_rep_map[match.group()],
+                source,
+            )
+        if language_code in {"ZH", "ZHEN", "EN"} and processor is not None:
+            normalized = processor.normalize(source)
+            if str(normalized or "").strip():
+                source = str(normalized).strip()
+        elif language_code in {"JA", "ES"}:
+            from indextts.utils.nemo_tn import normalize_text as nemo_text_normalize
+
+            normalized = nemo_text_normalize(source, language_code.lower())
+            if str(normalized or "").strip():
+                source = str(normalized).strip()
+    except Exception as exc:
+        warnings.warn(f"长文本预检无法执行文本归一化，已保留原文：{exc}", RuntimeWarning)
+    if language_code in {"JA", "ZH", "ZHEN", "EN"}:
+        source = source.lower()
+    elif language_code == "ES":
+        source = source.upper()
+    return source
+
+
+def estimate_segment_seconds(text: str, language: str) -> float:
+    """Estimate speaking time conservatively for preflight UX, not synthesis timing."""
+
+    source = str(text or "").strip()
+    language_code = str(language or "ZH").strip().upper()
+    if language_code in {"EN", "ES", "AR"}:
+        units = max(1, latin_word_count(source))
+        rate = 2.55 if language_code == "AR" else 2.75
+    else:
+        units = max(1, len(re.sub(r"\s|[，。！？、,.!?;；:：'\"“”‘’]", "", source)))
+        rate = 4.6 if language_code == "ZH" else 5.0
+    return max(0.35, units / rate)
+
+
+def preflight_plan_rows(plan: DesktopGenerationPlan) -> list[list[Any]]:
+    """Create human-readable duration and risk rows for a generation plan."""
+
+    rows: list[list[Any]] = []
+    for item in plan.segments:
+        token_count = int(item["token_count"])
+        ratio = token_count / max(1, int(plan.max_tokens))
+        estimated = estimate_segment_seconds(item["text"], plan.language)
+        risks: list[str] = []
+        if ratio >= 0.9:
+            risks.append("接近 Token 上限")
+        elif ratio >= 0.75:
+            risks.append("Token 较高")
+        if estimated >= 22:
+            risks.append("预计偏长")
+        elif estimated >= 14:
+            risks.append("建议留意时长")
+        if ratio >= 0.9 or estimated >= 22:
+            risk = "高：" + "、".join(risks)
+        elif risks:
+            risk = "中：" + "、".join(risks)
+        else:
+            risk = "低"
+        rows.append([
+            item["index"],
+            item["speech_block"],
+            token_count,
+            round(estimated, 1),
+            risk,
+            item["pause_before_ms"],
+            item["pause_after_ms"],
+            item["text"],
+        ])
+    return rows
+
+
 def fit_duration_factor(current: float, actual_ms: float, target_ms: float) -> float:
     if actual_ms <= 0 or target_ms <= 0:
         return max(0.5, min(2.0, float(current)))
@@ -457,11 +540,14 @@ __all__ = [
     "allocate_native_chunk_durations",
     "build_desktop_plan",
     "concatenate_with_pauses",
+    "estimate_segment_seconds",
     "effective_segment_limit",
     "fit_duration_factor",
     "latin_word_count",
     "long_text_retry_limit",
+    "normalize_preflight_text",
     "postprocess_waveform",
+    "preflight_plan_rows",
     "run_with_long_text_guard",
     "split_speech_chunks",
 ]
