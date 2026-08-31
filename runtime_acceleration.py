@@ -14,6 +14,14 @@ from indextts.utils.audio_io import probe_torchcodec_runtime
 
 
 MODES = ("off", "auto_safe", "bigvgan_cuda", "torch_compile", "gpt_accel", "deepspeed")
+MODE_LABELS = {
+    "off": "普通兼容模式",
+    "auto_safe": "自动安全模式",
+    "bigvgan_cuda": "BigVGAN CUDA",
+    "torch_compile": "Torch Compile",
+    "gpt_accel": "GPT 加速",
+    "deepspeed": "DeepSpeed FP16",
+}
 
 
 @dataclass(frozen=True, slots=True)
@@ -213,11 +221,46 @@ def format_acceleration_report(selection: AccelerationSelection, capabilities: d
     )
 
 
+def format_acceleration_summary(
+    selection: AccelerationSelection,
+    startup_fallback: str = "",
+) -> str:
+    """Explain optional acceleration without presenting a safe fallback as an error."""
+
+    requested = MODE_LABELS.get(selection.requested, selection.requested)
+    effective = MODE_LABELS.get(selection.effective, selection.effective)
+    if selection.effective == "off" and selection.requested != "off":
+        title = "当前正常使用普通兼容模式（可选加速已安全回退）"
+        fallback_note = (
+            "这不是语音生成故障；只是本机缺少所选加速需要的可选编译工具或运行库，"
+            "程序会继续走稳定的普通推理路径。"
+        )
+    elif selection.effective == "off":
+        title = "当前正常使用普通兼容模式"
+        fallback_note = "普通模式不要求 DeepSpeed、FlashAttention、Triton、Ninja 或 CUDA 编译工具链。"
+    else:
+        title = f"当前已启用 {effective}"
+        fallback_note = "实际模式已在模型启动时确认；生成失败时再查看下方技术诊断和桌面日志。"
+    lines = [
+        f"### {title}",
+        "",
+        f"- 启动页选择：**{requested}**",
+        f"- 实际生效：**{effective}**",
+        f"- 状态说明：{selection.reason or '运行状态正常'}",
+        "",
+        f"> {fallback_note}",
+    ]
+    if startup_fallback:
+        lines.extend(["", f"> 启动时已处理：{startup_fallback}"])
+    return "\n".join(lines)
+
+
 __all__ = [
     "AccelerationSelection",
     "MODES",
     "describe_acceleration_failure",
     "format_acceleration_report",
+    "format_acceleration_summary",
     "probe_acceleration",
     "recommend_runtime_config",
     "resolve_acceleration",

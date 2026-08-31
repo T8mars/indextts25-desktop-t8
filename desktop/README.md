@@ -39,10 +39,24 @@ Windows Electron desktop integration for IndexTTS 2.5. The packaged application 
 - signed GitHub Release app-layer updates with resumable download, exact-file verification, explicit install confirmation, and automatic rollback
 - live model scan/download/verification progress with current file, speed, ETA, conservative disk-space preflight, resumable repair, and precise failure details
 - local-only experimental audio.cpp node that accepts user-supplied CLI/GGUF absolute paths and never installs components
+- independently configurable output and user-data directories, with saved paths and direct open-folder actions
+- contextual fixed-bottom generate/stop controls that remain available while scrolling in single-voice and multi-role workflows
+- collapsed-by-default guidance, quality tools, advanced controls, dialogue timing, ASR, timeline, report, and task-recovery workspaces
+- direct WebUI actions for returning to setup, opening outputs, opening user data, and opening the exact log directory
 
 The large model files are intentionally external. On first launch, select a complete IndexTTS 2.5 model directory.
-Version 0.22.2 is aligned to code revision `ee40fa7d`, ComfyUI Node 0.21.4, and model bundle `1.0.0` at revision `14166a74`. Streaming synthesis now catches optional acceleration failures, reloads the normal model, and completes the task instead of surfacing raw PyTorch/Triton errors. The launcher recommends the balanced profile on high-VRAM GPUs; experimental GPT acceleration remains an explicit manual choice. Known NVIDIA `waves_per_eu` mismatches receive an actionable diagnostic and safe fallback. OpenAI Whisper is pinned to `20250625`: ZH/EN/JA/ES use `base`, while AR uses the materially more accurate `small` baseline. Weekly GPU QA serializes formal 8 GB and 24 GB profiles and publishes CER/WER, RTF, and peak-VRAM trend artifacts. Signed app and model updates remain explicit user actions verified with Ed25519. No benchmark, model load, model download, update download, install, or acceleration mode starts automatically.
+Version 0.22.3 is aligned to code revision `ee40fa7d`, ComfyUI Node 0.21.4, and model bundle `1.0.0` at revision `14166a74`. It fixes the Gradio streaming-audio frontend mount that could leave the workspace stuck on `Loading`, adds a real Chinese number/year normalization probe, keeps generation controls fixed at the viewport bottom, and collapses advanced single-voice and dialogue workspaces by default. Output and user-data locations can now be moved independently from the launcher, and returning from the WebUI stops the model cleanly. Streaming synthesis catches optional acceleration failures, reloads the normal model, and completes the task instead of surfacing raw PyTorch/Triton errors. The launcher recommends the balanced profile on high-VRAM GPUs; experimental GPT acceleration remains an explicit manual choice. Known NVIDIA `waves_per_eu` mismatches receive an actionable diagnostic and safe fallback. OpenAI Whisper is pinned to `20250625`: ZH/EN/JA/ES use `base`, while AR uses the materially more accurate `small` baseline. Weekly GPU QA serializes formal 8 GB and 24 GB profiles and publishes CER/WER, RTF, and peak-VRAM trend artifacts. Signed app and model updates remain explicit user actions verified with Ed25519. No benchmark, model load, model download, update download, install, or acceleration mode starts automatically.
 The launcher validates official model file sizes, while the downloader performs full SHA-256 verification.
+The output directory and user-data directory can be moved independently from the launcher. Voice-library entries,
+presets, dialogue tasks, ASR caches, benchmarks, and logs follow the configured user-data directory; generated WAVs
+follow the configured output directory. Both choices persist across launches. The active WebUI exposes the resolved
+paths and direct folder buttons. Its `返回启动配置（停止模型）` action, or closing the WebUI window, stops the model,
+releases its process, and returns to setup instead of forcing the whole application to exit. Closing the setup window
+still exits normally.
+
+Optional acceleration fallback is presented as a normal operating state rather than an error: the WebUI shows the
+requested mode, the effective mode, and a Chinese explanation first. The complete capability JSON remains available
+inside a collapsed troubleshooting section.
 This release also supports running the portable package from Windows paths containing Chinese characters.
 AAC/M4A and other compressed reference audio is decoded by the bundled PyAV runtime, without requiring a system FFmpeg installation. Streaming previews are also encoded by bundled PyAV, so Gradio no longer calls an external `ffmpeg` or `ffprobe` executable and cannot fail with `[WinError 2]` merely because those programs are absent from `PATH`.
 The setup screen and Gradio workspace now adapt from compact windows to full-screen desktop layouts.
@@ -173,6 +187,22 @@ separated by spaces. Annotate the complete word when a polyphonic character is i
 `<要求|YAO4 QIU2>` rather than `<要|YAO4>求` (the latter is the unreliable form reported in upstream issue #792).
 Repeated names and polyphones can instead be stored in the persistent pronunciation table.
 
+## Chinese numbers, dates, and years
+
+Arabic-digit mispronunciation is generally caused by the text-normalization front end, not by voice cloning or the
+reference recording. The full Windows portable package installs `wetext>=0.1.7,<0.2` directly; Linux development uses
+`WeTextProcessing>=1.2.0,<2`. At application startup, the generation page runs a real smoke test and shows the active
+package/version plus the result of `1939年` → `一九三九年` beside **Text normalization (numbers/dates)**.
+
+- A year such as `1939年` is normally read digit by digit: `一九三九年`.
+- A quantity such as `1939个人` is normally read as a cardinal number: `一千九百三十九个人`.
+- If normalization is disabled or its visible smoke test fails, write the intended spoken form explicitly.
+
+The packaging verification fails unless this conversion works from the bundled runtime, including an installation path
+containing Chinese characters. GitHub app-layer incremental updates intentionally do not replace Python/CUDA files, so an
+older portable runtime missing this dependency must be replaced by a new full portable build rather than only applying an
+app-layer update.
+
 ## Desktop updates and external models
 
 The launcher checks the stable GitHub Release channel once per day by default; beta is opt-in. A check never downloads
@@ -241,7 +271,7 @@ npm run make
 ```
 
 This builds only `@electron-forge/maker-zip`. The unpacked application is still
-available under `desktop/out/T8star-Aix-IndexTTS-2.5-v0.22.2-win32-x64` for local testing.
+available under `desktop/out/T8star-Aix-IndexTTS-2.5-v0.22.3-win32-x64` for local testing.
 The bundled runtime contains tens of thousands of small files, so Squirrel/NuGet
 can spend a long time repeatedly rewriting a multi-gigabyte package. It is not the
 recommended user distribution. If an installer is specifically required, build it

@@ -3,7 +3,10 @@
 from __future__ import annotations
 
 import io
+from types import MethodType
+from typing import Any
 
+import anyio
 import av
 from gradio import processing_utils
 from gradio.components.audio import Audio
@@ -59,28 +62,42 @@ def wav_bytes_to_adts(data: bytes) -> tuple[bytes, float]:
         source.close()
 
 
-class BundledStreamingAudio(Audio):
-    """Gradio Audio output that never shells out to ffmpeg/ffprobe."""
+async def _covert_to_adts(data: bytes) -> tuple[bytes, float]:
+    """Match Gradio's public streaming hook without invoking pydub/ffmpeg."""
 
-    @staticmethod
-    def _convert_to_adts(data: bytes):
-        return wav_bytes_to_adts(data)
+    return await anyio.to_thread.run_sync(wav_bytes_to_adts, data)
 
-    async def combine_stream(
-        self,
-        stream: list[bytes],
-        desired_output_format: str | None = None,
-        only_file: bool = False,
-    ) -> FileData:
-        del desired_output_format, only_file
-        path = processing_utils.save_bytes_to_cache(
-            b"".join(stream), "audio-stream.aac", cache_dir=self.GRADIO_CACHE
-        )
-        return FileData(
-            path=path,
-            is_stream=False,
-            orig_name="audio-stream.aac",
-        )
+
+async def _combine_stream(
+    component: Audio,
+    stream: list[bytes],
+    desired_output_format: str | None = None,
+    only_file: bool = False,
+) -> FileData:
+    del desired_output_format, only_file
+    path = processing_utils.save_bytes_to_cache(
+        b"".join(stream), "audio-stream.aac", cache_dir=component.GRADIO_CACHE
+    )
+    return FileData(
+        path=path,
+        is_stream=False,
+        orig_name="audio-stream.aac",
+    )
+
+
+def BundledStreamingAudio(*args: Any, **kwargs: Any) -> Audio:
+    """Create a core Gradio Audio component with portable streaming hooks.
+
+    Subclassing ``Audio`` makes Gradio treat the subclass as a custom frontend
+    component and request template assets that do not exist.  Keeping the core
+    component identity lets the bundled Gradio frontend mount normally while
+    the instance-level hooks still replace its ffmpeg-dependent server work.
+    """
+
+    component = Audio(*args, **kwargs)
+    component.covert_to_adts = _covert_to_adts
+    component.combine_stream = MethodType(_combine_stream, component)
+    return component
 
 
 __all__ = ["BundledStreamingAudio", "wav_bytes_to_adts"]

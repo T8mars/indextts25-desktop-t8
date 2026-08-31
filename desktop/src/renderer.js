@@ -2,6 +2,13 @@ const elements = {
   statusDot: document.querySelector("#statusDot"),
   statusText: document.querySelector("#statusText"),
   modelPath: document.querySelector("#modelPath"),
+  outputPath: document.querySelector("#outputPath"),
+  dataPath: document.querySelector("#dataPath"),
+  logPath: document.querySelector("#logPath"),
+  chooseOutputButton: document.querySelector("#chooseOutputButton"),
+  chooseDataButton: document.querySelector("#chooseDataButton"),
+  openOutputButton: document.querySelector("#openOutputButton"),
+  openDataButton: document.querySelector("#openDataButton"),
   runtimeProfile: document.querySelector("#runtimeProfile"),
   applyRuntimeProfileButton: document.querySelector("#applyRuntimeProfileButton"),
   hardwareSummary: document.querySelector("#hardwareSummary"),
@@ -322,6 +329,9 @@ function renderState(state) {
   const busy = ["starting", "ready", "stopping", "downloading", "benchmarking"].includes(state.phase);
   elements.statusText.textContent = state.message || "等待操作";
   elements.modelPath.value = state.modelDir || "";
+  elements.outputPath.value = state.outputDir || "";
+  elements.dataPath.value = state.dataDir || "";
+  elements.logPath.textContent = state.logDir || "";
   elements.runtimeProfile.value = state.runtimeProfile || "custom";
   elements.hardwareSummary.textContent = state.hardwareSummary || "显卡信息尚不可用。";
   renderProfileHint(elements.runtimeProfile.value);
@@ -341,6 +351,8 @@ function renderState(state) {
   renderModelDownload(state.modelDownload);
   elements.startButton.disabled = !state.modelValid || busy;
   elements.chooseModelButton.disabled = busy;
+  elements.chooseOutputButton.disabled = busy;
+  elements.chooseDataButton.disabled = busy;
   elements.downloadModelscopeButton.disabled = busy;
   elements.downloadHuggingfaceButton.disabled = busy;
   elements.cancelDownloadButton.hidden = state.phase !== "downloading";
@@ -365,6 +377,17 @@ function appendLog(line) {
 elements.chooseModelButton.addEventListener("click", async () => {
   renderState(await window.desktopApi.chooseModelDirectory());
 });
+
+elements.chooseOutputButton.addEventListener("click", async () => {
+  renderState(await window.desktopApi.chooseOutputDirectory());
+});
+
+elements.chooseDataButton.addEventListener("click", async () => {
+  renderState(await window.desktopApi.chooseDataDirectory());
+});
+
+elements.openOutputButton.addEventListener("click", () => window.desktopApi.openOutputDirectory());
+elements.openDataButton.addEventListener("click", () => window.desktopApi.openDataDirectory());
 
 elements.startButton.addEventListener("click", async () => {
   appendLog("正在启动内置 Python 与 IndexTTS 2.5…");

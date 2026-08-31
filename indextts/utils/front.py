@@ -1,12 +1,24 @@
 # -*- coding: utf-8 -*-
 from functools import lru_cache
+from importlib import metadata
 import os
+import platform
 import traceback
 import re
 from typing import List, Union, overload
 import warnings
 from indextts.utils.common import tokenize_by_CJK_char, de_tokenized_by_CJK_char
 from sentencepiece import SentencePieceProcessor
+
+
+TEXT_NORMALIZATION_SMOKE_INPUT = "1939年"
+TEXT_NORMALIZATION_SMOKE_EXPECTED = "一九三九年"
+
+
+def _text_normalization_package():
+    if platform.system() == "Linux":
+        return "WeTextProcessing"
+    return "wetext"
 
 
 def _patch_kaldifst_windows_path_handling():
@@ -41,6 +53,8 @@ class TextNormalizer:
     def __init__(self, enable_glossary=False):
         self.zh_normalizer = None
         self.en_normalizer = None
+        self.normalization_backend = "uninitialized"
+        self.normalization_error = ""
         self.char_rep_map = {
             "：": ",",
             "；": ",",
@@ -144,7 +158,6 @@ class TextNormalizer:
     def load(self):
         # print(os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
         # sys.path.append(model_dir)
-        import platform
         if self.zh_normalizer is not None and self.en_normalizer is not None:
             return
         if platform.system() != "Linux":  # Mac and Windows
@@ -153,6 +166,7 @@ class TextNormalizer:
 
             self.zh_normalizer = Normalizer(remove_erhua=False, lang="zh", operator="tn")
             self.en_normalizer = Normalizer(lang="en", operator="tn")
+            self.normalization_backend = "wetext"
         else:
             from tn.chinese.normalizer import Normalizer as NormalizerZh
             from tn.english.normalizer import Normalizer as NormalizerEn
@@ -166,6 +180,7 @@ class TextNormalizer:
                 cache_dir=cache_dir, remove_interjections=False, remove_erhua=False, overwrite_cache=False
             )
             self.en_normalizer = NormalizerEn(overwrite_cache=False)
+            self.normalization_backend = "WeTextProcessing"
 
     G2P_PRONUNCIATION_ANNOTATION_PATTERN = re.compile(r'<([^|>\n]+)\|([^>\n]+)>')
 
@@ -454,6 +469,45 @@ class TextNormalizer:
         # print("normalized_text: ", normalized_text)
         # print("transformed_text: ", transformed_text)
         return transformed_text
+
+
+def probe_text_normalization():
+    """Return an actionable runtime report for number/date normalization."""
+    package = _text_normalization_package()
+    report = {
+        "package": package,
+        "version": None,
+        "backend": "unavailable",
+        "available": False,
+        "verified": False,
+        "example_input": TEXT_NORMALIZATION_SMOKE_INPUT,
+        "example_output": None,
+        "expected_output": TEXT_NORMALIZATION_SMOKE_EXPECTED,
+        "error": "",
+    }
+    try:
+        report["version"] = metadata.version(package)
+    except metadata.PackageNotFoundError:
+        report["error"] = f"{package} is not installed"
+
+    try:
+        normalizer = TextNormalizer()
+        normalizer.load()
+        output = normalizer.normalize(TEXT_NORMALIZATION_SMOKE_INPUT)
+        report.update(
+            backend=normalizer.normalization_backend,
+            available=normalizer.normalization_backend != "identity",
+            verified=output == TEXT_NORMALIZATION_SMOKE_EXPECTED,
+            example_output=output,
+        )
+        if not report["verified"] and not report["error"]:
+            report["error"] = (
+                "normalization smoke test mismatch: "
+                f"expected {TEXT_NORMALIZATION_SMOKE_EXPECTED!r}, got {output!r}"
+            )
+    except Exception as exc:
+        report["error"] = str(exc)
+    return report
 
 
 class TextTokenizer:

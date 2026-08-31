@@ -3,6 +3,8 @@ const { contextBridge, ipcRenderer } = require("electron");
 contextBridge.exposeInMainWorld("desktopApi", {
   getState: () => ipcRenderer.invoke("desktop:get-state"),
   chooseModelDirectory: () => ipcRenderer.invoke("desktop:choose-model-directory"),
+  chooseOutputDirectory: () => ipcRenderer.invoke("desktop:choose-output-directory"),
+  chooseDataDirectory: () => ipcRenderer.invoke("desktop:choose-data-directory"),
   downloadModel: (source) => ipcRenderer.invoke("desktop:download-model", source),
   cancelModelDownload: () => ipcRenderer.invoke("desktop:cancel-model-download"),
   startService: () => ipcRenderer.invoke("desktop:start-service"),
@@ -21,8 +23,11 @@ contextBridge.exposeInMainWorld("desktopApi", {
   setAcceleration: (mode) => ipcRenderer.invoke("desktop:set-acceleration", mode),
   setRuntimeOptions: (options) => ipcRenderer.invoke("desktop:set-runtime-options", options),
   stopService: () => ipcRenderer.invoke("desktop:stop-service"),
+  showLauncher: () => ipcRenderer.invoke("desktop:show-launcher"),
   openModelPage: (source) => ipcRenderer.invoke("desktop:open-model-page", source),
   openLogs: () => ipcRenderer.invoke("desktop:open-logs"),
+  openOutputDirectory: () => ipcRenderer.invoke("desktop:open-output-directory"),
+  openDataDirectory: () => ipcRenderer.invoke("desktop:open-data-directory"),
   onState: (callback) => {
     const handler = (_event, state) => callback(state);
     ipcRenderer.on("desktop:state", handler);

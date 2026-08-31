@@ -62,8 +62,8 @@ dependencies = [
   "opencc-python-reimplemented>=0.1.7",
 
   # Use "wetext" on Windows/Mac, otherwise "WeTextProcessing" on Linux.
-  "wetext>=0.0.9; sys_platform != 'linux'",
-  "WeTextProcessing; sys_platform == 'linux'",
+  "wetext>=0.1.7,<0.2; sys_platform != 'linux'",
+  "WeTextProcessing>=1.2.0,<2; sys_platform == 'linux'",
 ]
 
 [project.optional-dependencies]

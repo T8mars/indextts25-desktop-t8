@@ -25,7 +25,7 @@ const {
 } = require("./runtime_profiles");
 
 const APP_TITLE = "T8star-Aix · IndexTTS 2.5";
-const COMFY_NODE_VERSION = "0.21.2";
+const COMFY_NODE_VERSION = "0.21.4";
 const MODEL_DOWNLOAD_PROGRESS_PREFIX = "@@T8_MODEL_PROGRESS@@";
 const MODEL_URLS = {
   huggingface: "https://huggingface.co/t8star/IndexTTS-2.5-Comfy",
@@ -35,6 +35,7 @@ let modelManifestCache = null;
 
 let mainWindow = null;
 let pythonProcess = null;
+let stoppingPythonProcess = null;
 let downloadProcess = null;
 let cancelledDownloadProcess = null;
 let benchmarkProcess = null;
@@ -43,10 +44,14 @@ let updateDownloadTask = null;
 let preparedDesktopUpdate = null;
 let activeModelDownloadBundle = null;
 let activePort = null;
+let returningToLauncher = false;
 let state = {
   phase: "idle",
   message: "请选择 IndexTTS 2.5 模型目录",
   modelDir: "",
+  outputDir: "",
+  dataDir: "",
+  logDir: "",
   modelValid: false,
   missingFiles: [],
   accelerationMode: "off",
@@ -288,16 +293,28 @@ function settingsPath() {
   return path.join(app.getPath("userData"), "settings.json");
 }
 
-function logsDirectory() {
-  return path.join(app.getPath("userData"), "logs");
-}
-
-function outputDirectory() {
+function defaultOutputDirectory() {
   return path.join(app.getPath("documents"), "T8star-Aix IndexTTS 2.5", "outputs");
 }
 
+function outputDirectory() {
+  return path.resolve(state.outputDir || defaultOutputDirectory());
+}
+
+function defaultDataDirectory() {
+  return app.getPath("userData");
+}
+
+function dataDirectory() {
+  return path.resolve(state.dataDir || defaultDataDirectory());
+}
+
+function logsDirectory() {
+  return path.join(dataDirectory(), "logs");
+}
+
 function benchmarkDirectory() {
-  return path.join(app.getPath("userData"), "benchmarks");
+  return path.join(dataDirectory(), "benchmarks");
 }
 
 function userDataDirectory() {
@@ -1005,7 +1022,8 @@ async function startPythonService() {
   }
 
   fs.mkdirSync(outputDirectory(), { recursive: true });
-  fs.mkdirSync(userDataDirectory(), { recursive: true });
+  fs.mkdirSync(dataDirectory(), { recursive: true });
+  fs.mkdirSync(logsDirectory(), { recursive: true });
   activePort = await findAvailablePort();
   const scriptPath = path.join(runtime.backendRoot, "desktop_webui.py");
   const serviceUrl = `http://127.0.0.1:${activePort}`;
@@ -1021,6 +1039,9 @@ async function startPythonService() {
   });
   appendLog(`Starting bundled Python: ${runtime.pythonExe}`);
   appendLog(`Model directory: ${state.modelDir}`);
+  appendLog(`Output directory: ${outputDirectory()}`);
+  appendLog(`User data directory: ${dataDirectory()}`);
+  appendLog(`Log directory: ${logsDirectory()}`);
   appendLog(`Code revision: ${validation.manifest.codeRevision}`);
   appendLog(`Model bundle: ${validation.manifest.bundleVersion}`);
   appendLog(`Model revision: ${validation.manifest.modelRevision}`);
@@ -1034,7 +1055,7 @@ async function startPythonService() {
     scriptPath,
     "--model_dir", state.modelDir,
     "--output_dir", outputDirectory(),
-    "--data_dir", userDataDirectory(),
+    "--data_dir", dataDirectory(),
     "--host", "127.0.0.1",
     "--port", String(activePort),
     "--acceleration", state.accelerationMode || "off",
@@ -1067,7 +1088,9 @@ async function startPythonService() {
   processRef.on("exit", (code, signal) => {
     appendLog(`Python process exited: code=${code}, signal=${signal}`);
     if (pythonProcess === processRef) pythonProcess = null;
-    if (!app.quitting && state.phase !== "stopping") {
+    const expectedStop = stoppingPythonProcess === processRef;
+    if (expectedStop) stoppingPythonProcess = null;
+    if (!app.quitting && !expectedStop && state.phase !== "stopping") {
       updateState({ phase: "error", message: `推理服务已退出（代码 ${code ?? "unknown"}）` });
     }
   });
@@ -1243,23 +1266,83 @@ function stopPythonService() {
     return;
   }
   updateState({ phase: "stopping", message: "正在关闭推理服务…" });
+  stoppingPythonProcess = pythonProcess;
   pythonProcess.kill();
   pythonProcess = null;
 }
 
-function isTrustedSetupFrame(frame) {
+function isTrustedRendererFrame(frame) {
   if (!frame || !frame.url) return false;
   try {
     const url = new URL(frame.url);
-    return url.protocol === "file:" && path.basename(url.pathname) === "index.html";
+    if (url.protocol === "file:" && path.basename(url.pathname) === "index.html") return true;
+    return Boolean(
+      activePort &&
+      url.protocol === "http:" &&
+      url.hostname === "127.0.0.1" &&
+      Number(url.port) === activePort
+    );
   } catch {
     return false;
   }
 }
 
 function assertTrustedSender(event) {
-  if (!isTrustedSetupFrame(event.senderFrame)) {
+  if (!isTrustedRendererFrame(event.senderFrame)) {
     throw new Error("Rejected IPC request from an untrusted renderer.");
+  }
+}
+
+async function chooseWorkingDirectory(kind) {
+  if (pythonProcess && pythonProcess.exitCode === null) {
+    throw new Error("推理服务运行中；修改存放目录前请先返回启动配置并停止模型。");
+  }
+  const output = kind === "output";
+  const result = await dialog.showOpenDialog(mainWindow, {
+    title: output ? "选择生成音频保存目录" : "选择用户数据保存目录（音色库、预设、任务与日志）",
+    defaultPath: output ? outputDirectory() : dataDirectory(),
+    buttonLabel: "使用此目录",
+    properties: ["openDirectory", "createDirectory"]
+  });
+  if (result.canceled || result.filePaths.length === 0) return state;
+  const selected = path.resolve(result.filePaths[0]);
+  fs.mkdirSync(selected, { recursive: true });
+  fs.accessSync(selected, fs.constants.W_OK);
+  const nextSettings = {
+    ...readSettings(),
+    [output ? "outputDir" : "dataDir"]: selected
+  };
+  writeSettings(nextSettings);
+  const patch = output
+    ? { outputDir: selected, message: `生成音频将保存到：${selected}` }
+    : {
+        dataDir: selected,
+        logDir: path.join(selected, "logs"),
+        message: `音色库、预设、任务与日志将保存到：${selected}`
+      };
+  updateState(patch);
+  return state;
+}
+
+async function showLauncher() {
+  if (returningToLauncher) return state;
+  returningToLauncher = true;
+  const hadRunningService = Boolean(pythonProcess && pythonProcess.exitCode === null);
+  try {
+    if (hadRunningService) stopPythonService();
+    await mainWindow.loadFile(path.join(__dirname, "index.html"));
+    activePort = null;
+    const validation = validateModelDirectory(state.modelDir);
+    updateState({
+      phase: validation.valid ? "idle" : "model-required",
+      message: hadRunningService
+        ? "已返回启动配置并停止模型；可修改设置后重新启动"
+        : "已返回启动配置",
+      serviceUrl: ""
+    });
+    return state;
+  } finally {
+    returningToLauncher = false;
   }
 }
 
@@ -1288,6 +1371,16 @@ function registerIpcHandlers() {
       message: validation.valid ? "模型校验通过，可以启动" : "该目录不是完整的 IndexTTS 2.5 模型"
     });
     return state;
+  });
+
+  ipcMain.handle("desktop:choose-output-directory", async (event) => {
+    assertTrustedSender(event);
+    return chooseWorkingDirectory("output");
+  });
+
+  ipcMain.handle("desktop:choose-data-directory", async (event) => {
+    assertTrustedSender(event);
+    return chooseWorkingDirectory("data");
   });
 
   ipcMain.handle("desktop:start-service", async (event) => {
@@ -1494,6 +1587,11 @@ function registerIpcHandlers() {
     return state;
   });
 
+  ipcMain.handle("desktop:show-launcher", async (event) => {
+    assertTrustedSender(event);
+    return showLauncher();
+  });
+
   ipcMain.handle("desktop:open-model-page", async (event, source) => {
     assertTrustedSender(event);
     const url = MODEL_URLS[source];
@@ -1505,6 +1603,18 @@ function registerIpcHandlers() {
     assertTrustedSender(event);
     fs.mkdirSync(logsDirectory(), { recursive: true });
     await shell.openPath(logsDirectory());
+  });
+
+  ipcMain.handle("desktop:open-output-directory", async (event) => {
+    assertTrustedSender(event);
+    fs.mkdirSync(outputDirectory(), { recursive: true });
+    await shell.openPath(outputDirectory());
+  });
+
+  ipcMain.handle("desktop:open-data-directory", async (event) => {
+    assertTrustedSender(event);
+    fs.mkdirSync(dataDirectory(), { recursive: true });
+    await shell.openPath(dataDirectory());
   });
 }
 
@@ -1537,6 +1647,19 @@ function createWindow() {
     mainWindow.show();
     scheduleAutomaticUpdateCheck();
   });
+  mainWindow.on("close", (event) => {
+    const currentUrl = mainWindow?.webContents.getURL() || "";
+    const showingWebUi = Boolean(
+      activePort && currentUrl.startsWith(`http://127.0.0.1:${activePort}`)
+    );
+    if (!app.quitting && showingWebUi) {
+      event.preventDefault();
+      showLauncher().catch((error) => {
+        appendLog(`Return to launcher failed: ${error.stack || error.message}`);
+        updateState({ phase: "error", message: `返回启动配置失败：${error.message}` });
+      });
+    }
+  });
   mainWindow.on("closed", () => {
     mainWindow = null;
   });
@@ -1566,6 +1689,9 @@ if (!singleInstance) {
     state = {
       ...state,
       modelDir,
+      outputDir: path.resolve(settings.outputDir || defaultOutputDirectory()),
+      dataDir: path.resolve(settings.dataDir || defaultDataDirectory()),
+      logDir: path.join(path.resolve(settings.dataDir || defaultDataDirectory()), "logs"),
       modelValid: validation.valid,
       missingFiles: validation.missingFiles,
       modelBundleVersion: validation.manifest.bundleVersion,

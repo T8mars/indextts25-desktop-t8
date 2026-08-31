@@ -171,8 +171,15 @@ def test_desktop_builds_complete_pronunciation_workspace(tmp_path, monkeypatch):
         for component in config["components"]
         if component.get("type") == "accordion"
         and component.get("props", {}).get("label")
-        == "多音字使用方法与发音设置（默认展开）"
+        == "发音与数字处理 · 数字归一化开启，发音词典按需使用"
     )
+    stream_audio = next(
+        component
+        for component in config["components"]
+        if component.get("props", {}).get("label") == "流式试听"
+    )
+    assert stream_audio["type"] == "audio"
+    assert "bundledstreamingaudio" not in config_text.lower()
     dictionary_language = next(
         component
         for component in config["components"]
@@ -197,7 +204,7 @@ def test_desktop_builds_complete_pronunciation_workspace(tmp_path, monkeypatch):
     assert "Beam 数量" in labels
     assert "长度惩罚" in labels
     assert "段间静音（毫秒）" in labels
-    assert "文本归一化" in labels
+    assert "文本归一化（数字/日期）" in labels
     assert "预设名称" in labels
     assert "已保存预设" in labels
     assert "使用已保存音色库（免重复上传）" in labels
@@ -242,10 +249,38 @@ def test_desktop_builds_complete_pronunciation_workspace(tmp_path, monkeypatch):
     assert "每侧上下文台词数" in labels
     assert "覆盖已有逐句情感" in labels
     assert "上下文情感建议报告 JSON" in labels
-    assert "本次启动环境与加速诊断" in labels
-    assert pronunciation_accordion["props"]["open"] is True
+    assert "完整加速能力报告" in labels
+    assert "本次启动环境与加速诊断" not in labels
+    assert "生成语音" in values
+    assert "停止语音任务" in values
+    assert "停止多角色任务" in values
+    assert "返回启动配置（停止模型）" in values
+    assert "打开输出目录" in values
+    assert "打开日志目录" in values
+    assert "打开用户数据目录" in values
+    assert "当前运行状态正常" in config_text
+    assert "技术诊断 JSON（排错时展开或复制）" in config_text
+    assert "window.desktopApi.showLauncher" in config_text
+    button_ids = {
+        component.get("props", {}).get("value"): component["id"]
+        for component in config["components"]
+        if component.get("type") == "button"
+    }
+    generation_dependencies = [
+        dependency
+        for dependency in config["dependencies"]
+        for target_id, _event_name in dependency.get("targets", [])
+        if target_id == button_ids["生成语音"]
+        and dependency.get("backend_fn")
+    ]
+    assert len(generation_dependencies) == 1
+    assert generation_dependencies[0]["inputs"]
+    assert generation_dependencies[0]["outputs"]
+    assert pronunciation_accordion["props"]["open"] is False
     assert "一键填入中文示例" in values
     assert "多音字怎么用" in config_text
+    assert "中文数字/日期归一化已就绪" in config_text
+    assert "1939年" in config_text
     assert "<行长|HANG2 ZHANG3>" in config_text
     assert "M IH1 . N AH0 T" in config_text
     assert "じょうず" in config_text
@@ -258,11 +293,43 @@ def test_desktop_builds_complete_pronunciation_workspace(tmp_path, monkeypatch):
     assert "This is a real English example." in config_text
     assert "载入批量真实示例" in config_text
     assert "载入 SRT 真实示例" in config_text
-    assert "时间设置看不懂？展开查看 2 秒字幕实例与推荐配置" in config_text
+    assert "时间与 SRT 适配 · 普通批量默认顺延、间隔 200ms" in config_text
     assert "模型第一次生成了 **2.3 秒**" in config_text
-    assert "上下文情感自动标注（先建议，确认后才生成）" in config_text
+    assert "上下文情感建议 · 默认关闭，确认后才生成" in config_text
     assert "分析上下文并填入建议" in config_text
-    assert len([item for item in config["dependencies"] if item.get("cancels")]) == 2
+    accordion_states = {
+        component.get("props", {}).get("label"): component.get("props", {}).get("open")
+        for component in config["components"]
+        if component.get("type") == "accordion"
+    }
+    for collapsed_label in [
+        "参考音频检测与裁剪 · 默认使用安全设置",
+        "情感与声音表现 · 默认跟随音色",
+        "高级生成参数 · 默认设置可直接使用",
+        "跨段语速审计与内部单段重做 · 生成后按需展开",
+        "格式说明与真实示例 · 新手需要时展开",
+        "时间与 SRT 适配 · 普通批量默认顺延、间隔 200ms",
+        "ASR 校对与字幕回写 · 默认关闭",
+        "上下文情感建议 · 默认关闭，确认后才生成",
+        "可拖拽时间轴 · 解析后按需展开",
+        "字幕、逐句文件与生成报告 · 生成后展开",
+        "任务恢复、单句重试与工程管理 · 按需展开",
+    ]:
+        assert accordion_states[collapsed_label] is False
+    cancellation_dependencies = [
+        item for item in config["dependencies"] if item.get("cancels")
+    ]
+    assert len(cancellation_dependencies) == 2
+    single_stop_id = button_ids["停止语音任务"]
+    dialogue_stop_id = button_ids["停止多角色任务"]
+    stop_dependencies = {
+        target_id: dependency
+        for dependency in cancellation_dependencies
+        for target_id, _event_name in dependency.get("targets", [])
+        if target_id in {single_stop_id, dialogue_stop_id}
+    }
+    assert len(stop_dependencies[single_stop_id]["cancels"]) == 1
+    assert len(stop_dependencies[dialogue_stop_id]["cancels"]) == 4
     assert (
         pronunciation_dictionary_path(data_dir)
         == data_dir / "pronunciation_dictionary.yaml"

@@ -1,16 +1,16 @@
 # T8star-Aix IndexTTS 2.5 开发路线图
 
 本文档记录桌面整合包与 ComfyUI 节点的共同开发范围、依赖政策和验收标准。当前公开基线为
-**Desktop 0.22.2 / ComfyUI Node 0.21.4**。
+**Desktop 0.22.3 / ComfyUI Node 0.21.4**。
 
 | 发行物 | 当前版本 | 本版主要内容 |
 | --- | --- | --- |
-| Windows Electron 整合包 | 0.22.2 | 流式加速失败回退、安全默认配置、真实 GPT 加速冒烟 |
+| Windows Electron 整合包 | 0.22.3 | 流式页面修复、数字归一化自检、固定操作栏与默认折叠高级区 |
 | ComfyUI V3 节点 | 0.21.4 | `waves_per_eu` 兼容诊断、普通模式自动重试、33 组工作流 |
 | 固定官方核心 | `ee40fa7d` | 未发现必须更换的 revision |
 | 固定模型镜像 | `14166a74` | Hugging Face 独立下载，26 个主模型与辅助文件全部校验 |
 
-## Node v0.21.4 / Desktop v0.22.2
+## Node v0.21.4 / Desktop v0.22.3
 
 - [x] 识别 NVIDIA 环境中的 `waves_per_eu` PyTorch/Triton 不兼容错误，并给出明确诊断。
 - [x] Desktop 流式试听接入与普通生成一致的加速失败回退，自动重载普通模型完成任务。

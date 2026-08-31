@@ -1,5 +1,6 @@
 from runtime_acceleration import (
     describe_acceleration_failure,
+    format_acceleration_summary,
     recommend_runtime_config,
     resolve_acceleration,
 )
@@ -21,6 +22,14 @@ def test_optional_modes_fall_back_without_dependencies():
         selected = resolve_acceleration(mode, capabilities=capabilities())
         assert selected.effective == "off"
         assert not selected.available
+
+
+def test_safe_acceleration_fallback_is_explained_as_normal_operation():
+    selected = resolve_acceleration("auto_safe", capabilities=capabilities())
+    summary = format_acceleration_summary(selected)
+    assert "当前正常使用普通兼容模式" in summary
+    assert "这不是语音生成故障" in summary
+    assert "自动安全模式" in summary
 
 
 def test_deepspeed_is_opt_in_and_never_part_of_auto_safe():

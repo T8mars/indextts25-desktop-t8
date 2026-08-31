@@ -12,6 +12,7 @@ import traceback
 import uuid
 import zipfile
 from contextlib import contextmanager
+from dataclasses import replace
 from pathlib import Path
 
 import gradio as gr
@@ -75,6 +76,7 @@ from indextts.speech_rate_guard import (
 )
 from indextts.utils.reference_condition_cache import ReferenceConditionCache
 from indextts.utils.audio_io import load_audio_file, save_audio_file
+from indextts.utils.front import probe_text_normalization
 from indextts.pronunciation import (
     ANNOTATION_PATTERN,
     PronunciationEntry,
@@ -92,6 +94,7 @@ from runtime_acceleration import (
     MODES,
     describe_acceleration_failure,
     format_acceleration_report,
+    format_acceleration_summary,
     probe_acceleration,
     resolve_acceleration,
 )
@@ -114,7 +117,7 @@ from segment_rate_workspace import (
 
 
 APP_TITLE = "T8star-Aix · IndexTTS 2.5"
-DESKTOP_VERSION = "0.22.2"
+DESKTOP_VERSION = "0.22.3"
 MODEL_MANIFEST = json.loads(
     (Path(__file__).resolve().parent / "desktop_model_manifest.json").read_text(encoding="utf-8")
 )
@@ -165,6 +168,29 @@ SAMPLE_SRT_SCRIPT = """1
 2
 00:00:03,200 --> 00:00:06,000
 [旁白|emotion=vector:0,0.8,0,0,0,0,0,0] 这一次，同一个角色变得生气。"""
+
+
+def format_text_normalization_notice(status: dict) -> str:
+    """Build the number/year help shown beside the generation control."""
+    package = status.get("package") or "wetext/WeTextProcessing"
+    version = status.get("version") or "未安装"
+    if status.get("verified"):
+        headline = (
+            f"✅ **中文数字/日期归一化已就绪：** 整合包内置 `{package} {version}`，"
+            "已验证 `1939年` → `一九三九年`。"
+        )
+    else:
+        detail = str(status.get("error") or "自检未通过").replace("`", "'")
+        headline = (
+            f"⚠️ **中文数字/日期归一化当前不可用：** `{package} {version}`；{detail}。"
+            "生成前请把数字直接写成希望朗读的中文。"
+        )
+    return (
+        headline
+        + " 年份通常按位读，例如 `1939年` 读作“一九三九年”；"
+        "数量则按数值读，例如 `1939个人` 读作“一千九百三十九个人”。"
+        "取消“文本归一化”时，文本会原样交给模型，阿拉伯数字的读法可能不稳定。"
+    )
 
 
 def describe_dialogue_timing_settings(
@@ -326,6 +352,7 @@ CSS = """
   width: 100% !important;
   max-width: none !important;
   padding: clamp(18px, 2.2vw, 34px) !important;
+  padding-bottom: 112px !important;
 }
 .gradio-container main.fillable > .wrap,
 .gradio-container main.fillable .contain,
@@ -391,6 +418,45 @@ CSS = """
 .t8-timing-guide > button { font-weight: 750 !important; color: #3156c8 !important; }
 .t8-actions { gap: 14px !important; }
 .t8-generate { min-height: 48px; }
+.t8-desktop-toolbar {
+  align-items: center !important;
+  gap: 10px !important;
+  margin: 10px 0 14px !important;
+  padding: 10px !important;
+  border: 1px solid rgba(89,125,255,.18);
+  border-radius: 12px;
+  background: rgba(89,125,255,.045);
+}
+.t8-desktop-toolbar button { min-height: 38px; }
+.t8-storage-paths { margin: -4px 4px 12px !important; opacity: .72; font-size: 12px; }
+.t8-action-dock {
+  position: fixed !important;
+  z-index: 1000 !important;
+  left: 50% !important;
+  bottom: max(12px, env(safe-area-inset-bottom)) !important;
+  transform: translateX(-50%) !important;
+  width: min(calc(100vw - 32px), 1420px) !important;
+  align-items: center !important;
+  gap: 12px !important;
+  margin: 0 !important;
+  padding: 12px 14px !important;
+  border: 1px solid rgba(251,114,153,.42) !important;
+  border-radius: 16px !important;
+  background: color-mix(in srgb, var(--body-background-fill) 92%, transparent) !important;
+  box-shadow: 0 14px 38px rgba(15,23,42,.24), 0 2px 9px rgba(251,114,153,.13) !important;
+  backdrop-filter: blur(18px);
+  -webkit-backdrop-filter: blur(18px);
+}
+.t8-action-dock .prose {
+  flex: 1 1 auto !important;
+  min-width: 220px !important;
+  margin: 0 !important;
+}
+.t8-action-dock .prose p { margin: 0 !important; line-height: 1.45 !important; }
+.t8-action-dock button { min-height: 52px !important; font-weight: 760 !important; }
+.t8-action-dock .t8-generate { min-width: 210px !important; }
+.t8-action-dock .t8-stop { min-width: 132px !important; }
+.t8-dialogue-preview { max-height: 430px !important; overflow: auto !important; }
 .t8-timeline { padding: 14px; border: 1px solid rgba(251,114,153,.28); border-radius: 14px; background: rgba(255,255,255,.68); overflow: hidden; }
 .t8-timeline-scale { display: flex; justify-content: space-between; font-size: 11px; opacity: .7; margin-bottom: 8px; }
 .t8-timeline-track { position: relative; height: 38px; margin: 6px 0; border-radius: 8px; background: rgba(148,163,184,.13); overflow: hidden; touch-action: none; }
@@ -423,17 +489,33 @@ CSS = """
 .t8-rate-text { margin-top: 3px; overflow-wrap: anywhere; }
 .t8-footer { text-align: center; opacity: .58; font-size: 12px; padding: 14px; }
 @media (max-width: 900px) {
-  .gradio-container main.fillable { padding: 16px !important; }
+  .gradio-container main.fillable { padding: 16px 16px 118px !important; }
   .t8-header { align-items: flex-start; flex-direction: column; gap: 10px; }
   .t8-header-copy { text-align: left; }
   .t8-primary-grid { grid-template-columns: 1fr; }
   .t8-prompt-audio { min-height: 280px; }
 }
 @media (max-width: 560px) {
-  .gradio-container main.fillable { padding: 10px !important; }
+  .gradio-container main.fillable {
+    padding: 10px 10px 104px !important;
+    padding-bottom: 104px !important;
+  }
   .t8-header { padding: 17px; border-radius: 14px; }
   .t8-header h1 { font-size: 26px !important; }
   .t8-actions { flex-direction: column !important; }
+  .t8-desktop-toolbar { flex-direction: column !important; align-items: stretch !important; }
+  .t8-action-dock {
+    width: calc(100vw - 16px) !important;
+    bottom: max(8px, env(safe-area-inset-bottom)) !important;
+    flex-wrap: nowrap !important;
+    padding: 10px !important;
+  }
+  .t8-action-dock > :first-child { display: none !important; }
+  .t8-action-dock button {
+    flex: 1 1 0 !important;
+    width: auto !important;
+    min-width: 0 !important;
+  }
 }
 """
 
@@ -811,10 +893,14 @@ def build_app(
     data_dir: Path,
     verbose: bool,
     acceleration_report: str = "",
+    acceleration_summary: str = "",
     fallback_factory=None,
     model_factory=None,
 ) -> gr.Blocks:
     dictionary_file = pronunciation_dictionary_path(data_dir)
+    text_normalization_notice = format_text_normalization_notice(
+        probe_text_normalization()
+    )
     qwen_emotion_available = getattr(tts, "qwen_emo", object()) is not None
     exact_vocab_candidates = (
         Path(__file__).resolve().parent / "checkpoints" / "pinyin.vocab",
@@ -4118,6 +4204,19 @@ def build_app(
             """
         )
 
+        with gr.Row(elem_classes=["t8-desktop-toolbar"]):
+            return_launcher_button = gr.Button(
+                "返回启动配置（停止模型）",
+                variant="secondary",
+            )
+            open_output_directory_button = gr.Button("打开输出目录")
+            open_logs_directory_button = gr.Button("打开日志目录")
+            open_data_directory_button = gr.Button("打开用户数据目录")
+        gr.Markdown(
+            f"当前输出：`{output_dir}`　·　用户数据：`{data_dir}`　·　日志：`{data_dir / 'logs'}`",
+            elem_classes=["t8-storage-paths"],
+        )
+
         with gr.Tab("语音生成"):
             with gr.Row(elem_classes=["t8-primary-grid"]):
                 with gr.Column(scale=1):
@@ -4172,7 +4271,11 @@ def build_app(
                             min_width=320,
                         )
 
-            with gr.Accordion("参考音频质量检测与自动裁剪", open=True):
+            with gr.Accordion(
+                "参考音频检测与裁剪 · 默认使用安全设置",
+                open=False,
+                elem_classes=["t8-section"],
+            ):
                 gr.Markdown(
                     "建议使用 **3–10 秒、单人、无背景音乐、无混响、无削波** 的清晰人声。"
                     "检测会显示静音、响度、削波、估算信噪比和波形；自动裁剪只生成副本，不覆盖原文件。"
@@ -4224,21 +4327,19 @@ def build_app(
                     "预设会保存当前文本、语言、情感、高级参数以及参考音频，保存在本机用户数据目录。"
                 )
 
-            with gr.Row(elem_classes=["t8-pronunciation-tip"]):
-                gr.Markdown(
-                    "**多音字怎么用？** 直接在目标文本中写 `＜原文字词|带声调数字的拼音＞`。"
-                    "例如：`＜要求|YAO4 QIU2＞`。多音字处在词语中时应标注整个词，不要只包单字。"
-                    "下面的设置区已默认展开，也可以先点右侧按钮查看完整示例。"
-                )
-                quick_pronunciation_example_button = gr.Button(
-                    "一键填入中文示例", variant="secondary", min_width=190, scale=0
-                )
-
             with gr.Accordion(
-                "多音字使用方法与发音设置（默认展开）",
-                open=True,
+                "发音与数字处理 · 数字归一化开启，发音词典按需使用",
+                open=False,
                 elem_classes=["t8-section", "t8-pronunciation-accordion"],
             ):
+                with gr.Row(elem_classes=["t8-pronunciation-tip"]):
+                    gr.Markdown(
+                        "**多音字怎么用？** 在目标文本中写 `＜原文字词|带声调数字的拼音＞`，"
+                        "例如 `＜要求|YAO4 QIU2＞`；连续词语应整词标注。"
+                    )
+                    quick_pronunciation_example_button = gr.Button(
+                        "一键填入中文示例", variant="secondary", min_width=190, scale=0
+                    )
                 gr.Markdown(
                     """
 #### 方法一：直接标注当前文本（最简单）
@@ -4357,7 +4458,11 @@ def build_app(
                     dictionary_status(parse_rows(load_pronunciation_rows(data_dir)))
                 )
 
-            with gr.Accordion("情感控制", open=True, elem_classes=["t8-section", "t8-emotion-section"]):
+            with gr.Accordion(
+                "情感与声音表现 · 默认跟随音色",
+                open=False,
+                elem_classes=["t8-section", "t8-emotion-section"],
+            ):
                 if not qwen_emotion_available:
                     gr.Markdown(
                         "当前显卡显存低于 10GB：已自动使用低显存模式并暂不加载 QwenEmotion。"
@@ -4386,7 +4491,16 @@ def build_app(
                 with gr.Group(visible=False) as emotion_weight_group:
                     emotion_weight = gr.Slider(0, 1, value=0.65, step=0.01, label="情感权重")
 
-            with gr.Accordion("高级生成参数", open=False, elem_classes=["t8-section"]):
+            with gr.Accordion(
+                "高级生成参数 · 默认设置可直接使用",
+                open=False,
+                elem_classes=["t8-section"],
+            ):
+                stream_preview = gr.Checkbox(
+                    value=True,
+                    label="边生成边试听",
+                    info="关闭或原生目标时长模式可实时返回；停止按钮会取消当前任务",
+                )
                 with gr.Row():
                     do_sample = gr.Checkbox(value=True, label="随机采样")
                     temperature = gr.Slider(0.1, 2, value=0.8, step=0.1, label="Temperature")
@@ -4448,9 +4562,10 @@ def build_app(
                     )
                     text_normalization = gr.Checkbox(
                         value=True,
-                        label="文本归一化",
+                        label="文本归一化（数字/日期）",
                         info="处理数字、日期和常见符号；精确发音标注仍会保留",
                     )
+                gr.Markdown(text_normalization_notice)
                 gr.Markdown(
                     "**停顿写法：** 文本中可直接插入 `<pause=0.5>`（秒）或 `<pause=500ms>`；"
                     "显式停顿在所有预设下都有效。标点预设会真实拆分语音块并插入静音。"
@@ -4544,14 +4659,22 @@ def build_app(
                 )
                 segment_preview_status = gr.Markdown("生成前可先查看长文本会如何切分。")
 
-            with gr.Row(elem_classes=["t8-actions"]):
-                stream_preview = gr.Checkbox(
-                    value=True,
-                    label="边生成边试听",
-                    info="关闭或原生目标时长模式可实时返回；停止按钮会取消当前任务",
+            with gr.Row(elem_classes=["t8-action-dock", "t8-single-action-dock"]):
+                gr.Markdown("**语音生成**　确认音色与文本后即可开始；任务运行时可随时停止。")
+                generate_button = gr.Button(
+                    "生成语音",
+                    variant="primary",
+                    elem_classes=["t8-generate"],
+                    min_width=210,
+                    scale=0,
                 )
-                generate_button = gr.Button("生成语音", variant="primary", elem_classes=["t8-generate"])
-                stop_button = gr.Button("停止当前/排队任务", variant="stop")
+                stop_button = gr.Button(
+                    "停止语音任务",
+                    variant="stop",
+                    elem_classes=["t8-stop"],
+                    min_width=132,
+                    scale=0,
+                )
             stream_audio = BundledStreamingAudio(
                 label="流式试听",
                 streaming=True,
@@ -4565,7 +4688,7 @@ def build_app(
                 file_types=["audio"],
                 interactive=False,
             )
-            with gr.Accordion("跨段语速审计与内部单段重做", open=True):
+            with gr.Accordion("跨段语速审计与内部单段重做 · 生成后按需展开", open=False):
                 gr.Markdown(
                     "生成多段长文本后，这里按真实音频时长显示每个内部段的语速。"
                     "可分别试听自动判断前的原始段、自动重试候选和当前采用段；"
@@ -4775,18 +4898,19 @@ def build_app(
             )
 
         with gr.Tab("多角色 / 批量台词 / SRT"):
-            gr.Markdown(
-                "**可选语言：** 中文 `ZH`、英语 `EN`、日语 `JA`、西班牙语 `ES`、阿拉伯语 `AR`。  \n"
-                "**批量格式：** `角色|台词|语言|时长系数|逐句情感`，最后一列可省略；也支持 JSON 数组。"
-                "时长系数是官方的 **0.5–2.0 无单位时长适配倍率**：`0.8` 更快、`1.0` 原速、`1.2` 更慢；"
-                "它不是秒数，也不等同于自然的语气语速，幅度过大可能拉长或失真。  \n"
-                "**同一角色逐句情感：** `text:生气、激动` 或 `vector:喜,怒,哀,惧,厌恶,低落,惊喜,平静`；"
-                "留空继承角色音色库的默认情感。  \n"
-                "**SRT 角色写法：** `[小明] 台词`；逐句情感写成 `[小明|emotion=text:生气、激动] 台词`。"
-                "没有角色标记时使用默认角色；"
-                "SRT 全文使用下方“默认语言”，混合语言请改用批量格式。"
-            )
-            with gr.Accordion("真实示例（可直接载入或复制）", open=True):
+            gr.Markdown("### ① 导入脚本　→　② 解析检查　→　③ 生成与下载")
+            with gr.Accordion("格式说明与真实示例 · 新手需要时展开", open=False):
+                gr.Markdown(
+                    "**可选语言：** 中文 `ZH`、英语 `EN`、日语 `JA`、西班牙语 `ES`、阿拉伯语 `AR`。  \n"
+                    "**批量格式：** `角色|台词|语言|时长系数|逐句情感`，最后一列可省略；也支持 JSON 数组。"
+                    "时长系数是官方的 **0.5–2.0 无单位时长适配倍率**：`0.8` 更快、`1.0` 原速、`1.2` 更慢；"
+                    "它不是秒数，也不等同于自然的语气语速，幅度过大可能拉长或失真。  \n"
+                    "**同一角色逐句情感：** `text:生气、激动` 或 `vector:喜,怒,哀,惧,厌恶,低落,惊喜,平静`；"
+                    "留空继承角色音色库的默认情感。  \n"
+                    "**SRT 角色写法：** `[小明] 台词`；逐句情感写成 `[小明|emotion=text:生气、激动] 台词`。"
+                    "没有角色标记时使用默认角色；"
+                    "SRT 全文使用下方“默认语言”，混合语言请改用批量格式。"
+                )
                 gr.Markdown(
                     """
 **批量台词示例**（角色名要与“角色音色库”中已保存的名称一致）：
@@ -4827,55 +4951,55 @@ def build_app(
                 dialogue_default_language = gr.Dropdown(choices=LANGUAGE_CHOICES, value="ZH", label="默认语言")
             dialogue_script = gr.TextArea(
                 label="批量台词或 SRT 内容",
-                lines=14,
+                lines=8,
                 value=SAMPLE_BATCH_SCRIPT,
             )
-            with gr.Row():
-                timeline_policy = gr.Radio(
-                    choices=[("顺延，避免重叠", "shift"), ("保留 SRT 起点并混音", "overlay")],
-                    value="shift",
-                    label="时间冲突策略（上一句超时怎么办）",
-                )
-                fit_srt_slots = gr.Checkbox(
-                    value=False,
-                    label="按 SRT 开始/结束时间匹配语音",
-                    info="仅 SRT 生效；普通批量台词请关闭",
-                )
-                slot_duration_mode = gr.Dropdown(
-                    choices=[
-                        ("不足补静音，超长保留（推荐，不丢字）", "pad"),
-                        ("自然适配（不裁剪）", "natural"),
-                        ("原生单次适配（可能裁掉句尾）", "native"),
-                        ("强制精确：补静音或裁剪", "exact"),
-                    ],
-                    value="pad",
-                    label="SRT 时长处理方式",
-                )
-                fit_tolerance_ms = gr.Slider(
-                    0,
-                    2000,
-                    value=180,
-                    step=10,
-                    label="触发二次适配的误差（毫秒）",
-                    info="原生单次适配不使用此值",
-                )
-                batch_gap_ms = gr.Slider(
-                    0,
-                    5000,
-                    value=200,
-                    step=10,
-                    label="普通批量台词句间静音（毫秒）",
-                    info="只对 batch 生效；SRT 使用自身时间码",
-                )
-            timeline_settings_summary = gr.Markdown(
-                describe_dialogue_timing_settings("batch", "shift", False, "pad", 180, 200),
-                elem_classes=["t8-timing-summary"],
-            )
             with gr.Accordion(
-                "时间设置看不懂？展开查看 2 秒字幕实例与推荐配置",
-                open=True,
+                "时间与 SRT 适配 · 普通批量默认顺延、间隔 200ms",
+                open=False,
                 elem_classes=["t8-timing-guide"],
             ):
+                with gr.Row():
+                    timeline_policy = gr.Radio(
+                        choices=[("顺延，避免重叠", "shift"), ("保留 SRT 起点并混音", "overlay")],
+                        value="shift",
+                        label="时间冲突策略（上一句超时怎么办）",
+                    )
+                    fit_srt_slots = gr.Checkbox(
+                        value=False,
+                        label="按 SRT 开始/结束时间匹配语音",
+                        info="仅 SRT 生效；普通批量台词请关闭",
+                    )
+                    slot_duration_mode = gr.Dropdown(
+                        choices=[
+                            ("不足补静音，超长保留（推荐，不丢字）", "pad"),
+                            ("自然适配（不裁剪）", "natural"),
+                            ("原生单次适配（可能裁掉句尾）", "native"),
+                            ("强制精确：补静音或裁剪", "exact"),
+                        ],
+                        value="pad",
+                        label="SRT 时长处理方式",
+                    )
+                    fit_tolerance_ms = gr.Slider(
+                        0,
+                        2000,
+                        value=180,
+                        step=10,
+                        label="触发二次适配的误差（毫秒）",
+                        info="原生单次适配不使用此值",
+                    )
+                    batch_gap_ms = gr.Slider(
+                        0,
+                        5000,
+                        value=200,
+                        step=10,
+                        label="普通批量台词句间静音（毫秒）",
+                        info="只对 batch 生效；SRT 使用自身时间码",
+                    )
+                timeline_settings_summary = gr.Markdown(
+                    describe_dialogue_timing_settings("batch", "shift", False, "pad", 180, 200),
+                    elem_classes=["t8-timing-summary"],
+                )
                 gr.Markdown(
                     """
 **真实例子：** SRT 给某句的时间是 `00:00:00,000 → 00:00:02,000`，也就是必须放进 **2 秒槽位**；模型第一次生成了 **2.3 秒**。
@@ -4927,7 +5051,7 @@ def build_app(
                     dialogue_diffusion_steps = gr.Slider(5, 100, value=25, step=1, label="CFM 扩散步数")
                     dialogue_inference_cfg_rate = gr.Slider(0, 1.5, value=0.7, step=0.05, label="CFM 引导强度")
                     dialogue_cfm_temperature = gr.Slider(0.1, 1.5, value=1.0, step=0.05, label="CFM 温度")
-            with gr.Accordion("ASR 自动校对与字幕自动回写", open=True):
+            with gr.Accordion("ASR 校对与字幕回写 · 默认关闭", open=False):
                 gr.Markdown(
                     "启用后逐句使用本地 Whisper 校对，并把识别文本、CER/WER、差异、词级时间戳和通过状态写入任务报告。"
                     "回写字幕默认采用实际混音时间；只有通过阈值的识别文本才替换原字幕，低分结果保留原文。"
@@ -4963,11 +5087,25 @@ def build_app(
                         label="回写字幕文本",
                     )
                     subtitle_include_role = gr.Checkbox(value=True, label="回写字幕保留 [角色] 前缀")
-            with gr.Row():
+            with gr.Row(elem_classes=["t8-dialogue-tools"]):
                 preview_dialogue_button = gr.Button("解析并检查角色")
                 refresh_timeline_button = gr.Button("手动刷新可视化时间轴")
-                generate_dialogue_button = gr.Button("生成全部台词", variant="primary")
-                stop_dialogue_button = gr.Button("停止排队任务", variant="stop")
+            with gr.Row(elem_classes=["t8-action-dock", "t8-dialogue-action-dock"]):
+                gr.Markdown("**多角色配音**　先解析并确认角色；生成后可随时停止排队或当前任务。")
+                generate_dialogue_button = gr.Button(
+                    "生成全部台词",
+                    variant="primary",
+                    elem_classes=["t8-generate"],
+                    min_width=210,
+                    scale=0,
+                )
+                stop_dialogue_button = gr.Button(
+                    "停止多角色任务",
+                    variant="stop",
+                    elem_classes=["t8-stop"],
+                    min_width=132,
+                    scale=0,
+                )
             dialogue_status = gr.Markdown("请先在“角色音色库”保存脚本中使用的角色。")
             dialogue_preview = gr.Dataframe(
                 headers=TIMELINE_HEADERS,
@@ -4976,8 +5114,9 @@ def build_app(
                 interactive=True,
                 wrap=True,
                 label="可编辑时间轴（表格与下方可拖拽轨道双向同步；最后一列可逐句改情感）",
+                elem_classes=["t8-dialogue-preview"],
             )
-            with gr.Accordion("上下文情感自动标注（先建议，确认后才生成）", open=True):
+            with gr.Accordion("上下文情感建议 · 默认关闭，确认后才生成", open=False):
                 gr.Markdown(
                     "使用本地 QwenEmotion 读取目标台词及前后文，为每句建议八维情感向量和强度。"
                     "结果只写入上方表格最后一列，**不会自动合成音频**；请逐行检查后再点击生成。"
@@ -5005,7 +5144,8 @@ def build_app(
                     lines=8,
                     interactive=False,
                 )
-            dialogue_timeline_visual = gr.HTML(render_timeline_html([]))
+            with gr.Accordion("可拖拽时间轴 · 解析后按需展开", open=False):
+                dialogue_timeline_visual = gr.HTML(render_timeline_html([]))
             dialogue_timeline_drag_payload = gr.Textbox(
                 value="",
                 elem_id="t8-timeline-drag-payload",
@@ -5021,14 +5161,15 @@ def build_app(
                     scale=2,
                     min_width=190,
                 )
-            dialogue_archive = gr.File(label="逐句音频 + combined.wav + report.json + rewritten.srt", interactive=False)
-            dialogue_rewritten_srt = gr.File(label="自动回写字幕 SRT", interactive=False)
-            dialogue_report = gr.TextArea(label="生成报告 JSON", lines=14, interactive=False)
-            gr.Markdown(
-                "完成提示与 `report.json > performance` 会记录真实生成耗时、音频时长、RTF、"
-                "CUDA 分配峰值、缓存峰值及相对模型常驻显存的本次生成增量。"
-            )
-            with gr.Accordion("任务恢复与单句重试", open=True):
+            with gr.Accordion("字幕、逐句文件与生成报告 · 生成后展开", open=False):
+                dialogue_archive = gr.File(label="逐句音频 + combined.wav + report.json + rewritten.srt", interactive=False)
+                dialogue_rewritten_srt = gr.File(label="自动回写字幕 SRT", interactive=False)
+                dialogue_report = gr.TextArea(label="生成报告 JSON", lines=10, interactive=False)
+                gr.Markdown(
+                    "完成提示与 `report.json > performance` 会记录真实生成耗时、音频时长、RTF、"
+                    "CUDA 分配峰值、缓存峰值及相对模型常驻显存的本次生成增量。"
+                )
+            with gr.Accordion("任务恢复、单句重试与工程管理 · 按需展开", open=False):
                 gr.Markdown(
                     "每完成一条台词就立即保存任务清单。软件意外关闭后，选择任务并继续即可跳过已完成台词；"
                     "填写台词序号后可只重做该句并重新合并。"
@@ -5094,7 +5235,18 @@ def build_app(
                 "加速模式在 Electron 启动页选择，修改后需要重启推理服务。"
                 "基础模式不需要 DeepSpeed、FlashAttention 或 Triton；缺少时会自动回退，不影响普通推理。"
             )
-            gr.TextArea(label="本次启动环境与加速诊断", value=acceleration_report, lines=24, interactive=False)
+            gr.Markdown(
+                acceleration_summary
+                or "### 当前运行状态正常\n\n实际加速状态尚未提供；需要排查时请查看桌面日志。"
+            )
+            with gr.Accordion("技术诊断 JSON（排错时展开或复制）", open=False):
+                gr.Code(
+                    label="完整加速能力报告",
+                    value=acceleration_report,
+                    language="json",
+                    interactive=False,
+                    lines=24,
+                )
             gr.Markdown(
                 "- `auto_safe`：只在工具链齐全时使用 BigVGAN CUDA 融合核。\n"
                 "- `torch_compile`：需要可选 Triton，首次生成有编译开销。\n"
@@ -5254,6 +5406,44 @@ def build_app(
                 interactive=False,
                 wrap=True,
             )
+
+        return_launcher_button.click(
+            fn=None,
+            js="""() => {
+              if (!window.desktopApi?.showLauncher) {
+                window.alert('此按钮仅在 T8star-Aix 桌面整合包中可用。');
+                return;
+              }
+              if (window.confirm('返回启动配置会停止当前模型并释放显存，是否继续？')) {
+                void window.desktopApi.showLauncher();
+              }
+            }""",
+            queue=False,
+        )
+        open_output_directory_button.click(
+            fn=None,
+            js="""() => {
+              if (window.desktopApi?.openOutputDirectory) void window.desktopApi.openOutputDirectory();
+              else window.alert('此按钮仅在 T8star-Aix 桌面整合包中可用。');
+            }""",
+            queue=False,
+        )
+        open_logs_directory_button.click(
+            fn=None,
+            js="""() => {
+              if (window.desktopApi?.openLogs) void window.desktopApi.openLogs();
+              else window.alert('此按钮仅在 T8star-Aix 桌面整合包中可用。');
+            }""",
+            queue=False,
+        )
+        open_data_directory_button.click(
+            fn=None,
+            js="""() => {
+              if (window.desktopApi?.openDataDirectory) void window.desktopApi.openDataDirectory();
+              else window.alert('此按钮仅在 T8star-Aix 桌面整合包中可用。');
+            }""",
+            queue=False,
+        )
         refresh_history.click(lambda: load_history(output_dir), outputs=history, queue=False)
 
         apply_memory_policy_button.click(
@@ -5776,77 +5966,84 @@ def build_app(
             outputs=[preset_select, preset_status],
             queue=False,
         )
-        generation_event = generate_button.click(
-            generate,
-            inputs=[
-                prompt_audio,
-                text,
-                language,
-                duration_factor,
-                emotion_mode,
-                emotion_audio,
-                emotion_weight,
-                emotion_text,
-                random_emotion,
-                dictionary_table,
-                pronunciation_strict,
-                quality_retry_count,
-                quality_asr_backend,
-                quality_asr_model,
-                quality_asr_device,
-                quality_threshold,
-                *vector_controls,
-                do_sample,
-                temperature,
-                top_p,
-                top_k,
-                num_beams,
-                repetition_penalty,
-                length_penalty,
-                max_mel_tokens,
-                seed,
-                diffusion_steps,
-                inference_cfg_rate,
-                cfm_temperature,
-                stream_preview,
-                segmentation_mode,
-                max_text_tokens,
-                segment_silence_ms,
-                pause_preset,
-                comma_pause_ms,
-                sentence_pause_ms,
-                paragraph_pause_ms,
-                text_normalization,
-                target_duration_mode,
-                target_duration_seconds,
-                postprocess_preset,
-                postprocess_strength,
-            ],
-            outputs=[
-                stream_audio,
-                output_audio,
-                candidate_audio_files,
-                history,
-                pronunciation_report,
-                generation_performance,
-                segment_rate_table,
-                segment_rate_chart,
-                segment_rate_select,
-                segment_manifest_state,
-            ],
-            concurrency_limit=1,
-        )
-        generation_event.then(
-            load_segment_artifacts_event,
-            inputs=[segment_manifest_state, segment_rate_select],
-            outputs=[
-                segment_original_audio,
-                segment_retry_audio,
-                segment_selected_audio,
-                segment_rate_status,
-            ],
-            queue=False,
-        )
+        generation_inputs = [
+            prompt_audio,
+            text,
+            language,
+            duration_factor,
+            emotion_mode,
+            emotion_audio,
+            emotion_weight,
+            emotion_text,
+            random_emotion,
+            dictionary_table,
+            pronunciation_strict,
+            quality_retry_count,
+            quality_asr_backend,
+            quality_asr_model,
+            quality_asr_device,
+            quality_threshold,
+            *vector_controls,
+            do_sample,
+            temperature,
+            top_p,
+            top_k,
+            num_beams,
+            repetition_penalty,
+            length_penalty,
+            max_mel_tokens,
+            seed,
+            diffusion_steps,
+            inference_cfg_rate,
+            cfm_temperature,
+            stream_preview,
+            segmentation_mode,
+            max_text_tokens,
+            segment_silence_ms,
+            pause_preset,
+            comma_pause_ms,
+            sentence_pause_ms,
+            paragraph_pause_ms,
+            text_normalization,
+            target_duration_mode,
+            target_duration_seconds,
+            postprocess_preset,
+            postprocess_strength,
+        ]
+        generation_outputs = [
+            stream_audio,
+            output_audio,
+            candidate_audio_files,
+            history,
+            pronunciation_report,
+            generation_performance,
+            segment_rate_table,
+            segment_rate_chart,
+            segment_rate_select,
+            segment_manifest_state,
+        ]
+
+        def bind_generation(button):
+            event = button.click(
+                generate,
+                inputs=generation_inputs,
+                outputs=generation_outputs,
+                concurrency_limit=1,
+            )
+            event.then(
+                load_segment_artifacts_event,
+                inputs=[segment_manifest_state, segment_rate_select],
+                outputs=[
+                    segment_original_audio,
+                    segment_retry_audio,
+                    segment_selected_audio,
+                    segment_rate_status,
+                ],
+                queue=False,
+            )
+            return event
+
+        generation_event = bind_generation(generate_button)
         segment_rate_select.change(
             load_segment_artifacts_event,
             inputs=[segment_manifest_state, segment_rate_select],
@@ -5873,7 +6070,11 @@ def build_app(
             ],
             concurrency_limit=1,
         )
-        stop_button.click(fn=None, cancels=[generation_event], queue=False)
+        stop_button.click(
+            fn=None,
+            cancels=[generation_event],
+            queue=False,
+        )
         single_asr_button.click(
             asr_proofread_event,
             inputs=[
@@ -6090,6 +6291,7 @@ def main() -> None:
         )
 
     startup_fallback = ""
+    displayed_acceleration = acceleration
     try:
         tts = load_tts(acceleration)
     except Exception as exc:
@@ -6100,14 +6302,26 @@ def main() -> None:
             f"可选加速初始化失败：{describe_acceleration_failure(exc)}；"
             "已自动回退普通模式。"
         )
+        displayed_acceleration = replace(
+            acceleration,
+            effective="off",
+            use_cuda_kernel=False,
+            use_torch_compile=False,
+            use_accel=False,
+            use_deepspeed=False,
+            available=False,
+            reason=startup_fallback,
+        )
         print(">> " + startup_fallback, flush=True)
         acceleration = resolve_acceleration("off", acceleration_device, capabilities)
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
         tts = load_tts(acceleration)
-    diagnostic = format_acceleration_report(acceleration, capabilities)
-    if startup_fallback:
-        diagnostic += "\n\n" + startup_fallback
+    diagnostic = format_acceleration_report(displayed_acceleration, capabilities)
+    diagnostic_summary = format_acceleration_summary(
+        displayed_acceleration,
+        startup_fallback,
+    )
     normal_acceleration = resolve_acceleration("off", acceleration_device, capabilities)
     fallback_factory = (
         (lambda: load_tts(normal_acceleration))
@@ -6120,6 +6334,7 @@ def main() -> None:
         data_dir,
         args.verbose,
         diagnostic,
+        diagnostic_summary,
         fallback_factory=fallback_factory,
         model_factory=lambda: load_tts(acceleration),
     )

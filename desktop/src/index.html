@@ -5,16 +5,16 @@
     <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:;" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>T8star-Aix · IndexTTS 2.5</title>
-    <link rel="stylesheet" href="styles.css?v=0.22.2" />
+    <link rel="stylesheet" href="styles.css?v=0.22.3" />
   </head>
   <body>
     <main class="shell">
       <section class="hero">
         <div class="hero-main">
-          <div class="badge">INDEXTTS 2.5 · DESKTOP 0.22.2</div>
+          <div class="badge">INDEXTTS 2.5 · DESKTOP 0.22.3</div>
           <h1>T8star-Aix · IndexTTS 2.5</h1>
           <p class="build-meta">
-            Desktop 0.22.2 · ComfyUI Node 0.21.4<br />
+            Desktop 0.22.3 · ComfyUI Node 0.21.4<br />
             Core ee40fa7d · Model 14166a74
           </p>
         </div>
@@ -42,6 +42,28 @@
             </div>
             <ul id="missingFiles" class="missing-files"></ul>
 
+            <section class="storage-card" aria-labelledby="storageTitle">
+              <div class="storage-heading">
+                <div>
+                  <strong id="storageTitle">存放目录（可放到非 C 盘）</strong>
+                  <p class="hint">修改后持久保存，下次启动继续使用。用户数据包含音色库、预设、任务、ASR 缓存和日志。</p>
+                </div>
+              </div>
+              <label for="outputPath">生成音频保存目录</label>
+              <div class="path-row storage-row">
+                <input id="outputPath" type="text" readonly />
+                <button id="chooseOutputButton" class="secondary">更改</button>
+                <button id="openOutputButton" class="ghost">打开</button>
+              </div>
+              <label for="dataPath">用户数据目录</label>
+              <div class="path-row storage-row">
+                <input id="dataPath" type="text" readonly />
+                <button id="chooseDataButton" class="secondary">更改</button>
+                <button id="openDataButton" class="ghost">打开</button>
+              </div>
+              <p class="hint storage-note">日志目录：<code id="logPath">等待读取…</code></p>
+            </section>
+
             <div class="runtime-profile-card">
               <label for="runtimeProfile">按显存一键运行方案（应用后仍可手动微调）</label>
               <div class="profile-row">
@@ -59,112 +81,128 @@
               <p id="runtimeProfileHint" class="hint">自动推荐只填写下方选项，不会自动启动或加载模型。</p>
             </div>
 
-            <label for="accelerationMode">可选加速模式（整合包已内置，默认关闭，失败自动回退）</label>
-            <select id="accelerationMode">
-              <option value="off">关闭（最稳，零附加依赖）</option>
-              <option value="auto_safe">自动安全（只用已具备的融合核）</option>
-              <option value="bigvgan_cuda">BigVGAN CUDA 融合核</option>
-              <option value="torch_compile">Torch Compile（已内置 Triton）</option>
-              <option value="gpt_accel">GPT 加速（已内置 FlashAttention + Triton）</option>
-              <option value="deepspeed">DeepSpeed FP16（Windows 兼容，手动选择）</option>
-            </select>
-            <p class="hint">轮子精确适配内置 Python 3.10 / torch 2.8.0+cu128；加速不会默认开启，不兼容时自动回退普通模式。</p>
+            <details class="diagnostics-card advanced-card manual-runtime-card" aria-labelledby="manualRuntimeTitle">
+              <summary>
+                <span class="advanced-summary-copy">
+                  <strong id="manualRuntimeTitle">手动高级运行设置</strong>
+                  <span>一键运行方案不合适时，再展开微调加速、精度和参考编码器。</span>
+                </span>
+              </summary>
+              <div class="advanced-card-body">
+                <label for="accelerationMode">可选加速模式（整合包已内置，默认关闭，失败自动回退）</label>
+                <select id="accelerationMode">
+                  <option value="off">关闭（最稳，零附加依赖）</option>
+                  <option value="auto_safe">自动安全（只用已具备的融合核）</option>
+                  <option value="bigvgan_cuda">BigVGAN CUDA 融合核</option>
+                  <option value="torch_compile">Torch Compile（已内置 Triton）</option>
+                  <option value="gpt_accel">GPT 加速（已内置 FlashAttention + Triton）</option>
+                  <option value="deepspeed">DeepSpeed FP16（Windows 兼容，手动选择）</option>
+                </select>
+                <p class="hint">轮子精确适配内置 Python 3.10 / torch 2.8.0+cu128；加速不会默认开启，不兼容时自动回退普通模式。</p>
 
-            <label for="precisionMode">GPT 精度（启动前选择）</label>
-            <select id="precisionMode">
-              <option value="auto">自动（原生 BF16，旧显卡回退 FP16）</option>
-              <option value="bfloat16">BF16（新显卡）</option>
-              <option value="float16">FP16（旧显卡/低显存）</option>
-              <option value="float32">FP32（兼容优先，显存最高）</option>
-            </select>
+                <label for="precisionMode">GPT 精度（启动前选择）</label>
+                <select id="precisionMode">
+                  <option value="auto">自动（原生 BF16，旧显卡回退 FP16）</option>
+                  <option value="bfloat16">BF16（新显卡）</option>
+                  <option value="float16">FP16（旧显卡/低显存）</option>
+                  <option value="float32">FP32（兼容优先，显存最高）</option>
+                </select>
 
-            <label for="referenceDevice">参考编码器设备</label>
-            <select id="referenceDevice">
-              <option value="auto">自动（低于 10GB 显存放到 CPU）</option>
-              <option value="same">与主模型相同（首次参考更快）</option>
-              <option value="cpu">CPU（节省约 2GB 常驻显存）</option>
-            </select>
+                <label for="referenceDevice">参考编码器设备</label>
+                <select id="referenceDevice">
+                  <option value="auto">自动（低于 10GB 显存放到 CPU）</option>
+                  <option value="same">与主模型相同（首次参考更快）</option>
+                  <option value="cpu">CPU（节省约 2GB 常驻显存）</option>
+                </select>
 
-            <label class="checkbox-row" for="reuseDefaultEmotion">
-              <input id="reuseDefaultEmotion" type="checkbox" />
-              快速默认情感（没有独立情感输入时复用音色条件，可能轻微改变听感）
-            </label>
-            <p class="hint">推荐 6–8GB 显卡：精度“自动/FP16” + 参考编码器“CPU”；所有选项都在点击启动后才加载模型。</p>
+                <label class="checkbox-row" for="reuseDefaultEmotion">
+                  <input id="reuseDefaultEmotion" type="checkbox" />
+                  快速默认情感（没有独立情感输入时复用音色条件，可能轻微改变听感）
+                </label>
+                <p class="hint">推荐 6–8GB 显卡：精度“自动/FP16” + 参考编码器“CPU”；所有选项都在点击启动后才加载模型。</p>
+              </div>
+            </details>
 
-            <section class="diagnostics-card" aria-labelledby="diagnosticsTitle">
-              <div class="diagnostics-heading">
-                <div>
+            <details class="diagnostics-card advanced-card" aria-labelledby="diagnosticsTitle">
+              <summary>
+                <span class="advanced-summary-copy">
                   <strong id="diagnosticsTitle">加速环境预检</strong>
-                  <p class="hint">只检查显卡、运行库和编译工具，不加载模型；“预计可用”不等于已经启动。</p>
-                </div>
+                  <span>查看显卡、运行库和编译工具诊断；不会加载模型。</span>
+                </span>
+              </summary>
+              <div class="advanced-card-body">
                 <div class="diagnostics-actions">
                   <button id="refreshDiagnosticsButton" class="ghost">重新检测</button>
                   <button id="exportDiagnosticsButton" class="secondary">导出诊断报告</button>
                 </div>
-              </div>
-              <div id="diagnosticsVersions" class="diagnostics-versions">正在读取内置运行库版本…</div>
-              <div id="diagnosticsGrid" class="diagnostics-grid" aria-live="polite">
-                <div class="diagnostic-item pending">正在检测；此过程不会加载 IndexTTS 模型。</div>
-              </div>
-              <p class="hint diagnostics-note">实际初始化失败会自动回退；启动后的真实生效模式请查看 WebUI“环境与可选加速”或启动日志。DeepSpeed 的 aio/cufile 可选扩展警告不代表语音推理失败。</p>
-            </section>
-
-            <section class="diagnostics-card benchmark-card" aria-labelledby="benchmarkTitle">
-              <div class="diagnostics-heading">
-                <div>
-                  <strong id="benchmarkTitle">真实加速基准与推荐</strong>
-                  <p class="hint">仅在你主动开始后加载模型；使用同一参考音频、文本与随机种子，逐个实测可用模式。</p>
+                <div id="diagnosticsVersions" class="diagnostics-versions">正在读取内置运行库版本…</div>
+                <div id="diagnosticsGrid" class="diagnostics-grid" aria-live="polite">
+                  <div class="diagnostic-item pending">正在检测；此过程不会加载 IndexTTS 模型。</div>
                 </div>
+                <p class="hint diagnostics-note">实际初始化失败会自动回退；启动后的真实生效模式请查看 WebUI“环境与可选加速”或启动日志。DeepSpeed 的 aio/cufile 可选扩展警告不代表语音推理失败。</p>
+              </div>
+            </details>
+
+            <details class="diagnostics-card advanced-card benchmark-card" aria-labelledby="benchmarkTitle">
+              <summary>
+                <span class="advanced-summary-copy">
+                  <strong id="benchmarkTitle">真实加速基准与推荐</strong>
+                  <span>主动运行后才加载模型并逐个实测可用模式。</span>
+                </span>
+              </summary>
+              <div class="advanced-card-body">
                 <div class="diagnostics-actions">
                   <button id="runBenchmarkButton" class="secondary">开始真实基准</button>
                   <button id="cancelBenchmarkButton" class="ghost" hidden>停止基准</button>
                   <button id="applyBenchmarkButton" class="ghost" disabled>应用推荐</button>
                 </div>
+                <p id="benchmarkSummary" class="hint benchmark-summary">尚未运行真实基准。</p>
+                <div id="benchmarkResults" class="benchmark-results" aria-live="polite"></div>
+                <p class="hint diagnostics-note">推荐会优先选择接近最快、依赖更少的模式；不会自动启动服务或覆盖模型文件。</p>
               </div>
-              <p id="benchmarkSummary" class="hint benchmark-summary">尚未运行真实基准。</p>
-              <div id="benchmarkResults" class="benchmark-results" aria-live="polite"></div>
-              <p class="hint diagnostics-note">推荐会优先选择接近最快、依赖更少的模式；不会自动启动服务或覆盖模型文件。</p>
-            </section>
+            </details>
 
-            <section class="diagnostics-card update-card" aria-labelledby="updateTitle">
-              <div class="diagnostics-heading">
-                <div>
+            <details class="diagnostics-card advanced-card update-card" aria-labelledby="updateTitle">
+              <summary>
+                <span class="advanced-summary-copy">
                   <strong id="updateTitle">桌面自动更新与上游动态</strong>
-                  <p class="hint">自动检查只读取版本清单；下载和安装均需手动确认，不会加载模型或更改加速模式。</p>
-                </div>
+                  <span>检查桌面、节点、上游代码和模型版本。</span>
+                </span>
+              </summary>
+              <div class="advanced-card-body">
                 <div class="diagnostics-actions">
                   <button id="checkUpdatesButton" class="secondary">检查更新</button>
                   <button id="openDesktopReleaseButton" class="ghost">桌面 Release</button>
                   <button id="openOfficialButton" class="ghost">官方仓库</button>
                   <button id="openNodeRepositoryButton" class="ghost">节点仓库</button>
                 </div>
+                <div class="update-preferences">
+                  <label class="toggle-row">
+                    <input id="autoCheckUpdates" type="checkbox" checked />
+                    <span>每天自动检查一次（仅提示）</span>
+                  </label>
+                  <label>
+                    更新通道
+                    <select id="updateChannel">
+                      <option value="stable">稳定版 stable</option>
+                      <option value="beta">测试版 beta</option>
+                    </select>
+                  </label>
+                </div>
+                <p id="updateSummary" class="hint update-summary">尚未检查。</p>
+                <div id="updateResults" class="update-results" aria-live="polite"></div>
+                <div id="updateProgressPanel" class="update-progress" hidden>
+                  <progress id="updateProgress" max="100" value="0"></progress>
+                  <span id="updateProgressText">尚未下载。</span>
+                </div>
+                <div class="diagnostics-actions update-install-actions">
+                  <button id="downloadUpdateButton" class="secondary" hidden>下载并校验更新</button>
+                  <button id="updateModelButton" class="secondary" hidden>下载并更新模型</button>
+                  <button id="cancelUpdateButton" class="ghost" hidden>取消下载</button>
+                  <button id="installUpdateButton" class="primary" hidden>退出并安装</button>
+                </div>
               </div>
-              <div class="update-preferences">
-                <label class="toggle-row">
-                  <input id="autoCheckUpdates" type="checkbox" checked />
-                  <span>每天自动检查一次（仅提示）</span>
-                </label>
-                <label>
-                  更新通道
-                  <select id="updateChannel">
-                    <option value="stable">稳定版 stable</option>
-                    <option value="beta">测试版 beta</option>
-                  </select>
-                </label>
-              </div>
-              <p id="updateSummary" class="hint update-summary">尚未检查。</p>
-              <div id="updateResults" class="update-results" aria-live="polite"></div>
-              <div id="updateProgressPanel" class="update-progress" hidden>
-                <progress id="updateProgress" max="100" value="0"></progress>
-                <span id="updateProgressText">尚未下载。</span>
-              </div>
-              <div class="diagnostics-actions update-install-actions">
-                <button id="downloadUpdateButton" class="secondary" hidden>下载并校验更新</button>
-                <button id="updateModelButton" class="secondary" hidden>下载并更新模型</button>
-                <button id="cancelUpdateButton" class="ghost" hidden>取消下载</button>
-                <button id="installUpdateButton" class="primary" hidden>退出并安装</button>
-              </div>
-            </section>
+            </details>
 
             <section id="modelDownloadPanel" class="model-download-card" aria-live="polite" hidden>
               <div class="model-download-heading">
@@ -197,7 +235,7 @@
 
       <footer>
         基于 Bilibili IndexTTS 2.5 · 非官方桌面整合版 · Python 与运行依赖已包含在应用中<br />
-        Desktop 0.22.2 · ComfyUI Node 0.21.4 · Core ee40fa7d · Model Bundle 1.0.0 / 14166a74<br />
+        Desktop 0.22.3 · ComfyUI Node 0.21.4 · Core ee40fa7d · Model Bundle 1.0.0 / 14166a74<br />
         启动器只检测模型，不会自动加载；请先选择精度、参考编码器与加速模式，再点击“启动 IndexTTS 2.5”
       </footer>
     </main>

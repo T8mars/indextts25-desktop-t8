@@ -48,6 +48,13 @@ if (
   !packagedMainSource.includes('ipcMain.handle("desktop:check-updates"') ||
   !packagedMainSource.includes('ipcMain.handle("desktop:download-update"') ||
   !packagedMainSource.includes('ipcMain.handle("desktop:install-update"') ||
+  !packagedMainSource.includes('ipcMain.handle("desktop:choose-output-directory"') ||
+  !packagedMainSource.includes('ipcMain.handle("desktop:choose-data-directory"') ||
+  !packagedMainSource.includes('ipcMain.handle("desktop:show-launcher"') ||
+  !packagedMainSource.includes('ipcMain.handle("desktop:open-output-directory"') ||
+  !packagedMainSource.includes('ipcMain.handle("desktop:open-data-directory"') ||
+  !packagedMainSource.includes('mainWindow.on("close"') ||
+  !packagedMainSource.includes("stoppingPythonProcess === processRef") ||
   !packagedMainSource.includes("checkForUpdates") ||
   !packagedMainSource.includes("markUpdateHealthyIfRequested") ||
   !packagedMainSource.includes("MODEL_DOWNLOAD_PROGRESS_PREFIX") ||
@@ -59,10 +66,17 @@ if (
   !packagedPreloadSource.includes("checkUpdates") ||
   !packagedPreloadSource.includes("downloadUpdate") ||
   !packagedPreloadSource.includes("installUpdate") ||
+  !packagedPreloadSource.includes("chooseOutputDirectory") ||
+  !packagedPreloadSource.includes("chooseDataDirectory") ||
+  !packagedPreloadSource.includes("showLauncher") ||
+  !packagedPreloadSource.includes("openOutputDirectory") ||
+  !packagedPreloadSource.includes("openDataDirectory") ||
   !packagedRendererSource.includes("renderAccelerationDiagnostics") ||
   !packagedRendererSource.includes("renderBenchmark") ||
   !packagedRendererSource.includes("renderUpdateReport") ||
   !packagedRendererSource.includes("renderModelDownload") ||
+  !packagedRendererSource.includes("chooseOutputButton.addEventListener") ||
+  !packagedRendererSource.includes("chooseDataButton.addEventListener") ||
   !packagedDiagnosticSource.includes("createDiagnosticReport") ||
   !packagedDiagnosticSource.includes("aio.lib/cufile.lib") ||
   !packagedHtmlSource.includes('id="runtimeProfile"') ||
@@ -77,6 +91,11 @@ if (
   !packagedHtmlSource.includes('id="installUpdateButton"') ||
   !packagedHtmlSource.includes('id="modelDownloadPanel"') ||
   !packagedHtmlSource.includes('id="modelDownloadProgress"') ||
+  !packagedHtmlSource.includes('id="outputPath"') ||
+  !packagedHtmlSource.includes('id="dataPath"') ||
+  !packagedHtmlSource.includes('id="logPath"') ||
+  (packagedHtmlSource.match(/<details\b[^>]*class="[^"]*\badvanced-card\b[^"]*"[^>]*>/g) || []).length !== 4 ||
+  /<details\b[^>]*class="[^"]*\badvanced-card\b[^"]*"[^>]*\sopen(?:\s|=|>)/.test(packagedHtmlSource) ||
   !packagedUpdateSource.includes("verifyManifestSignature") ||
   !packagedUpdateSource.includes("verifyPayloadFiles") ||
   !["low_vram", "balanced", "max_speed", "compatibility"].every((name) =>
@@ -229,8 +248,10 @@ for (const moduleName of ["desktop_presets.py", "desktop_voice_library.py", "des
 if (
   !desktopSource.includes("--data_dir") ||
   !desktopSource.includes("多音字怎么用") ||
-  !desktopSource.includes("多音字使用方法与发音设置（默认展开）") ||
-  !desktopSource.includes("open=True") ||
+  !desktopSource.includes("中文数字/日期归一化已就绪") ||
+  !desktopSource.includes("1939年") ||
+  !desktopSource.includes("发音与数字处理 · 数字归一化开启，发音词典按需使用") ||
+  !desktopSource.includes("open=False") ||
   !desktopSource.includes("完整参数预设（含参考音频）") ||
   !desktopSource.includes("段间静音（毫秒）") ||
   !desktopSource.includes("跨段语速审计与内部单段重做") ||
@@ -239,11 +260,18 @@ if (
   !desktopSource.includes("标点停顿预设") ||
   !desktopSource.includes("可选音频后处理") ||
   !desktopSource.includes("边生成边试听") ||
+  !desktopSource.includes("t8-action-dock") ||
+  !desktopSource.includes("停止语音任务") ||
+  !desktopSource.includes("停止多角色任务") ||
+  !desktopSource.includes("格式说明与真实示例 · 新手需要时展开") ||
+  !desktopSource.includes("返回启动配置（停止模型）") ||
+  !desktopSource.includes("window.desktopApi.showLauncher") ||
+  !desktopSource.includes("技术诊断 JSON（排错时展开或复制）") ||
   !desktopSource.includes("CFM 扩散步数") ||
   !desktopSource.includes("原生单次适配") ||
-  !desktopSource.includes("任务恢复与单句重试") ||
+  !desktopSource.includes("任务恢复、单句重试与工程管理 · 按需展开") ||
   !desktopSource.includes("ASR 自动校对当前结果") ||
-  !desktopSource.includes("ASR 自动校对与字幕自动回写") ||
+  !desktopSource.includes("ASR 校对与字幕回写 · 默认关闭") ||
   !desktopSource.includes("可编辑时间轴") ||
   !desktopSource.includes("t8-timeline-drag-payload") ||
   !desktopSource.includes("按住 Alt 可临时关闭吸附") ||
@@ -258,7 +286,7 @@ if (
   !desktopSource.includes("逐句情感") ||
   !desktopSource.includes("多角色 / 批量台词 / SRT") ||
   !desktopSource.includes("环境与可选加速") ||
-  !desktopSource.includes("参考音频质量检测与自动裁剪") ||
+  !desktopSource.includes("参考音频检测与裁剪 · 默认使用安全设置") ||
   !desktopSource.includes("追加候选数量") ||
   !desktopSource.includes("全部候选音频") ||
   !desktopSource.includes("模型与显存生命周期") ||
@@ -293,6 +321,8 @@ const check = spawnSync(pythonExe, [
     "from indextts.gpt.model_v2_5 import GPT2InferenceModel",
     "from indextts.gpt.transformers_generation_utils import GenerationMixin",
     "from indextts.utils.audio_io import uses_torchcodec_io",
+    "from indextts.utils.front import probe_text_normalization",
+    "from desktop_streaming_audio import BundledStreamingAudio",
     "from indextts.pronunciation import PronunciationEntry, process_pronunciation_text",
     "from desktop_generation_controls import DesktopGenerationPlan, DesktopSpeechChunk, allocate_native_chunk_durations, effective_segment_limit, split_speech_chunks",
     "from desktop_model_lifecycle import DesktopModelLifecycle",
@@ -304,7 +334,7 @@ const check = spawnSync(pythonExe, [
     "from context_emotion import suggest_context_emotions",
     "from dialogue_runtime import DialogueLine",
     "from runtime_metrics import finish_runtime_measurement, format_runtime_metrics, start_runtime_measurement",
-    "from runtime_acceleration import probe_acceleration",
+    "from runtime_acceleration import format_acceleration_summary, probe_acceleration, resolve_acceleration",
     "from runtime_benchmark import recommend_benchmark_mode",
     "from candidate_quality import combined_candidate_score",
     "result = process_pronunciation_text('银行的行长', 'ZH', [PronunciationEntry('银行', 'YIN2 HANG2', 'ZH'), PronunciationEntry('行长', 'HANG2 ZHANG3', 'ZH')], strict=True)",
@@ -328,11 +358,19 @@ const check = spawnSync(pythonExe, [
     "performance = finish_runtime_measurement(measurement, 2.0)",
     "assert 'RTF' in format_runtime_metrics(performance)",
     "preflight = probe_acceleration('cpu')",
+    "fallback_summary = format_acceleration_summary(resolve_acceleration('auto_safe', 'cpu', preflight))",
+    "assert '这不是语音生成故障' in fallback_summary",
     "assert preflight['versions']['torch'] == str(torch.__version__)",
     "assert set(preflight['versions']) == {'torch', 'cuda_runtime', 'torchaudio', 'torchcodec', 'deepspeed', 'flash_attn', 'triton', 'ninja'}",
     "assert preflight['runtime_checks']['torchcodec']['ready'] is True",
+    "normalization = probe_text_normalization()",
+    "assert normalization['verified'], normalization",
+    "assert normalization['example_output'] == '一九三九年'",
+    "streaming_audio = BundledStreamingAudio(streaming=True, type='numpy', format='wav')",
+    "assert type(streaming_audio) is gradio.Audio",
+    "assert streaming_audio.get_block_name() == 'audio'",
     "assert torch.__version__ == '2.8.0+cu128'",
-    "print(torch.__version__, gradio.__version__, transformers.__version__, flash_attn.__version__, triton.__version__, deepspeed.__version__, 'pronunciation=OK', 'acceleration=OK', 'generation_controls=OK', 'tasks=OK', 'asr=OK', 'timeline=OK')"
+    "print(torch.__version__, gradio.__version__, transformers.__version__, flash_attn.__version__, triton.__version__, deepspeed.__version__, 'pronunciation=OK', 'text_normalization=OK', 'acceleration=OK', 'generation_controls=OK', 'tasks=OK', 'asr=OK', 'timeline=OK')"
   ].join("; ")
 ], {
   cwd: packagedRoot,
@@ -385,11 +423,13 @@ try {
   const unicodeCheck = spawnSync(pythonExe, [
     "-c",
     [
-      "from indextts.utils.front import TextNormalizer",
+      "from indextts.utils.front import TextNormalizer, probe_text_normalization",
       "normalizer = TextNormalizer()",
       "normalizer.load()",
       "assert normalizer.normalize('123 dollars') == 'one hundred and twenty three dollars'",
-      "print('Unicode install path normalization OK')"
+      "assert normalizer.normalize('1939年') == '一九三九年'",
+      "assert probe_text_normalization()['verified']",
+      "print('Unicode install path text normalization OK')"
     ].join("; ")
   ], {
     cwd: packagedRoot,

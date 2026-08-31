@@ -131,6 +131,19 @@ input, select {
 }
 
 .model-form > select { width: 100%; margin-bottom: 6px; }
+.storage-card {
+  margin: 18px 0 16px;
+  padding: 14px;
+  border: 1px solid rgba(82, 155, 255, 0.25);
+  border-radius: 12px;
+  background: rgba(82, 155, 255, 0.05);
+}
+.storage-heading { margin-bottom: 12px; }
+.storage-heading .hint { margin-bottom: 0; }
+.storage-card label { margin-top: 10px; }
+.storage-row button { flex: 0 0 auto; white-space: nowrap; }
+.storage-note { margin: 10px 0 0; }
+.storage-note code { color: #aebeff; overflow-wrap: anywhere; }
 .runtime-profile-card {
   margin: 18px 0 16px;
   padding: 14px;
@@ -170,6 +183,49 @@ input, select {
   border-radius: 12px;
   background: rgba(174, 190, 255, 0.045);
 }
+.advanced-card > summary {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  list-style: none;
+  cursor: pointer;
+  user-select: none;
+}
+.advanced-card > summary::-webkit-details-marker { display: none; }
+.advanced-card > summary::after {
+  content: "展开";
+  flex: 0 0 auto;
+  padding: 5px 9px;
+  border: 1px solid rgba(174, 190, 255, 0.18);
+  border-radius: 999px;
+  color: #aebeff;
+  font-size: 11px;
+  font-weight: 700;
+}
+.advanced-card[open] > summary::after { content: "收起"; }
+.advanced-card > summary:hover::after {
+  border-color: rgba(251, 114, 153, 0.42);
+  color: #ffd0df;
+}
+.advanced-summary-copy {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+}
+.advanced-summary-copy strong { color: #e4e8f2; font-size: 14px; }
+.advanced-summary-copy span { color: var(--muted); font-size: 12px; line-height: 1.5; }
+.advanced-card-body {
+  margin-top: 14px;
+  padding-top: 14px;
+  border-top: 1px solid rgba(255, 255, 255, 0.07);
+}
+.advanced-card-body > .diagnostics-actions:first-child {
+  justify-content: flex-end;
+  margin-bottom: 10px;
+}
+.manual-runtime-card select { width: 100%; margin-bottom: 6px; }
 .diagnostics-heading {
   display: flex;
   align-items: flex-start;
