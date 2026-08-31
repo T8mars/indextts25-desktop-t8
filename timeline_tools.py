@@ -2,12 +2,19 @@
 
 from __future__ import annotations
 
+import csv
 import html
+import io
 import json
 from dataclasses import replace
 from typing import Any, Sequence
 
-from dialogue_runtime import DialogueLine, format_emotion_override, parse_emotion_override
+from dialogue_runtime import (
+    DialogueLine,
+    format_batch_script,
+    format_emotion_override,
+    parse_emotion_override,
+)
 
 
 TIMELINE_HEADERS = [
@@ -20,6 +27,36 @@ TIMELINE_HEADERS = [
     "台词",
     "逐句情感（留空继承角色）",
 ]
+TIMELINE_DOCUMENT_SCHEMA = "t8star-aix-indextts25-editable-timeline"
+TIMELINE_DOCUMENT_VERSION = 1
+TIMELINE_DOCUMENT_MAX_BYTES = 4 * 1024 * 1024
+TIMELINE_DOCUMENT_MAX_ROWS = 5000
+TIMELINE_VECTOR_ORDER = ["喜", "怒", "哀", "惧", "厌恶", "低落", "惊喜", "平静"]
+TIMELINE_CSV_FIELDS = [
+    "script_type",
+    "index",
+    "role",
+    "language",
+    "start_ms",
+    "end_ms",
+    "duration_factor",
+    "text",
+    "emotion",
+]
+_TIMELINE_FIELD_ALIASES = {
+    "脚本格式": "script_type",
+    "序号": "index",
+    "角色": "role",
+    "语言": "language",
+    "开始(ms)": "start_ms",
+    "开始时间": "start_ms",
+    "结束(ms)": "end_ms",
+    "结束时间": "end_ms",
+    "时长系数": "duration_factor",
+    "台词": "text",
+    "逐句情感": "emotion",
+    "逐句情感（留空继承角色）": "emotion",
+}
 
 
 def timeline_rows(lines: Sequence[DialogueLine]) -> list[list[Any]]:
@@ -330,6 +367,203 @@ def rewrite_srt(
     }
 
 
+def _timeline_document_row(line: DialogueLine, script_type: str) -> dict[str, Any]:
+    return {
+        "script_type": script_type,
+        "index": line.index,
+        "role": line.role,
+        "language": line.language,
+        "start_ms": "" if line.start_ms is None else line.start_ms,
+        "end_ms": "" if line.end_ms is None else line.end_ms,
+        "duration_factor": line.duration_factor,
+        "text": line.text,
+        "emotion": format_emotion_override(line),
+    }
+
+
+def editable_timeline_document(
+    lines: Sequence[DialogueLine],
+    script_type: str,
+    file_format: str = "json",
+) -> str:
+    """Serialize the current editable table without audio or model state."""
+
+    normalized_type = str(script_type or "batch").strip().lower()
+    if normalized_type not in {"batch", "srt"}:
+        raise ValueError("时间轴脚本格式只能是 batch 或 srt。")
+    normalized_format = str(file_format or "json").strip().lower()
+    rows = [_timeline_document_row(line, normalized_type) for line in lines]
+    if normalized_format == "json":
+        return json.dumps(
+            {
+                "schema": TIMELINE_DOCUMENT_SCHEMA,
+                "schema_version": TIMELINE_DOCUMENT_VERSION,
+                "script_type": normalized_type,
+                "vector_order": TIMELINE_VECTOR_ORDER,
+                "rows": rows,
+            },
+            ensure_ascii=False,
+            indent=2,
+        )
+    if normalized_format != "csv":
+        raise ValueError("时间轴导出格式只能是 JSON 或 CSV。")
+    buffer = io.StringIO(newline="")
+    writer = csv.DictWriter(buffer, fieldnames=TIMELINE_CSV_FIELDS, lineterminator="\n")
+    writer.writeheader()
+    writer.writerows(rows)
+    return buffer.getvalue()
+
+
+def _normalize_timeline_mapping(value: dict[str, Any]) -> dict[str, Any]:
+    normalized: dict[str, Any] = {}
+    for key, item in value.items():
+        name = str(key or "").lstrip("\ufeff").strip()
+        normalized[_TIMELINE_FIELD_ALIASES.get(name, name)] = item
+    return normalized
+
+
+def _imported_timeline_line(
+    value: dict[str, Any],
+    index: int,
+    default_role: str,
+    default_language: str,
+) -> DialogueLine:
+    row = _normalize_timeline_mapping(value)
+    role = str(row.get("role") or default_role).strip()
+    text = str(row.get("text") or "").strip()
+    language = str(row.get("language") or default_language).strip().upper()
+    if not role or not text:
+        raise ValueError(f"时间轴第 {index} 行角色和台词不能为空。")
+    if language not in {"ZH", "EN", "JA", "ES", "AR"}:
+        raise ValueError(f"时间轴第 {index} 行语言无效：{language}")
+    start_ms = _optional_ms(row.get("start_ms"), f"时间轴第 {index} 行开始时间")
+    end_ms = _optional_ms(row.get("end_ms"), f"时间轴第 {index} 行结束时间")
+    if (start_ms is None) != (end_ms is None):
+        raise ValueError(f"时间轴第 {index} 行开始和结束时间必须同时填写或同时留空。")
+    if start_ms is not None and end_ms <= start_ms:
+        raise ValueError(f"时间轴第 {index} 行结束时间必须晚于开始时间。")
+    try:
+        duration_factor = float(row.get("duration_factor", 1.0) or 1.0)
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise ValueError(f"时间轴第 {index} 行时长系数无效。") from exc
+    if not 0.5 <= duration_factor <= 2.0:
+        raise ValueError(f"时间轴第 {index} 行时长系数必须在 0.5–2.0。")
+    emotion_value = row.get("emotion")
+    if emotion_value is None and any(
+        key in row
+        for key in (
+            "emotion_mode",
+            "emotion_text",
+            "emotion_vector",
+            "emotion_strength",
+            "emotion_use_random",
+        )
+    ):
+        emotion_value = row
+    emotion = parse_emotion_override(emotion_value, index=index)
+    return DialogueLine(
+        index=index,
+        role=role,
+        text=text,
+        language=language,
+        start_ms=start_ms,
+        end_ms=end_ms,
+        duration_factor=duration_factor,
+        emotion_mode=emotion[0],
+        emotion_text=emotion[1],
+        emotion_vector=emotion[2],
+        emotion_strength=emotion[3],
+        emotion_use_random=emotion[4],
+    )
+
+
+def parse_editable_timeline_document(
+    content: str,
+    suffix: str,
+    default_role: str = "旁白",
+    default_language: str = "ZH",
+) -> tuple[str, list[DialogueLine]]:
+    """Parse a standalone JSON/CSV timeline with strict size and row limits."""
+
+    raw = str(content or "").lstrip("\ufeff")
+    if len(raw.encode("utf-8")) > TIMELINE_DOCUMENT_MAX_BYTES:
+        raise ValueError("可编辑时间轴文件不能超过 4 MiB。")
+    if not raw.strip():
+        raise ValueError("可编辑时间轴文件不能为空。")
+    extension = str(suffix or "").strip().lower()
+    script_type = "batch"
+    rows: Any
+    if extension == ".csv":
+        reader = csv.DictReader(io.StringIO(raw))
+        if not reader.fieldnames:
+            raise ValueError("CSV 时间轴缺少表头。")
+        rows = [_normalize_timeline_mapping(dict(row)) for row in reader]
+        if rows:
+            script_type = str(rows[0].get("script_type") or "batch").strip().lower()
+    elif extension == ".json" or raw.lstrip().startswith(("{", "[")):
+        try:
+            payload = json.loads(raw)
+        except json.JSONDecodeError as exc:
+            raise ValueError(f"JSON 时间轴格式错误：{exc.msg}（第 {exc.lineno} 行）") from exc
+        if isinstance(payload, list):
+            rows = payload
+        elif isinstance(payload, dict):
+            script_type = str(payload.get("script_type") or "batch").strip().lower()
+            rows = payload.get("rows", payload.get("lines"))
+        else:
+            rows = None
+    else:
+        raise ValueError("只支持 .json 或 .csv 可编辑时间轴文件。")
+    if script_type not in {"batch", "srt"}:
+        raise ValueError("时间轴脚本格式只能是 batch 或 srt。")
+    if not isinstance(rows, list) or not rows:
+        raise ValueError("可编辑时间轴中没有台词行。")
+    if len(rows) > TIMELINE_DOCUMENT_MAX_ROWS:
+        raise ValueError(f"可编辑时间轴最多支持 {TIMELINE_DOCUMENT_MAX_ROWS} 行。")
+    mapped_rows = []
+    for position, row in enumerate(rows, 1):
+        if isinstance(row, dict):
+            mapped_rows.append(row)
+        elif isinstance(row, (list, tuple)):
+            if len(row) < 7:
+                raise ValueError(f"时间轴第 {position} 行缺少列。")
+            mapped_rows.append(
+                dict(
+                    zip(
+                        ("index", "role", "language", "start_ms", "end_ms", "duration_factor", "text", "emotion"),
+                        row,
+                    )
+                )
+            )
+        else:
+            raise ValueError(f"时间轴第 {position} 行必须是对象或表格行。")
+    lines = [
+        _imported_timeline_line(row, position, default_role, default_language)
+        for position, row in enumerate(mapped_rows, 1)
+    ]
+    if script_type == "srt" and not all(
+        line.start_ms is not None and line.end_ms is not None for line in lines
+    ):
+        script_type = "batch"
+    return script_type, lines
+
+
+def editable_timeline_script(lines: Sequence[DialogueLine], script_type: str) -> tuple[str, str]:
+    """Create the backing editor script while keeping imported table edits intact."""
+
+    if str(script_type).lower() == "srt" and all(
+        line.start_ms is not None and line.end_ms is not None for line in lines
+    ):
+        content, _report = rewrite_srt(
+            lines,
+            timing_mode="original",
+            text_mode="original",
+            include_role=True,
+        )
+        return "srt", content
+    return "batch", format_batch_script(lines)
+
+
 def render_timeline_html(
     lines: Sequence[DialogueLine],
     line_reports: Sequence[dict] | None = None,
@@ -416,10 +650,16 @@ def timeline_json(lines: Sequence[DialogueLine], line_reports: Sequence[dict] | 
 
 __all__ = [
     "TIMELINE_HEADERS",
+    "TIMELINE_DOCUMENT_MAX_BYTES",
+    "TIMELINE_DOCUMENT_SCHEMA",
+    "TIMELINE_VECTOR_ORDER",
     "apply_timeline_edits",
     "apply_timeline_drag_payload",
+    "editable_timeline_document",
+    "editable_timeline_script",
     "format_srt_timestamp",
     "move_timeline_row",
+    "parse_editable_timeline_document",
     "render_timeline_html",
     "rewrite_srt",
     "timeline_json",

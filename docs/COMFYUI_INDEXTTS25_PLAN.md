@@ -1,6 +1,6 @@
 # T8star-Aix · ComfyUI IndexTTS 2.5 节点规划
 
-> 状态：历史架构规划 / 已实现并持续维护（当前 Node 0.22.0、Desktop 0.23.0）
+> 状态：历史架构规划 / 已实现并持续维护（当前 Node 0.23.0、Desktop 0.24.0）
 > 目标：把当前正式版 IndexTTS 2.5 能力做成稳定、易装、可复现、与 ComfyUI 音频生态互通的自定义节点包。  
 > 当前代码基线：`index-tts/index-tts@ee40fa7d6c6b8a2c7f06105f9f1e65775b74868c`  
 > 模型基线：`IndexTeam/IndexTTS-2.5@ba2480d9f7f629eb18f6acaebb357679d9ba88a4`

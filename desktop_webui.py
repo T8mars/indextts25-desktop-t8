@@ -67,10 +67,14 @@ from dialogue_runtime import (
 )
 from speech_review import ASR_BACKENDS, ASR_MODELS, asr_available, review_transcript, transcribe_audio_file
 from timeline_tools import (
+    TIMELINE_DOCUMENT_MAX_BYTES,
     TIMELINE_HEADERS,
     apply_timeline_drag_payload,
     apply_timeline_edits,
+    editable_timeline_document,
+    editable_timeline_script,
     move_timeline_row,
+    parse_editable_timeline_document,
     render_timeline_html,
     rewrite_srt,
     timeline_rows,
@@ -123,7 +127,7 @@ from segment_rate_workspace import (
 
 
 APP_TITLE = "T8star-Aix · IndexTTS 2.5"
-DESKTOP_VERSION = "0.23.0"
+DESKTOP_VERSION = "0.24.0"
 MODEL_MANIFEST = json.loads(
     (Path(__file__).resolve().parent / "desktop_model_manifest.json").read_text(encoding="utf-8")
 )
@@ -2984,6 +2988,68 @@ def build_app(
             status += " 所有角色均已映射。"
         return rows, render_timeline_html(lines), status
 
+    def export_editable_timeline_event(
+        script_type,
+        script,
+        default_role,
+        default_language,
+        edited_rows,
+        file_format,
+    ):
+        try:
+            parsed = parse_dialogue(script_type, script, default_role, default_language)
+            lines = apply_timeline_edits(parsed, edited_rows)
+            normalized_format = str(file_format or "json").strip().lower()
+            content = editable_timeline_document(lines, script_type, normalized_format)
+        except ValueError as exc:
+            raise gr.Error(str(exc)) from exc
+        export_dir = data_dir / "exports"
+        export_dir.mkdir(parents=True, exist_ok=True)
+        target = export_dir / (
+            f"T8star-Aix-editable-timeline-{time.strftime('%Y%m%d-%H%M%S')}"
+            f"-{uuid.uuid4().hex[:6]}."
+            f"{normalized_format}"
+        )
+        encoding = "utf-8-sig" if normalized_format == "csv" else "utf-8"
+        try:
+            target.write_text(content, encoding=encoding)
+        except OSError as exc:
+            raise gr.Error(f"可编辑时间轴写入失败：{exc}") from exc
+        return str(target), f"已导出 {len(lines)} 条可编辑时间轴：{target.name}"
+
+    def import_editable_timeline_event(path, default_role, default_language):
+        if not path:
+            raise gr.Error("请先选择 .json 或 .csv 可编辑时间轴文件。")
+        source = Path(path)
+        if source.suffix.lower() not in {".json", ".csv"}:
+            raise gr.Error("只支持 .json 或 .csv 可编辑时间轴文件。")
+        try:
+            if source.stat().st_size > TIMELINE_DOCUMENT_MAX_BYTES:
+                raise gr.Error("可编辑时间轴文件不能超过 4 MiB。")
+            content = source.read_text(encoding="utf-8-sig")
+        except UnicodeDecodeError:
+            content = source.read_text(encoding="gb18030")
+        except OSError as exc:
+            raise gr.Error(f"可编辑时间轴读取失败：{exc}") from exc
+        try:
+            script_type, lines = parse_editable_timeline_document(
+                content,
+                source.suffix,
+                default_role,
+                default_language,
+            )
+            script_type, script = editable_timeline_script(lines, script_type)
+        except ValueError as exc:
+            raise gr.Error(str(exc)) from exc
+        return (
+            script_type,
+            script,
+            timeline_rows(lines),
+            render_timeline_html(lines),
+            f"已导入 {len(lines)} 条可编辑时间轴；表格内容会用于下一次生成。",
+            1,
+        )
+
     def refresh_timeline_event(
         script_type,
         script,
@@ -5704,6 +5770,11 @@ def build_app(
                     scale=0,
                 )
             dialogue_status = gr.Markdown("请先在“角色音色库”保存脚本中使用的角色。")
+            gr.Markdown(
+                "**逐句情感速写：** 留空=继承角色；`text:生气、急促;strength=0.8`；"
+                "`vector:0,0.8,0,0,0,0,0,0;strength=0.85`。向量顺序："
+                "喜、怒、哀、惧、厌恶、低落、惊喜、平静。"
+            )
             dialogue_preview = gr.Dataframe(
                 headers=TIMELINE_HEADERS,
                 # Time cells are text on purpose: Gradio numeric cells coerce
@@ -5717,6 +5788,38 @@ def build_app(
                 label="可编辑时间轴（表格与下方可拖拽轨道双向同步；最后一列可逐句改情感）",
                 elem_classes=["t8-dialogue-preview"],
             )
+            with gr.Accordion("逐句情感速查 + 可编辑时间轴导入 / 导出", open=False):
+                gr.Markdown(
+                    "每行最后一列支持：`text:自然语言描述`、"
+                    "`vector:喜,怒,哀,惧,厌恶,低落,惊喜,平静`、`speaker`；"
+                    "末尾可加 `;strength=0~1`，向量还可加 `;random=true`。留空继承角色。\n\n"
+                    "八维含义：①喜=开心/愉悦；②怒=生气/愤怒；③哀=悲伤/难过；"
+                    "④惧=害怕/紧张；⑤厌恶=反感/排斥；⑥低落=消沉/沮丧；"
+                    "⑦惊喜=惊讶/意外；⑧平静=中性/从容。每项 0–1，合计超过 0.8 会等比缩放。\n\n"
+                    "导出的 JSON/CSV 只保存当前表格（角色、语言、时间、时长、台词、逐句情感），"
+                    "适合备份、表格编辑和跨工程复用；不会携带音频或模型。"
+                )
+                with gr.Row():
+                    editable_timeline_format = gr.Dropdown(
+                        choices=[("JSON（保真，推荐）", "json"), ("CSV（表格编辑）", "csv")],
+                        value="json",
+                        label="导出格式",
+                    )
+                    export_editable_timeline_button = gr.Button(
+                        "导出当前可编辑时间轴", variant="secondary"
+                    )
+                    editable_timeline_download = gr.File(
+                        label="时间轴文件下载", interactive=False
+                    )
+                with gr.Row():
+                    editable_timeline_import = gr.File(
+                        label="导入可编辑时间轴 JSON / CSV",
+                        file_types=[".json", ".csv"],
+                        type="filepath",
+                    )
+                    import_editable_timeline_button = gr.Button(
+                        "导入并替换当前时间轴", variant="primary"
+                    )
             with gr.Accordion("上下文情感建议 · 默认关闭，确认后才生成", open=False):
                 gr.Markdown(
                     "使用本地 QwenEmotion 读取目标台词及前后文，为每句建议八维情感向量和强度。"
@@ -6472,6 +6575,36 @@ def build_app(
             preview_dialogue_event,
             inputs=[dialogue_type, dialogue_script, dialogue_default_role, dialogue_default_language],
             outputs=[dialogue_preview, dialogue_timeline_visual, dialogue_status],
+            queue=False,
+        )
+        export_editable_timeline_button.click(
+            export_editable_timeline_event,
+            inputs=[
+                dialogue_type,
+                dialogue_script,
+                dialogue_default_role,
+                dialogue_default_language,
+                dialogue_preview,
+                editable_timeline_format,
+            ],
+            outputs=[editable_timeline_download, dialogue_status],
+            queue=False,
+        )
+        import_editable_timeline_button.click(
+            import_editable_timeline_event,
+            inputs=[
+                editable_timeline_import,
+                dialogue_default_role,
+                dialogue_default_language,
+            ],
+            outputs=[
+                dialogue_type,
+                dialogue_script,
+                dialogue_preview,
+                dialogue_timeline_visual,
+                dialogue_status,
+                retry_dialogue_line_number,
+            ],
             queue=False,
         )
         refresh_timeline_button.click(

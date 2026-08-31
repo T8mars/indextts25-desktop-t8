@@ -10,6 +10,7 @@ import torch
 import torchaudio
 
 import desktop_webui
+from dialogue_runtime import parse_emotion_override
 from desktop_tasks import create_task, update_task_line
 from desktop_voice_library import VoiceLibrary, VoiceProfile
 from desktop_webui import (
@@ -243,6 +244,9 @@ def test_desktop_builds_complete_pronunciation_workspace(tmp_path, monkeypatch):
     assert (
         "可编辑时间轴（表格与下方可拖拽轨道双向同步；最后一列可逐句改情感）" in labels
     )
+    assert "导出格式" in labels
+    assert "时间轴文件下载" in labels
+    assert "导入可编辑时间轴 JSON / CSV" in labels
     assert "参考缓存条目、容量与命中统计" in labels
     assert "__t8TimelineEditorInstalled" in config_text
     assert "t8-timeline-drag-payload" in config_text
@@ -558,10 +562,10 @@ def test_desktop_context_emotion_suggestions_fill_timeline_without_synthesis(tmp
     )
 
     assert len(rows) == 2
-    first_override = json.loads(rows[0][7])
-    assert first_override["mode"] == "vector"
-    assert first_override["vector"][1] == pytest.approx(0.6)
-    assert first_override["vector"][6] == pytest.approx(0.2)
+    first_override = parse_emotion_override(rows[0][7])
+    assert first_override[0] == "vector"
+    assert first_override[2][1] == pytest.approx(0.6)
+    assert first_override[2][6] == pytest.approx(0.2)
     assert "尚未生成音频" in status
     assert "总时长" in timeline_html
     report = json.loads(report_json)
@@ -1079,6 +1083,48 @@ def test_edited_timeline_row_can_be_regenerated_alone_and_merged(tmp_path):
         if getattr(block.fn, "__name__", "") == "refresh_timeline_event"
     ]
     assert len(refresh_bindings) == 2
+
+
+def test_editable_timeline_ui_exports_and_imports_without_full_project(tmp_path):
+    output_dir = tmp_path / "outputs"
+    data_dir = tmp_path / "user-data"
+    output_dir.mkdir()
+    data_dir.mkdir()
+    demo = build_app(_FakeTTS(), output_dir, data_dir, verbose=False)
+    preview = next(
+        block.fn
+        for block in demo.fns.values()
+        if getattr(block.fn, "__name__", "") == "preview_dialogue_event"
+    )
+    export_timeline = next(
+        block.fn
+        for block in demo.fns.values()
+        if getattr(block.fn, "__name__", "") == "export_editable_timeline_event"
+    )
+    import_timeline = next(
+        block.fn
+        for block in demo.fns.values()
+        if getattr(block.fn, "__name__", "") == "import_editable_timeline_event"
+    )
+    script = (
+        "旁白|第一句。|ZH|1.0|text:平静;strength=0.75\n"
+        "角色A|第二句。|ZH|1.0|vector:0,0.8,0,0,0,0,0,0"
+    )
+    rows, _visual, _status = preview("batch", script, "旁白", "ZH")
+    rows[0][3:5] = [100, 900]
+
+    exported, status = export_timeline("batch", script, "旁白", "ZH", rows, "json")
+    assert Path(exported).is_file()
+    assert "2 条" in status
+    imported_type, imported_script, imported_rows, visual, status, selected = import_timeline(
+        exported, "旁白", "ZH"
+    )
+    assert imported_type == "batch"
+    assert "strength=0.75" in imported_script
+    assert imported_rows[0][3:5] == [100, 900]
+    assert "第一句" in visual
+    assert "用于下一次生成" in status
+    assert selected == 1
 
 
 def test_dropdown_dictionary_editor_adds_updates_and_deletes_entries():

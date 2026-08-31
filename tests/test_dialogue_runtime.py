@@ -6,6 +6,7 @@ import torch
 from dialogue_runtime import (
     compose_timeline,
     fit_duration_factor,
+    format_batch_script,
     missing_roles,
     parse_batch_script,
     parse_srt,
@@ -74,6 +75,18 @@ def test_same_role_supports_per_line_text_and_vector_emotions():
     )[0]
     assert json_line.emotion_text == "悲伤"
     assert json_line.emotion_strength == pytest.approx(0.65)
+
+
+def test_human_emotion_options_and_batch_escaping_round_trip():
+    lines = parse_batch_script(
+        "旁白|台词含\\|和换行\\n下一行|ZH|1.0|text:平静；坚定;强度=0.75\n"
+        "旁白|惊讶|ZH|1.0|vector:0,0,0,0,0,0,0.8,0;strength=0.85;random=true"
+    )
+    assert lines[0].text == "台词含|和换行\n下一行"
+    assert lines[0].emotion_text == "平静；坚定"
+    assert lines[0].emotion_strength == pytest.approx(0.75)
+    assert lines[1].emotion_use_random is True
+    assert parse_batch_script(format_batch_script(lines)) == lines
 
 
 def test_srt_supports_per_line_emotion_tag():

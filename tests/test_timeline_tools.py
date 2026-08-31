@@ -6,7 +6,10 @@ from dialogue_runtime import DialogueLine
 from timeline_tools import (
     apply_timeline_drag_payload,
     apply_timeline_edits,
+    editable_timeline_document,
+    editable_timeline_script,
     move_timeline_row,
+    parse_editable_timeline_document,
     render_timeline_html,
     rewrite_srt,
     timeline_rows,
@@ -168,3 +171,57 @@ def test_drag_payload_updates_only_selected_line_and_validates_bounds():
         apply_timeline_drag_payload(
             _lines(), {"index": 1, "start_ms": 1000, "end_ms": 900, "mode": "resize_end"}
         )
+
+
+@pytest.mark.parametrize("file_format", ["json", "csv"])
+def test_editable_timeline_document_round_trip(file_format):
+    source = [
+        DialogueLine(
+            1,
+            "旁白",
+            "第一句|包含分隔符\n第二行",
+            "ZH",
+            100,
+            900,
+            1.1,
+            emotion_mode="text",
+            emotion_text="平静、坚定",
+            emotion_strength=0.75,
+        ),
+        DialogueLine(
+            2,
+            "A",
+            "surprised",
+            "EN",
+            1000,
+            1800,
+            0.9,
+            emotion_mode="vector",
+            emotion_vector=(0, 0, 0, 0, 0, 0, 0.8, 0),
+            emotion_strength=0.85,
+            emotion_use_random=True,
+        ),
+    ]
+    content = editable_timeline_document(source, "srt", file_format)
+    script_type, restored = parse_editable_timeline_document(
+        content, f".{file_format}", "旁白", "ZH"
+    )
+    assert script_type == "srt"
+    assert restored == source
+    assert "喜" in content if file_format == "json" else "emotion" in content
+
+    restored_type, script = editable_timeline_script(restored, script_type)
+    assert restored_type == "srt"
+    assert "emotion=text:平静、坚定;strength=0.75" in script
+
+
+def test_editable_timeline_import_accepts_legacy_lines_and_rejects_bad_timing():
+    legacy = '{"lines":[{"role":"旁白","text":"旧工程","language":"ZH","duration_factor":1.0}]}'
+    script_type, lines = parse_editable_timeline_document(legacy, ".json")
+    assert script_type == "batch"
+    assert lines[0].text == "旧工程"
+    assert editable_timeline_script(lines, script_type)[1].startswith("旁白|旧工程|ZH|1|")
+
+    bad = "role,language,start_ms,end_ms,duration_factor,text,emotion\n旁白,ZH,0,0,1,错误,"
+    with pytest.raises(ValueError, match="结束时间"):
+        parse_editable_timeline_document(bad, ".csv")

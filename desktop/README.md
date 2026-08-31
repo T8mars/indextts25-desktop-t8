@@ -51,7 +51,7 @@ Windows Electron desktop integration for IndexTTS 2.5. The packaged application 
 - direct WebUI actions for returning to setup, opening outputs, opening user data, and opening the exact log directory
 
 The large model files are intentionally external. On first launch, select a complete IndexTTS 2.5 model directory.
-Version 0.23.0 is paired with ComfyUI Node 0.22.0 and model bundle `1.0.0` at revision `14166a74`. It adds a restart-safe FIFO queue, long-text preflight, reference-audio quality guidance, persisted model-memory policies, collapsed A/B candidate review, and selected-line up/down reordering. Fixed-bottom controls now expose live progress, and repeat dialogue generation preserves untimed rows instead of turning them into authored `0/0` slots. Desktop updates are split into signed app/runtime layers with resume, full verification, health checks, and rollback; models remain independent on Hugging Face. Advanced and engineering workspaces stay collapsed by default. Optional acceleration failures still reload the normal model and complete the task. No benchmark, model load, model download, update download, install, or acceleration mode starts automatically.
+Version 0.24.0 is paired with ComfyUI Node 0.23.0 and model bundle `1.0.0` at revision `14166a74`. It adds standalone JSON/CSV editable-timeline transfer, an in-place eight-vector emotion guide, and a compact one-line-per-sentence emotion syntax shared with the node while preserving legacy JSON. Fixed-bottom controls expose live progress, and repeat dialogue generation preserves untimed rows instead of turning them into authored `0/0` slots. Desktop updates remain split into signed app/runtime layers with resume, full verification, health checks, and rollback; models remain independent on Hugging Face. Advanced and engineering workspaces stay collapsed by default. Optional acceleration failures still reload the normal model and complete the task. No benchmark, model load, model download, update download, install, or acceleration mode starts automatically.
 The launcher validates official model file sizes, while the downloader performs full SHA-256 verification.
 The output directory and user-data directory can be moved independently from the launcher. Voice-library entries,
 presets, dialogue tasks, ASR caches, benchmarks, and logs follow the configured user-data directory; generated WAVs
@@ -109,7 +109,8 @@ can independently use speaker-following, emotion-reference audio, an eight-dimen
 text. Existing roles can be loaded back for auditioning, editing, overwriting, or renaming without changing their library ID. The
 `多角色 / 批量台词 / SRT` tab accepts `角色|台词|语言|时长系数|逐句情感`, JSON arrays, or SRT with `[角色] 台词`
 and `角色：台词` markers. The optional fifth column supports `text:生气、激动` or
-`vector:喜,怒,哀,惧,厌恶,低落,惊喜,平静`; an empty value inherits the saved role emotion. SRT can use
+`vector:喜,怒,哀,惧,厌恶,低落,惊喜,平静`; append `;strength=0.75` and, for vector sampling,
+`;random=true` when needed. An empty value inherits the saved role emotion. SRT can use
 `[角色|emotion=text:平静、从容] 台词`. This lets consecutive lines keep one role and one cloned voice while changing
 emotion independently. It exports a combined WAV plus a ZIP containing per-line WAV files and `report.json`.
 The UI lists all five language codes and makes clear that the supported 0.5–2.0 duration factor is a unitless
@@ -140,6 +141,9 @@ dragging to bypass snapping. A drag immediately updates the table and selects th
 or emotion can be changed and only that line regenerated and merged. The edited timeline can also be re-mixed without
 running IndexTTS again. Selecting a table row also enables one-click up/down ordering; content and emotion move as a
 unit while source SRT time slots stay in chronological positions.
+The compact help beside the table defines all eight vector positions. A collapsed transfer panel exports the current
+editable table as lossless JSON or spreadsheet-friendly UTF-8 CSV and imports either format later; this lightweight
+timeline file includes role, language, timing, duration factor, text, and per-line emotion, but no model or audio.
 
 The `任务队列` tab persists single-voice, dialogue, and SRT parameter snapshots in `task_queue.json`. A process restart
 recovers interrupted work to `pending` without auto-starting inference. Failed/cancelled work can be retried. Optional
@@ -286,7 +290,7 @@ npm run make
 ```
 
 This builds only `@electron-forge/maker-zip`. The unpacked application is still
-available under `desktop/out/T8star-Aix-IndexTTS-2.5-v0.23.0-win32-x64` for local testing.
+available under `desktop/out/T8star-Aix-IndexTTS-2.5-v0.24.0-win32-x64` for local testing.
 The bundled runtime contains tens of thousands of small files, so Squirrel/NuGet
 can spend a long time repeatedly rewriting a multi-gigabyte package. It is not the
 recommended user distribution. If an installer is specifically required, build it
