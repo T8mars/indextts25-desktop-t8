@@ -52,6 +52,7 @@ if (
   !packagedMainSource.includes('ipcMain.handle("desktop:choose-data-directory"') ||
   !packagedMainSource.includes('ipcMain.handle("desktop:show-launcher"') ||
   !packagedMainSource.includes('ipcMain.handle("desktop:open-output-directory"') ||
+  !packagedMainSource.includes('ipcMain.handle("desktop:reveal-output-item"') ||
   !packagedMainSource.includes('ipcMain.handle("desktop:open-data-directory"') ||
   !packagedMainSource.includes('mainWindow.on("close"') ||
   !packagedMainSource.includes("stoppingPythonProcess === processRef") ||
@@ -70,6 +71,7 @@ if (
   !packagedPreloadSource.includes("chooseDataDirectory") ||
   !packagedPreloadSource.includes("showLauncher") ||
   !packagedPreloadSource.includes("openOutputDirectory") ||
+  !packagedPreloadSource.includes("revealOutputItem") ||
   !packagedPreloadSource.includes("openDataDirectory") ||
   !packagedRendererSource.includes("renderAccelerationDiagnostics") ||
   !packagedRendererSource.includes("renderBenchmark") ||

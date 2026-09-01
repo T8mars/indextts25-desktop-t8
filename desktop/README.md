@@ -46,12 +46,13 @@ Windows Electron desktop integration for IndexTTS 2.5. The packaged application 
 - live model scan/download/verification progress with current file, speed, ETA, conservative disk-space preflight, resumable repair, and precise failure details
 - local-only experimental audio.cpp node that accepts user-supplied CLI/GGUF absolute paths and never installs components
 - independently configurable output and user-data directories, with saved paths and direct open-folder actions
+- a searchable master-detail generation history center with filters, instant playback, copyable source/resolved text, attachment downloads, and safe reveal-in-folder actions
 - contextual fixed-bottom generate/stop controls that remain available while scrolling in single-voice and multi-role workflows
 - collapsed-by-default guidance, quality tools, advanced controls, dialogue timing, ASR, timeline, report, and task-recovery workspaces
 - direct WebUI actions for returning to setup, opening outputs, opening user data, and opening the exact log directory
 
 The large model files are intentionally external. On first launch, select a complete IndexTTS 2.5 model directory.
-Version 0.24.0 is paired with ComfyUI Node 0.23.0 and model bundle `1.0.0` at revision `14166a74`. It adds standalone JSON/CSV editable-timeline transfer, an in-place eight-vector emotion guide, and a compact one-line-per-sentence emotion syntax shared with the node while preserving legacy JSON. Fixed-bottom controls expose live progress, and repeat dialogue generation preserves untimed rows instead of turning them into authored `0/0` slots. Desktop updates remain split into signed app/runtime layers with resume, full verification, health checks, and rollback; models remain independent on Hugging Face. Advanced and engineering workspaces stay collapsed by default. Optional acceleration failures still reload the normal model and complete the task. No benchmark, model load, model download, update download, install, or acceleration mode starts automatically.
+Version 0.25.0 is paired with ComfyUI Node 0.23.0 and model bundle `1.0.0` at revision `14166a74`. It replaces the unwieldy history grid with a searchable master-detail history center: results can be filtered, previewed, copied, downloaded as audio/line ZIP/subtitle/report, or safely revealed inside the configured output directory. History refreshes automatically after completed generation, legacy records remain readable, missing attachments are reported precisely, and large history files are queried without resolving every old path. Desktop updates remain split into signed app/runtime layers with resume, full verification, health checks, and rollback; models remain independent on Hugging Face. Advanced and engineering workspaces stay collapsed by default. Optional acceleration failures still reload the normal model and complete the task. No benchmark, model load, model download, update download, install, or acceleration mode starts automatically.
 The launcher validates official model file sizes, while the downloader performs full SHA-256 verification.
 The output directory and user-data directory can be moved independently from the launcher. Voice-library entries,
 presets, dialogue tasks, ASR caches, benchmarks, and logs follow the configured user-data directory; generated WAVs
@@ -290,7 +291,7 @@ npm run make
 ```
 
 This builds only `@electron-forge/maker-zip`. The unpacked application is still
-available under `desktop/out/T8star-Aix-IndexTTS-2.5-v0.24.0-win32-x64` for local testing.
+available under `desktop/out/T8star-Aix-IndexTTS-2.5-v0.25.0-win32-x64` for local testing.
 The bundled runtime contains tens of thousands of small files, so Squirrel/NuGet
 can spend a long time repeatedly rewriting a multi-gigabyte package. It is not the
 recommended user distribution. If an installer is specifically required, build it

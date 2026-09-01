@@ -1765,6 +1765,29 @@ function registerIpcHandlers() {
     await shell.openPath(outputDirectory());
   });
 
+  ipcMain.handle("desktop:reveal-output-item", async (event, requestedPath) => {
+    assertTrustedSender(event);
+    fs.mkdirSync(outputDirectory(), { recursive: true });
+    const outputRoot = fs.realpathSync(outputDirectory());
+    const requested = String(requestedPath || "").trim();
+    if (!requested) throw new Error("No output item was selected.");
+    const candidate = path.resolve(requested);
+    if (!fs.existsSync(candidate)) throw new Error("The selected output file no longer exists.");
+    const resolved = fs.realpathSync(candidate);
+    const relative = path.relative(outputRoot, resolved);
+    if (relative.startsWith("..") || path.isAbsolute(relative)) {
+      throw new Error("Only files inside the configured output directory can be revealed.");
+    }
+    const stats = fs.statSync(resolved);
+    if (stats.isDirectory()) {
+      const failure = await shell.openPath(resolved);
+      if (failure) throw new Error(failure);
+    } else {
+      shell.showItemInFolder(resolved);
+    }
+    return { ok: true };
+  });
+
   ipcMain.handle("desktop:open-data-directory", async (event) => {
     assertTrustedSender(event);
     fs.mkdirSync(dataDirectory(), { recursive: true });

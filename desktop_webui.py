@@ -127,7 +127,7 @@ from segment_rate_workspace import (
 
 
 APP_TITLE = "T8star-Aix · IndexTTS 2.5"
-DESKTOP_VERSION = "0.24.0"
+DESKTOP_VERSION = "0.25.0"
 MODEL_MANIFEST = json.loads(
     (Path(__file__).resolve().parent / "desktop_model_manifest.json").read_text(encoding="utf-8")
 )
@@ -140,6 +140,7 @@ EMOTION_MODES = ["跟随音色参考", "情感参考音频", "八维情感向量
 EMOTION_LABELS = ["喜", "怒", "哀", "惧", "厌恶", "低落", "惊喜", "平静"]
 PROFILE_EMOTION_MODE_IDS = ("speaker", "reference_audio", "vector", "text")
 HISTORY_LOCK = threading.Lock()
+HISTORY_RAW_CACHE: dict[str, tuple[tuple[int, int], list[str]]] = {}
 DICTIONARY_FILENAME = "pronunciation_dictionary.yaml"
 DICTIONARY_HEADERS = ["文字/词语", "语言", "读音", "启用", "区分大小写"]
 LANGUAGE_CHOICES = [
@@ -513,6 +514,33 @@ CSS = """
 .t8-rate-meta,.t8-rate-text { font-size: 12px; line-height: 1.45; }
 .t8-rate-meta { color: #475569; }
 .t8-rate-text { margin-top: 3px; overflow-wrap: anywhere; }
+.t8-history-toolbar { align-items: end !important; gap: 10px !important; }
+.t8-history-count { margin: 2px 4px 10px !important; font-size: 12px; opacity: .72; }
+.t8-history-layout { align-items: flex-start !important; gap: 16px !important; }
+.t8-history-list,.t8-history-detail {
+  padding: 14px !important;
+  border: 1px solid rgba(148,163,184,.2) !important;
+  border-radius: 16px !important;
+  background: color-mix(in srgb, var(--block-background-fill) 94%, rgba(89,125,255,.06)) !important;
+  box-shadow: 0 8px 26px rgba(15,23,42,.045) !important;
+}
+.t8-history-detail { position: sticky !important; top: 12px !important; }
+.t8-history-detail-card {
+  min-height: 110px;
+  padding: 14px 16px !important;
+  border: 1px solid rgba(251,114,153,.24) !important;
+  border-radius: 13px !important;
+  background: linear-gradient(125deg, rgba(251,114,153,.08), rgba(89,125,255,.055)) !important;
+}
+.t8-history-detail-card h3 { margin: 0 0 8px !important; font-size: 17px !important; }
+.t8-history-detail-card p { margin: 4px 0 !important; font-size: 12px !important; line-height: 1.55 !important; }
+.t8-history-table table { table-layout: fixed !important; }
+.t8-history-table td,.t8-history-table th { padding: 10px 9px !important; }
+.t8-history-table td { overflow: hidden !important; text-overflow: ellipsis !important; white-space: nowrap !important; }
+.t8-history-table tbody tr { cursor: pointer; }
+.t8-history-table tbody tr:hover { background: rgba(251,114,153,.075) !important; }
+.t8-history-actions { gap: 10px !important; }
+.t8-history-actions button { min-height: 36px !important; }
 .t8-footer { text-align: center; opacity: .58; font-size: 12px; padding: 14px; }
 @media (max-width: 900px) {
   .gradio-container main.fillable { padding: 16px 16px 118px !important; }
@@ -520,6 +548,9 @@ CSS = """
   .t8-header-copy { text-align: left; }
   .t8-primary-grid { grid-template-columns: 1fr; }
   .t8-prompt-audio { min-height: 280px; }
+  .t8-history-layout { flex-direction: column !important; }
+  .t8-history-list,.t8-history-detail { min-width: 100% !important; width: 100% !important; }
+  .t8-history-detail { position: static !important; }
 }
 @media (max-width: 560px) {
   .gradio-container main.fillable {
@@ -793,33 +824,335 @@ def history_path(output_dir: Path) -> Path:
     return output_dir / "history.jsonl"
 
 
-def load_history(output_dir: Path, limit: int = 50) -> list[list[str]]:
+def _history_raw_lines(output_dir: Path) -> list[str]:
+    """Read one immutable JSONL snapshot and reuse it until the file changes."""
+
     path = history_path(output_dir)
     if not path.exists():
         return []
-    rows: list[list[str]] = []
+    cache_key = str(path.resolve())
     with HISTORY_LOCK:
-        for raw_line in path.read_text(encoding="utf-8").splitlines():
+        try:
+            stat = path.stat()
+            signature = (int(stat.st_mtime_ns), int(stat.st_size))
+        except OSError:
+            return []
+        cached = HISTORY_RAW_CACHE.get(cache_key)
+        if cached and cached[0] == signature:
+            return cached[1]
+        try:
+            lines = path.read_text(encoding="utf-8").splitlines()
+        except OSError:
+            return []
+        HISTORY_RAW_CACHE[cache_key] = (signature, lines)
+        return lines
+
+
+def _history_record_id(item: dict, source_index: int) -> str:
+    explicit_id = str(item.get("id") or "").strip()
+    if explicit_id:
+        return explicit_id
+    record_seed = json.dumps(item, ensure_ascii=False, sort_keys=True, default=str)
+    return uuid.uuid5(uuid.NAMESPACE_URL, f"{source_index}:{record_seed}").hex[:10]
+
+
+def _history_attachment_path(output_dir: Path, value: object) -> str | None:
+    """Return an existing history attachment only when it stays inside outputs."""
+
+    raw_value = str(value or "").strip()
+    if not raw_value:
+        return None
+    root = output_dir.resolve()
+    candidate = Path(raw_value).expanduser()
+    if not candidate.is_absolute():
+        candidate = root / candidate
+    try:
+        resolved = candidate.resolve()
+        if not resolved.is_relative_to(root) or not resolved.is_file():
+            return None
+    except (OSError, RuntimeError, ValueError):
+        return None
+    return str(resolved)
+
+
+def _history_duration(item: dict) -> float | None:
+    performance = item.get("performance")
+    if isinstance(performance, dict):
+        try:
+            return max(0.0, float(performance.get("audio_duration_seconds")))
+        except (TypeError, ValueError):
+            pass
+    try:
+        if item.get("duration_ms") is not None:
+            return max(0.0, float(item["duration_ms"]) / 1000.0)
+    except (TypeError, ValueError):
+        pass
+    return None
+
+
+def _history_excerpt(value: object, limit: int = 64) -> str:
+    text = " ".join(str(value or "").split())
+    return text if len(text) <= limit else text[: max(1, limit - 1)] + "…"
+
+
+def normalize_history_item(
+    output_dir: Path,
+    item: dict,
+    source_index: int,
+    *,
+    resolve_attachments: bool = True,
+) -> dict:
+    """Normalize both legacy JSONL rows and the current attachment-aware schema."""
+
+    raw_attachments = item.get("attachments")
+    if not isinstance(raw_attachments, dict):
+        raw_attachments = {}
+    attachment_candidates = {
+        "audio": raw_attachments.get("audio") or item.get("file"),
+        "archive": raw_attachments.get("archive") or item.get("archive_file"),
+        "subtitle": raw_attachments.get("subtitle") or item.get("rewritten_srt_file"),
+        "report": raw_attachments.get("report") or item.get("report_file"),
+    }
+    listed_paths = [str(value).strip() for value in attachment_candidates.values() if str(value or "").strip()]
+    attachments = {}
+    unsafe_paths = []
+    if resolve_attachments:
+        attachments = {
+            name: resolved
+            for name, value in attachment_candidates.items()
+            if (resolved := _history_attachment_path(output_dir, value)) is not None
+        }
+        root = output_dir.resolve()
+        for raw_value in listed_paths:
+            candidate = Path(raw_value).expanduser()
+            if not candidate.is_absolute():
+                candidate = root / candidate
             try:
-                item = json.loads(raw_line)
-            except json.JSONDecodeError:
+                if not candidate.resolve().is_relative_to(root):
+                    unsafe_paths.append(raw_value)
+            except (OSError, RuntimeError, ValueError):
+                unsafe_paths.append(raw_value)
+
+    language = str(item.get("language") or "").strip().upper()
+    kind = str(item.get("kind") or "").strip().lower()
+    if kind not in {"single", "dialogue"}:
+        kind = "dialogue" if language == "MULTI" or "多角色配音" in str(item.get("text") or "") else "single"
+    created_at = str(item.get("created_at") or "")
+    original_text = str(item.get("text") or "")
+    resolved_text = str(item.get("resolved_text", original_text) or original_text)
+    record_id = _history_record_id(item, source_index)
+    duration = _history_duration(item)
+    try:
+        schema_version = max(1, int(item.get("schema_version") or 1))
+    except (TypeError, ValueError):
+        schema_version = 1
+    listed_names = {
+        name for name, value in attachment_candidates.items() if str(value or "").strip()
+    }
+    missing_names = listed_names.difference(attachments)
+    if not resolve_attachments:
+        status = "未检查"
+        status_detail = "附件状态将在显示详情时检查"
+    elif attachment_candidates.get("audio") and "audio" not in attachments:
+        audio_value = str(attachment_candidates.get("audio") or "").strip()
+        audio_unsafe = audio_value in unsafe_paths
+        status = "主音频不可用" if audio_unsafe else "主音频缺失"
+        status_detail = (
+            "主音频不在当前输出目录，已禁止打开和下载"
+            if audio_unsafe
+            else "主音频已移动或删除"
+        )
+        if attachments:
+            status_detail += f"；仍有 {len(attachments)} 个其他附件可下载"
+    elif attachments and missing_names:
+        status = "部分缺失"
+        status_detail = f"{len(attachments)} 个文件可用，{len(missing_names)} 个附件缺失或不可用"
+    elif attachments:
+        status = "可用"
+        status_detail = f"{len(attachments)} 个文件可用"
+    elif unsafe_paths:
+        status = "路径不可用"
+        status_detail = "历史文件不在当前输出目录内，已禁止打开和下载"
+    elif listed_paths:
+        status = "文件缺失"
+        status_detail = "历史记录仍在，但对应文件已移动或删除"
+    else:
+        status = "无附件"
+        status_detail = "这条旧历史没有记录结果文件"
+    return {
+        "id": record_id,
+        "schema_version": schema_version,
+        "created_at": created_at,
+        "kind": kind,
+        "kind_label": "多角色 / 批量" if kind == "dialogue" else "单句生成",
+        "language": language or "—",
+        "duration_factor": item.get("duration_factor", "—"),
+        "emotion_mode": str(item.get("emotion_mode") or "—"),
+        "text": original_text,
+        "resolved_text": resolved_text,
+        "metrics": str(item.get("metrics") or ""),
+        "performance": item.get("performance") if isinstance(item.get("performance"), dict) else {},
+        "duration_seconds": duration,
+        "attachments": attachments,
+        "status": status,
+        "status_detail": status_detail,
+        "title": _history_excerpt(item.get("title") or original_text or "未命名生成"),
+    }
+
+
+def load_history_items(output_dir: Path, limit: int = 500) -> list[dict]:
+    items: list[dict] = []
+    raw_lines = _history_raw_lines(output_dir)
+    for source_index in range(len(raw_lines) - 1, -1, -1):
+        raw_line = raw_lines[source_index]
+        try:
+            item = json.loads(raw_line)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(item, dict):
+            continue
+        try:
+            items.append(normalize_history_item(output_dir, item, source_index))
+        except (OSError, TypeError, ValueError):
+            continue
+        if len(items) >= max(1, int(limit or 1)):
+            break
+    return items
+
+
+def history_record_count(output_dir: Path) -> int:
+    count = 0
+    for raw_line in _history_raw_lines(output_dir):
+        try:
+            item = json.loads(raw_line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(item, dict):
+            count += 1
+    return count
+
+
+def _history_item_matches(item: dict, query: str, kind: str, language: str) -> bool:
+    needle = str(query or "").strip().casefold()
+    kind = str(kind or "all").strip().lower()
+    language = str(language or "all").strip().upper()
+    if kind != "all" and item["kind"] != kind:
+        return False
+    if language != "ALL" and item["language"] != language:
+        return False
+    if not needle:
+        return True
+    searchable = " ".join(
+        str(item.get(key) or "")
+        for key in ("created_at", "kind_label", "language", "title", "text", "resolved_text", "emotion_mode")
+    ).casefold()
+    return needle in searchable
+
+
+def query_history_items(
+    output_dir: Path,
+    query: str = "",
+    kind: str = "all",
+    language: str = "all",
+    limit: int = 50,
+) -> list[dict]:
+    """Scan metadata newest-first and resolve files only for visible matches."""
+
+    matches: list[dict] = []
+    raw_lines = _history_raw_lines(output_dir)
+    for source_index in range(len(raw_lines) - 1, -1, -1):
+        try:
+            raw_item = json.loads(raw_lines[source_index])
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(raw_item, dict):
+            continue
+        try:
+            metadata = normalize_history_item(
+                output_dir,
+                raw_item,
+                source_index,
+                resolve_attachments=False,
+            )
+            if not _history_item_matches(metadata, query, kind, language):
                 continue
-            rows.append([
-                item.get("created_at", ""),
-                item.get("language", ""),
-                item.get("duration_factor", 1.0),
-                item.get("emotion_mode", ""),
-                item.get("text", ""),
-                item.get("resolved_text", item.get("text", "")),
-                item.get("file", ""),
-            ])
-    return list(reversed(rows[-limit:]))
+            matches.append(normalize_history_item(output_dir, raw_item, source_index))
+        except (OSError, TypeError, ValueError):
+            continue
+        if len(matches) >= max(1, int(limit or 1)):
+            break
+    return matches
+
+
+def filter_history_items(
+    items: list[dict],
+    query: str = "",
+    kind: str = "all",
+    language: str = "all",
+    limit: int = 50,
+) -> list[dict]:
+    filtered: list[dict] = []
+    for item in items:
+        if not _history_item_matches(item, query, kind, language):
+            continue
+        filtered.append(item)
+        if len(filtered) >= max(1, int(limit or 1)):
+            break
+    return filtered
+
+
+def history_table_rows(items: list[dict]) -> list[list[object]]:
+    rows: list[list[object]] = []
+    for item in items:
+        duration = item.get("duration_seconds")
+        duration_text = f"{float(duration):.2f}s" if duration is not None else "—"
+        rows.append([
+            item["id"],
+            item["created_at"] or "—",
+            item["kind_label"],
+            item["language"],
+            item["title"],
+            duration_text,
+            item["status"],
+        ])
+    return rows
+
+
+def load_history(
+    output_dir: Path,
+    limit: int = 50,
+    query: str = "",
+    kind: str = "all",
+    language: str = "all",
+) -> list[list[object]]:
+    return history_table_rows(query_history_items(output_dir, query, kind, language, limit))
+
+
+def history_item_by_id(output_dir: Path, record_id: object) -> dict | None:
+    wanted = str(record_id or "").strip()
+    if not wanted:
+        return None
+    raw_lines = _history_raw_lines(output_dir)
+    for source_index in range(len(raw_lines) - 1, -1, -1):
+        try:
+            raw_item = json.loads(raw_lines[source_index])
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(raw_item, dict) or _history_record_id(raw_item, source_index) != wanted:
+            continue
+        try:
+            return normalize_history_item(output_dir, raw_item, source_index)
+        except (OSError, TypeError, ValueError):
+            return None
+    return None
 
 
 def append_history(output_dir: Path, item: dict) -> None:
+    path = history_path(output_dir)
     with HISTORY_LOCK:
-        with history_path(output_dir).open("a", encoding="utf-8") as history_file:
+        with path.open("a", encoding="utf-8") as history_file:
             history_file.write(json.dumps(item, ensure_ascii=False) + "\n")
+        HISTORY_RAW_CACHE.pop(str(path.resolve()), None)
 
 
 def pronunciation_dictionary_path(data_dir: Path) -> Path:
@@ -2346,13 +2679,18 @@ def build_app(
             metrics += "；" + stream_note
 
         append_history(output_dir, {
+            "schema_version": 2,
+            "id": uuid.uuid4().hex,
             "created_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+            "kind": "single",
+            "title": _history_excerpt(text),
             "language": language,
             "duration_factor": duration_factor,
             "emotion_mode": EMOTION_MODES[emotion_mode],
             "text": text,
             "resolved_text": resolved_text,
             "file": str(target),
+            "attachments": {"audio": str(target)},
             "metrics": metrics,
             "performance": performance,
             "segment_rate_guard": rate_guard_reports,
@@ -4358,14 +4696,31 @@ def build_app(
             output_zip.write(rewritten_srt_path, "rewritten.srt")
             for clip_path in clip_paths:
                 output_zip.write(clip_path, f"lines/{clip_path.name}")
+        dialogue_resolved_text = "\n".join(
+            f"{item.get('role') or '旁白'}|{item.get('resolved_text') or item.get('text') or ''}"
+            for item in report_lines
+        )
         append_history(output_dir, {
+            "schema_version": 2,
+            "id": uuid.uuid4().hex,
             "created_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+            "kind": "dialogue",
+            "title": f"{script_type.upper()} 多角色配音 · {len(lines)} 条台词",
             "language": "MULTI",
             "duration_factor": "per-line",
             "emotion_mode": f"{len(lines)} 条 / {len(set(line.role for line in lines))} 角色",
-            "text": f"{script_type.upper()} 多角色配音",
-            "resolved_text": format_runtime_metrics(performance),
+            "text": str(script or ""),
+            "resolved_text": dialogue_resolved_text,
             "file": str(combined),
+            "attachments": {
+                "audio": str(combined),
+                "archive": str(archive),
+                "subtitle": str(rewritten_srt_path),
+                "report": str(report_path),
+            },
+            "metrics": format_runtime_metrics(performance),
+            "performance": performance,
+            "duration_ms": round(duration_seconds * 1000),
         })
         task["combined_file"] = str(combined)
         task["archive_file"] = str(archive)
@@ -4549,6 +4904,31 @@ def build_app(
         task["report_file"] = str(report_path)
         task["rewritten_srt_file"] = str(srt_path)
         task = set_task_status(output_dir, task, "completed")
+        dialogue_resolved_text = "\n".join(
+            f"{item.get('role') or '旁白'}|{item.get('resolved_text') or item.get('text') or ''}"
+            for item in report_lines
+        )
+        append_history(output_dir, {
+            "schema_version": 2,
+            "id": uuid.uuid4().hex,
+            "created_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+            "kind": "dialogue",
+            "title": f"编辑时间轴重新混音 · {len(lines)} 条台词",
+            "language": "MULTI",
+            "duration_factor": "per-line",
+            "emotion_mode": f"{len(lines)} 条 / 时间轴重混",
+            "text": str(task.get("script") or ""),
+            "resolved_text": dialogue_resolved_text,
+            "file": str(combined),
+            "attachments": {
+                "audio": str(combined),
+                "archive": str(archive),
+                "subtitle": str(srt_path),
+                "report": str(report_path),
+            },
+            "duration_ms": report["duration_ms"],
+            "metrics": "未重新执行 TTS；按编辑后的时间轴重新合并。",
+        })
         return (
             str(combined),
             str(archive),
@@ -4791,6 +5171,90 @@ def build_app(
         if review["favorite_file"]:
             return f"已保存 {review['rating']} 星评分，并收藏到 {review['favorite_file']}。"
         return f"已保存 {review['rating']} 星评分；原候选文件保持不变。"
+
+    def history_empty_detail(message="请从左侧选择一条记录查看详情、试听或下载。"):
+        return (
+            message,
+            None,
+            "",
+            "",
+            "",
+            gr.update(value=None, interactive=False),
+            gr.update(value=None, interactive=False),
+            gr.update(value=None, interactive=False),
+            gr.update(value=None, interactive=False),
+            "",
+        )
+
+    def refresh_history_event(query, kind, language, limit):
+        filtered = query_history_items(
+            output_dir,
+            query=str(query or ""),
+            kind=str(kind or "all"),
+            language=str(language or "all"),
+            limit=int(limit or 50),
+        )
+        summary = f"显示最近 {len(filtered)} 条；当前历史共 {history_record_count(output_dir)} 条。"
+        return history_table_rows(filtered), summary, *history_empty_detail()
+
+    def select_history_event(table_value, event: gr.SelectData):
+        if isinstance(table_value, dict):
+            rows = list(table_value.get("data") or [])
+        elif hasattr(table_value, "values") and hasattr(table_value.values, "tolist"):
+            rows = table_value.values.tolist()
+        else:
+            rows = list(table_value or [])
+        index = event.index
+        row_position = int(index[0] if isinstance(index, (tuple, list)) else index)
+        if row_position < 0 or row_position >= len(rows):
+            raise gr.Error("请选择历史列表中的有效记录。")
+        record_id = rows[row_position][0] if rows[row_position] else ""
+        item = history_item_by_id(output_dir, record_id)
+        if item is None:
+            raise gr.Error("这条历史记录已变化，请刷新后重试。")
+
+        attachments = item["attachments"]
+        attachment_names = {
+            "audio": "音频",
+            "archive": "逐句打包 ZIP",
+            "subtitle": "回写字幕",
+            "report": "生成报告",
+        }
+        available_files = [
+            f"{attachment_names.get(name, name)}：`{Path(path).name}`"
+            for name, path in attachments.items()
+        ]
+        duration = item.get("duration_seconds")
+        duration_text = f"{float(duration):.2f} 秒" if duration is not None else "未记录"
+        detail = (
+            f"### {item['title']}\n\n"
+            f"**{item['status']}** · {item['status_detail']}  \n"
+            f"{item['created_at'] or '时间未记录'} · {item['kind_label']} · {item['language']} · 音频 {duration_text}"
+        )
+        if available_files:
+            detail += "\n\n" + "  \n".join(available_files)
+        parameters = {
+            "记录编号": item["id"],
+            "生成类型": item["kind_label"],
+            "语言": item["language"],
+            "时长系数": item["duration_factor"],
+            "情感": item["emotion_mode"],
+            "性能": item["performance"],
+            "生成摘要": item["metrics"],
+        }
+        reveal_target = next(iter(attachments.values()), "")
+        return (
+            detail,
+            attachments.get("audio"),
+            item["text"],
+            item["resolved_text"],
+            json.dumps(parameters, ensure_ascii=False, indent=2, default=str),
+            gr.update(value=attachments.get("audio"), interactive=bool(attachments.get("audio"))),
+            gr.update(value=attachments.get("archive"), interactive=bool(attachments.get("archive"))),
+            gr.update(value=attachments.get("subtitle"), interactive=bool(attachments.get("subtitle"))),
+            gr.update(value=attachments.get("report"), interactive=bool(attachments.get("report"))),
+            reveal_target,
+        )
 
     theme = gr.themes.Soft(
         primary_hue="pink",
@@ -6103,13 +6567,114 @@ def build_app(
             )
 
         with gr.Tab("生成历史"):
-            refresh_history = gr.Button("刷新历史")
-            history = gr.Dataframe(
-                headers=["时间", "语言", "时长系数", "情感", "原文", "发音文本", "文件"],
-                value=load_history(output_dir),
-                interactive=False,
-                wrap=True,
+            gr.Markdown(
+                "## 生成历史\n"
+                "紧凑浏览最近结果；选择记录后可直接试听、复制文本、下载附件或在文件夹中定位。"
             )
+            initial_history_items = query_history_items(output_dir, limit=50)
+            initial_history_count = history_record_count(output_dir)
+            with gr.Row(elem_classes=["t8-history-toolbar"]):
+                history_search = gr.Textbox(
+                    label="搜索历史",
+                    placeholder="搜索台词、时间、情感或语言",
+                    scale=4,
+                )
+                history_kind_filter = gr.Dropdown(
+                    choices=[("全部类型", "all"), ("单句生成", "single"), ("多角色 / 批量", "dialogue")],
+                    value="all",
+                    label="类型",
+                    scale=2,
+                )
+                history_language_filter = gr.Dropdown(
+                    choices=[
+                        ("全部语言", "all"),
+                        ("中文", "ZH"),
+                        ("英语", "EN"),
+                        ("日语", "JA"),
+                        ("西班牙语", "ES"),
+                        ("阿拉伯语", "AR"),
+                        ("多语言", "MULTI"),
+                    ],
+                    value="all",
+                    label="语言",
+                    scale=2,
+                )
+                history_limit = gr.Dropdown(
+                    choices=[25, 50, 100, 200],
+                    value=50,
+                    label="显示条数",
+                    scale=1,
+                )
+                refresh_history = gr.Button("刷新 / 搜索", variant="primary", scale=1, min_width=120)
+                history_open_output_button = gr.Button("打开输出文件夹", scale=1, min_width=130)
+            history_count = gr.Markdown(
+                f"显示最近 {len(initial_history_items)} 条；当前历史共 {initial_history_count} 条。",
+                elem_classes=["t8-history-count"],
+            )
+            with gr.Row(equal_height=False, elem_classes=["t8-history-layout"]):
+                with gr.Column(scale=6, min_width=680, elem_classes=["t8-history-list"]):
+                    history = gr.Dataframe(
+                        headers=["记录", "时间", "类型", "语言", "内容摘要", "时长", "状态"],
+                        value=history_table_rows(initial_history_items),
+                        datatype=["str", "str", "str", "str", "str", "str", "str"],
+                        interactive=False,
+                        wrap=False,
+                        line_breaks=False,
+                        max_height=560,
+                        column_widths=[90, 150, 125, 70, "45%", 80, 100],
+                        show_search="none",
+                        label="历史记录（点击任意单元格查看详情）",
+                        elem_classes=["t8-history-table"],
+                    )
+                with gr.Column(scale=4, min_width=390, elem_classes=["t8-history-detail"]):
+                    history_detail_status = gr.Markdown(
+                        "请从左侧选择一条记录查看详情、试听或下载。",
+                        elem_classes=["t8-history-detail-card"],
+                    )
+                    history_audio = gr.Audio(
+                        label="结果试听",
+                        type="filepath",
+                        interactive=False,
+                        show_download_button=True,
+                    )
+                    with gr.Accordion("文本与生成参数 · 可复制", open=True):
+                        history_original_text = gr.Textbox(
+                            label="原始文本",
+                            lines=3,
+                            max_lines=8,
+                            interactive=False,
+                            show_copy_button=True,
+                        )
+                        history_resolved_text = gr.Textbox(
+                            label="实际发音文本",
+                            lines=3,
+                            max_lines=8,
+                            interactive=False,
+                            show_copy_button=True,
+                        )
+                        history_parameters = gr.Textbox(
+                            label="生成参数与性能",
+                            lines=7,
+                            max_lines=14,
+                            interactive=False,
+                            show_copy_button=True,
+                        )
+                    with gr.Row(elem_classes=["t8-history-actions"]):
+                        history_audio_download = gr.DownloadButton(
+                            "下载音频", value=None, variant="primary", interactive=False, size="sm"
+                        )
+                        history_archive_download = gr.DownloadButton(
+                            "下载逐句 ZIP", value=None, interactive=False, size="sm"
+                        )
+                    with gr.Row(elem_classes=["t8-history-actions"]):
+                        history_subtitle_download = gr.DownloadButton(
+                            "下载字幕", value=None, interactive=False, size="sm"
+                        )
+                        history_report_download = gr.DownloadButton(
+                            "下载报告", value=None, interactive=False, size="sm"
+                        )
+                    history_reveal_button = gr.Button("在文件夹中定位", variant="secondary")
+                    history_reveal_path = gr.Textbox(value="", visible=False)
 
         with gr.Tab("任务队列"):
             gr.Markdown(
@@ -6182,7 +6747,89 @@ def build_app(
             }""",
             queue=False,
         )
-        refresh_history.click(lambda: load_history(output_dir), outputs=history, queue=False)
+        history_open_output_button.click(
+            fn=None,
+            js="""() => {
+              if (window.desktopApi?.openOutputDirectory) void window.desktopApi.openOutputDirectory();
+              else window.alert('此按钮仅在 T8star-Aix 桌面整合包中可用。');
+            }""",
+            queue=False,
+        )
+        history_reveal_button.click(
+            fn=None,
+            inputs=history_reveal_path,
+            js="""async (target) => {
+              if (!target) {
+                window.alert('这条记录没有可定位的本地文件。');
+                return;
+              }
+              if (!window.desktopApi?.revealOutputItem) {
+                window.alert('“在文件夹中定位”仅在 T8star-Aix 桌面整合包中可用。');
+                return;
+              }
+              try {
+                await window.desktopApi.revealOutputItem(target);
+              } catch (error) {
+                window.alert(`无法定位文件：${error?.message || error}`);
+              }
+            }""",
+            queue=False,
+        )
+        history_detail_outputs = [
+            history_detail_status,
+            history_audio,
+            history_original_text,
+            history_resolved_text,
+            history_parameters,
+            history_audio_download,
+            history_archive_download,
+            history_subtitle_download,
+            history_report_download,
+            history_reveal_path,
+        ]
+        history_refresh_inputs = [
+            history_search,
+            history_kind_filter,
+            history_language_filter,
+            history_limit,
+        ]
+        history_refresh_outputs = [history, history_count, *history_detail_outputs]
+        refresh_history.click(
+            refresh_history_event,
+            inputs=history_refresh_inputs,
+            outputs=history_refresh_outputs,
+            queue=False,
+        )
+        history_search.submit(
+            refresh_history_event,
+            inputs=history_refresh_inputs,
+            outputs=history_refresh_outputs,
+            queue=False,
+        )
+        history_kind_filter.change(
+            refresh_history_event,
+            inputs=history_refresh_inputs,
+            outputs=history_refresh_outputs,
+            queue=False,
+        )
+        history_language_filter.change(
+            refresh_history_event,
+            inputs=history_refresh_inputs,
+            outputs=history_refresh_outputs,
+            queue=False,
+        )
+        history_limit.change(
+            refresh_history_event,
+            inputs=history_refresh_inputs,
+            outputs=history_refresh_outputs,
+            queue=False,
+        )
+        history.select(
+            select_history_event,
+            inputs=history,
+            outputs=history_detail_outputs,
+            queue=False,
+        )
 
         apply_memory_policy_button.click(
             update_memory_policy_event,
@@ -6873,6 +7520,12 @@ def build_app(
                 ],
                 queue=False,
             )
+            event.then(
+                refresh_history_event,
+                inputs=history_refresh_inputs,
+                outputs=history_refresh_outputs,
+                queue=False,
+            )
             return event
 
         generation_event = bind_generation(generate_button)
@@ -7083,6 +7736,18 @@ def build_app(
             outputs=dialogue_outputs,
             concurrency_limit=1,
         )
+        for completed_dialogue_event in (
+            dialogue_generation_event,
+            resume_dialogue_event,
+            retry_dialogue_event,
+            rebuild_dialogue_event,
+        ):
+            completed_dialogue_event.then(
+                refresh_history_event,
+                inputs=history_refresh_inputs,
+                outputs=history_refresh_outputs,
+                queue=False,
+            )
         stop_dialogue_button.click(
             fn=None,
             cancels=[dialogue_generation_event, resume_dialogue_event, retry_dialogue_event, rebuild_dialogue_event],
@@ -7110,6 +7775,12 @@ def build_app(
             run_job_queue_event,
             outputs=[job_queue_table, queue_job_select, job_queue_status, history],
             concurrency_limit=1,
+        )
+        run_job_queue.then(
+            refresh_history_event,
+            inputs=history_refresh_inputs,
+            outputs=history_refresh_outputs,
+            queue=False,
         )
         stop_job_queue_button.click(
             fn=None,

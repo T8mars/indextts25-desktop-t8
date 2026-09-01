@@ -132,12 +132,16 @@ assert.match(mainSource, /ipcMain\.handle\("desktop:choose-output-directory"/);
 assert.match(mainSource, /ipcMain\.handle\("desktop:choose-data-directory"/);
 assert.match(mainSource, /ipcMain\.handle\("desktop:show-launcher"/);
 assert.match(mainSource, /ipcMain\.handle\("desktop:open-output-directory"/);
+assert.match(mainSource, /ipcMain\.handle\("desktop:reveal-output-item"/);
+assert.match(mainSource, /path\.relative\(outputRoot, resolved\)/);
+assert.match(mainSource, /shell\.showItemInFolder\(resolved\)/);
 assert.match(mainSource, /ipcMain\.handle\("desktop:open-data-directory"/);
 assert.match(mainSource, /"--output_dir", outputDirectory\(\)/);
 assert.match(mainSource, /"--data_dir", dataDirectory\(\)/);
 assert.match(mainSource, /stoppingPythonProcess === processRef/);
 assert.match(mainSource, /mainWindow\.on\("close"[\s\S]{0,500}showLauncher\(\)/);
 assert.match(preloadSource, /showLauncher: \(\) => ipcRenderer\.invoke\("desktop:show-launcher"\)/);
+assert.match(preloadSource, /revealOutputItem: \(target\) => ipcRenderer\.invoke\("desktop:reveal-output-item", target\)/);
 assert.match(preloadSource, /chooseOutputDirectory/);
 assert.match(preloadSource, /chooseDataDirectory/);
 assert.match(rendererSource, /chooseOutputButton\.addEventListener/);
@@ -158,6 +162,9 @@ assert.match(diagnosticSource, /预检只检查硬件、依赖与工具链，不
 assert.match(diagnosticSource, /aio\.lib\/cufile\.lib/);
 assert.match(mainSource, /--precision/);
 assert.match(mainSource, /--reference-device/);
+assert.match(webuiSource, /with gr\.Tab\("生成历史"\)/);
+assert.match(webuiSource, /history_audio_download = gr\.DownloadButton/);
+assert.match(webuiSource, /window\.desktopApi\?\.revealOutputItem/);
 assert.ok(nodeVersion, "The ComfyUI node version must be readable from pyproject.toml.");
 assert.ok(
   mainSource.includes(`const COMFY_NODE_VERSION = "${nodeVersion}";`),

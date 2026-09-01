@@ -27,6 +27,7 @@ contextBridge.exposeInMainWorld("desktopApi", {
   openModelPage: (source) => ipcRenderer.invoke("desktop:open-model-page", source),
   openLogs: () => ipcRenderer.invoke("desktop:open-logs"),
   openOutputDirectory: () => ipcRenderer.invoke("desktop:open-output-directory"),
+  revealOutputItem: (target) => ipcRenderer.invoke("desktop:reveal-output-item", target),
   openDataDirectory: () => ipcRenderer.invoke("desktop:open-data-directory"),
   onState: (callback) => {
     const handler = (_event, state) => callback(state);

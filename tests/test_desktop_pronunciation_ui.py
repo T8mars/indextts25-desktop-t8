@@ -17,7 +17,11 @@ from desktop_webui import (
     build_app,
     delete_pronunciation_entry,
     describe_dialogue_timing_settings,
+    filter_history_items,
+    history_item_by_id,
+    history_record_count,
     load_history,
+    load_history_items,
     line_emotion_kwargs,
     profile_emotion_kwargs,
     pronunciation_dictionary_path,
@@ -1018,6 +1022,9 @@ def test_edited_timeline_row_can_be_regenerated_alone_and_merged(tmp_path):
     inputs[4] = rows
     list(generate_block.fn(*inputs))
     assert len(tts.calls) == 2
+    generated_history = load_history_items(output_dir, limit=1)[0]
+    assert generated_history["text"] == script
+    assert "贞贞|第一句。" in generated_history["resolved_text"]
 
     task_id = next(output_dir.glob("dialogue_*/task.json")).parent.name
     edited_rows = [list(row) for row in rows]
@@ -1157,9 +1164,170 @@ def test_dropdown_dictionary_editor_adds_updates_and_deletes_entries():
 def test_history_keeps_original_and_resolved_pronunciation_text(tmp_path):
     output_dir = tmp_path / "outputs"
     output_dir.mkdir()
+    _write_test_wav(output_dir / "x.wav")
     (output_dir / "history.jsonl").write_text(
         '{"created_at":"now","language":"ZH","text":"银行","resolved_text":"<银行|YIN2 HANG2>","file":"x.wav"}\n',
         encoding="utf-8",
     )
+    item = load_history_items(output_dir)[0]
+    assert item["text"] == "银行"
+    assert item["resolved_text"] == "<银行|YIN2 HANG2>"
+    assert item["attachments"]["audio"] == str((output_dir / "x.wav").resolve())
+    assert item["status"] == "可用"
     row = load_history(output_dir)[0]
-    assert row[4:6] == ["银行", "<银行|YIN2 HANG2>"]
+    assert row[4] == "银行"
+
+
+def test_history_filters_and_never_exposes_full_paths_in_table(tmp_path):
+    output_dir = tmp_path / "outputs"
+    output_dir.mkdir()
+    single = _write_test_wav(output_dir / "single.wav")
+    multi = _write_test_wav(output_dir / "multi.wav")
+    entries = [
+        {
+            "schema_version": 2,
+            "id": "single-id",
+            "created_at": "2026-09-01 10:00:00",
+            "kind": "single",
+            "language": "ZH",
+            "text": "测试中文历史",
+            "file": str(single),
+            "attachments": {"audio": str(single)},
+            "performance": {"audio_duration_seconds": 1.25},
+        },
+        {
+            "schema_version": 2,
+            "id": "multi-id",
+            "created_at": "2026-09-01 10:01:00",
+            "kind": "dialogue",
+            "language": "MULTI",
+            "text": "BATCH 多角色配音",
+            "file": str(multi),
+            "attachments": {"audio": str(multi)},
+            "duration_ms": 2500,
+        },
+    ]
+    (output_dir / "history.jsonl").write_text(
+        "".join(json.dumps(entry, ensure_ascii=False) + "\n" for entry in entries),
+        encoding="utf-8",
+    )
+
+    items = load_history_items(output_dir)
+    filtered = filter_history_items(items, query="中文", kind="single", language="ZH", limit=50)
+    assert [item["id"] for item in filtered] == ["single-id"]
+    rows = load_history(output_dir, query="多角色", kind="dialogue", language="MULTI")
+    assert rows[0][0] == "multi-id"
+    assert rows[0][5] == "2.50s"
+    assert str(output_dir) not in json.dumps(rows, ensure_ascii=False)
+    assert history_item_by_id(output_dir, "single-id")["text"] == "测试中文历史"
+
+
+def test_history_blocks_external_paths_and_marks_missing_files(tmp_path):
+    output_dir = tmp_path / "outputs"
+    output_dir.mkdir()
+    outside = _write_test_wav(tmp_path / "outside.wav")
+    entries = [
+        {"id": "outside", "created_at": "now", "text": "outside", "file": str(outside)},
+        {"id": "missing", "created_at": "now", "text": "missing", "file": "gone.wav"},
+    ]
+    (output_dir / "history.jsonl").write_text(
+        "".join(json.dumps(entry) + "\n" for entry in entries), encoding="utf-8"
+    )
+
+    items = {item["id"]: item for item in load_history_items(output_dir)}
+    assert items["outside"]["status"] == "主音频不可用"
+    assert items["outside"]["attachments"] == {}
+    assert items["missing"]["status"] == "主音频缺失"
+    assert items["missing"]["attachments"] == {}
+
+
+def test_history_reports_partial_attachments_and_limits_file_checks(tmp_path, monkeypatch):
+    output_dir = tmp_path / "outputs"
+    output_dir.mkdir()
+    report = output_dir / "report.json"
+    report.write_text("{}", encoding="utf-8")
+    rows = [
+        {
+            "id": f"entry-{index}",
+            "created_at": "now",
+            "language": "ZH",
+            "text": f"line {index}",
+            "file": f"missing-{index}.wav",
+        }
+        for index in range(1000)
+    ]
+    rows.append(
+        {
+            "id": "partial",
+            "created_at": "now",
+            "kind": "dialogue",
+            "language": "MULTI",
+            "text": "partial",
+            "attachments": {"audio": "missing.wav", "report": str(report)},
+        }
+    )
+    (output_dir / "history.jsonl").write_text(
+        "".join(json.dumps(row) + "\n" for row in rows), encoding="utf-8"
+    )
+
+    original = desktop_webui._history_attachment_path
+    calls = []
+
+    def counted_attachment_path(root, value):
+        calls.append(value)
+        return original(root, value)
+
+    monkeypatch.setattr(desktop_webui, "_history_attachment_path", counted_attachment_path)
+    table = load_history(output_dir, limit=50)
+    assert len(table) == 50
+    assert len(calls) <= 200
+    assert history_record_count(output_dir) == 1001
+    partial = history_item_by_id(output_dir, "partial")
+    assert partial["status"] == "主音频缺失"
+    assert partial["attachments"] == {"report": str(report.resolve())}
+    assert "其他附件可下载" in partial["status_detail"]
+
+
+def test_history_ui_selection_exposes_safe_downloads_and_detail(tmp_path):
+    output_dir = tmp_path / "outputs"
+    data_dir = tmp_path / "user-data"
+    output_dir.mkdir()
+    data_dir.mkdir()
+    audio = _write_test_wav(output_dir / "result.wav")
+    report = output_dir / "report.json"
+    report.write_text('{"ok": true}', encoding="utf-8")
+    entry = {
+        "schema_version": 2,
+        "id": "selectable",
+        "created_at": "2026-09-01 12:00:00",
+        "kind": "single",
+        "language": "ZH",
+        "text": "原始台词",
+        "resolved_text": "实际发音台词",
+        "file": str(audio),
+        "attachments": {"audio": str(audio), "report": str(report)},
+    }
+    (output_dir / "history.jsonl").write_text(
+        json.dumps(entry, ensure_ascii=False) + "\n", encoding="utf-8"
+    )
+    demo = build_app(_FakeTTS(), output_dir, data_dir, verbose=False)
+    select_history = next(
+        block.fn
+        for block in demo.fns.values()
+        if getattr(block.fn, "__name__", "") == "select_history_event"
+    )
+    result = select_history(load_history(output_dir), SimpleNamespace(index=(0, 4)))
+
+    assert "原始台词" in result[0]
+    assert result[1] == str(audio.resolve())
+    assert result[2:4] == ("原始台词", "实际发音台词")
+    assert result[5]["value"] == str(audio.resolve())
+    assert result[5]["interactive"] is True
+    assert result[8]["value"] == str(report.resolve())
+    assert result[9] == str(audio.resolve())
+    refresh_bindings = [
+        block
+        for block in demo.fns.values()
+        if getattr(block.fn, "__name__", "") == "refresh_history_event"
+    ]
+    assert len(refresh_bindings) >= 11
