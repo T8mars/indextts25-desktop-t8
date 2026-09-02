@@ -61,6 +61,19 @@ def select_best_candidate(reviews: list[dict]) -> int:
     return max(
         range(len(reviews)),
         key=lambda index: (
+            bool(reviews[index].get("passed")),
+            bool(
+                reviews[index].get(
+                    "tail_passed",
+                    reviews[index].get("passed", False),
+                )
+            ),
+            float(
+                reviews[index].get(
+                    "tail_similarity",
+                    reviews[index].get("similarity") or 0.0,
+                )
+            ),
             float(reviews[index].get("combined_score", 0.0)),
             float(reviews[index].get("technical", {}).get("score", 0.0)),
             -index,

@@ -1,7 +1,7 @@
 {
   "name": "t8star-aix-indextts-2-5-desktop",
   "productName": "T8star-Aix · IndexTTS 2.5",
-  "version": "0.25.0",
+  "version": "0.25.1",
   "description": "Official-model-aligned IndexTTS 2.5 Windows desktop integration by Bilibili creator T8star-Aix",
   "main": "src/main.js",
   "author": "T8star-Aix",

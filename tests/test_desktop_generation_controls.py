@@ -9,10 +9,12 @@ from desktop_generation_controls import (
     allocate_native_chunk_durations,
     build_desktop_plan,
     concatenate_with_pauses,
+    ensure_terminal_punctuation,
     normalize_preflight_text,
     postprocess_waveform,
     preflight_plan_rows,
     run_with_long_text_guard,
+    separate_repeated_characters,
     split_speech_chunks,
 )
 
@@ -29,6 +31,15 @@ class FakeTTS:
     def split_text_by_tokens(text, limit, prefix):
         budget = max(1, limit - len(prefix))
         return [text[index : index + budget] for index in range(0, len(text), budget)]
+
+
+def test_terminal_punctuation_guard_preserves_existing_boundary_and_quotes():
+    assert ensure_terminal_punctuation("最后几个字", "ZH") == "最后几个字。"
+    assert ensure_terminal_punctuation("最后几个字”", "ZH") == "最后几个字。”"
+    assert ensure_terminal_punctuation("Already complete!  ", "EN") == "Already complete!  "
+    assert ensure_terminal_punctuation("Needs a boundary", "EN") == "Needs a boundary."
+    assert separate_repeated_characters("设置三三三三秒", "ZH") == "设置三 三 三 三秒"
+    assert separate_repeated_characters("keep 3333", "EN") == "keep 3333"
 
 
 def test_desktop_auto_segmentation_and_pause_preview():

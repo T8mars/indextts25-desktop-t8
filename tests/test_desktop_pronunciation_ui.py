@@ -18,6 +18,7 @@ from desktop_webui import (
     delete_pronunciation_entry,
     describe_dialogue_timing_settings,
     filter_history_items,
+    generated_download_update,
     history_item_by_id,
     history_record_count,
     load_history,
@@ -26,6 +27,8 @@ from desktop_webui import (
     profile_emotion_kwargs,
     pronunciation_dictionary_path,
     pronunciation_entry_choices,
+    emotion_mode_ui_value,
+    normalize_emotion_mode_index,
     upsert_pronunciation_entry,
 )
 from indextts.pronunciation import PronunciationValidationError
@@ -230,6 +233,9 @@ def test_desktop_builds_complete_pronunciation_workspace(tmp_path, monkeypatch):
     assert "触发二次适配的误差（毫秒）" in labels
     assert "普通批量台词句间静音（毫秒）" in labels
     assert "下载合并音频 WAV" in labels
+    assert "下载最终音频 WAV" in labels
+    assert "下载最近结果" in labels
+    assert "下载 audio.cpp 音频" in labels
     assert "CFM 扩散步数" in labels
     assert "CFM 引导强度" in labels
     assert "CFM 温度" in labels
@@ -242,7 +248,21 @@ def test_desktop_builds_complete_pronunciation_workspace(tmp_path, monkeypatch):
     assert "当前采用段试听" in labels
     assert "已保存任务" in labels
     assert "要重做的台词序号" in labels
-    assert "生成后逐句自动 ASR 校对" in labels
+    assert "生成后逐句自动 ASR 校对与句尾保护" in labels
+    asr_toggle = next(
+        component
+        for component in config["components"]
+        if component.get("props", {}).get("label")
+        == "生成后逐句自动 ASR 校对与句尾保护"
+    )
+    assert asr_toggle["props"]["value"] is True
+    asr_retries = next(
+        component
+        for component in config["components"]
+        if component.get("props", {}).get("label")
+        == "校对失败自动重试次数"
+    )
+    assert asr_retries["props"]["value"] == 3
     assert "回写字幕时间" in labels
     assert "回写字幕文本" in labels
     assert (
@@ -285,6 +305,20 @@ def test_desktop_builds_complete_pronunciation_workspace(tmp_path, monkeypatch):
     assert generation_dependencies[0]["inputs"]
     assert generation_dependencies[0]["outputs"]
     assert pronunciation_accordion["props"]["open"] is False
+    downloadable_audio_labels = {
+        "最终生成结果",
+        "当前候选试听",
+        "原始段试听",
+        "自动重试候选试听（未触发时为空）",
+        "当前采用段试听",
+        "合并音频",
+        "audio.cpp 生成结果",
+        "结果试听",
+    }
+    for component in config["components"]:
+        label = component.get("props", {}).get("label")
+        if label in downloadable_audio_labels:
+            assert component["props"]["show_download_button"] is True
     assert "一键填入中文示例" in values
     assert "多音字怎么用" in config_text
     assert "中文数字/日期归一化已就绪" in config_text
@@ -318,7 +352,7 @@ def test_desktop_builds_complete_pronunciation_workspace(tmp_path, monkeypatch):
         "跨段语速审计与内部单段重做 · 生成后按需展开",
         "格式说明与真实示例 · 新手需要时展开",
         "时间与 SRT 适配 · 普通批量默认顺延、间隔 200ms",
-        "ASR 校对与字幕回写 · 默认关闭",
+        "句尾完整性保护与 ASR 校对 · 默认开启",
         "上下文情感建议 · 默认关闭，确认后才生成",
         "可拖拽时间轴 · 解析后按需展开",
         "字幕、逐句文件与生成报告 · 生成后展开",
@@ -348,7 +382,6 @@ def test_desktop_builds_complete_pronunciation_workspace(tmp_path, monkeypatch):
         pronunciation_dictionary_path(data_dir)
         == data_dir / "pronunciation_dictionary.yaml"
     )
-
     batch_help = describe_dialogue_timing_settings(
         "batch", "overlay", False, "native", 180, 300
     )
@@ -413,6 +446,49 @@ def test_desktop_builds_complete_pronunciation_workspace(tmp_path, monkeypatch):
     assert "未发现" in differences
     assert json.loads(report)["passed"] is True
     assert "t8-waveform" in alignment
+
+
+def test_loaded_presets_and_roles_return_radio_choice_labels(tmp_path):
+    output_dir = tmp_path / "outputs"
+    data_dir = tmp_path / "user-data"
+    output_dir.mkdir()
+    data_dir.mkdir()
+    voice = _write_test_wav(tmp_path / "voice.wav")
+    desktop_webui.save_preset(
+        data_dir,
+        "旧预设",
+        {
+            "language": "ZH",
+            "duration_factor": 1.0,
+            "emotion_mode": 0,
+        },
+    )
+    VoiceLibrary(data_dir).save("旁白", voice, emotion_mode="speaker")
+    demo = build_app(_FakeTTS(), output_dir, data_dir, verbose=False)
+    functions = {
+        getattr(block.fn, "__name__", ""): block.fn for block in demo.fns.values()
+    }
+
+    preset_result = functions["load_preset_event"]("旧预设")
+    role_result = functions["load_voice_event"]("旁白")
+
+    assert preset_result[4] == "跟随音色参考"
+    assert role_result[3] == "跟随音色参考"
+    assert normalize_emotion_mode_index("speaker") == 0
+    assert normalize_emotion_mode_index("未知旧值") == 0
+    assert emotion_mode_ui_value(0) == "跟随音色参考"
+
+
+def test_generated_download_update_only_enables_existing_files(tmp_path):
+    audio = _write_test_wav(tmp_path / "result.wav")
+
+    available = generated_download_update(audio)
+    missing = generated_download_update(tmp_path / "missing.wav")
+
+    assert available["value"] == str(audio)
+    assert available["interactive"] is True
+    assert missing["value"] is None
+    assert missing["interactive"] is False
 
 
 def test_single_generation_can_reuse_saved_voice_without_uploading(tmp_path):
@@ -780,6 +856,12 @@ def test_desktop_dialogue_routes_saved_emotions_per_role(tmp_path):
     inputs[2] = "角色A"
     inputs[3] = "ZH"
     inputs[4] = []
+    dialogue_labels = {
+        getattr(component, "label", None): index
+        for index, component in enumerate(generate_dialogue.inputs)
+    }
+    inputs[dialogue_labels["生成后逐句自动 ASR 校对与句尾保护"]] = False
+    inputs[dialogue_labels["校对失败自动重试次数"]] = 0
     result = list(generate_dialogue.fn(*inputs))[-1]
 
     assert len(tts.calls) == 3
@@ -806,6 +888,67 @@ def test_desktop_dialogue_routes_saved_emotions_per_role(tmp_path):
     assert report["performance"]["elapsed_seconds"] >= 0
     assert report["performance"]["rtf"] >= 0
     assert "RTF" in result[6]
+
+
+def test_dialogue_tail_guard_retries_missing_final_character_with_boundary(tmp_path, monkeypatch):
+    output_dir = tmp_path / "outputs"
+    data_dir = tmp_path / "user-data"
+    output_dir.mkdir()
+    data_dir.mkdir()
+    voice = _write_test_wav(tmp_path / "voice.wav")
+    VoiceLibrary(data_dir).save("旁白", voice)
+    tts = _CapturingTTS()
+    demo = build_app(tts, output_dir, data_dir, verbose=False)
+    transcripts = iter(
+        (
+            "直播延迟设置333秒",
+            "直播延迟设置333秒",
+            "直播延迟设置333秒",
+            "直播延迟设置3333秒",
+        )
+    )
+    monkeypatch.setattr(desktop_webui, "asr_available", lambda *_args: True)
+    monkeypatch.setattr(
+        desktop_webui,
+        "transcribe_audio_file",
+        lambda *_args, **_kwargs: {
+            "text": next(transcripts),
+            "model": "base",
+            "device": "cpu",
+            "backend": "openai_whisper",
+            "word_timestamps": [],
+        },
+    )
+    generate_dialogue = next(
+        block
+        for block in demo.fns.values()
+        if getattr(block.fn, "__name__", "") == "generate_dialogue_event"
+    )
+    inputs = [
+        getattr(component, "value", None) for component in generate_dialogue.inputs
+    ]
+    inputs[0] = "batch"
+    inputs[1] = "旁白|直播延迟设置三三三三秒|ZH|1.0"
+    inputs[2] = "旁白"
+    inputs[3] = "ZH"
+    inputs[4] = []
+
+    result = list(generate_dialogue.fn(*inputs))[-1]
+    report = json.loads(result[3])
+    line_review = report["lines"][0]["asr"]
+
+    assert len(tts.calls) == 4
+    assert tts.calls[0]["text"] == "直播延迟设置三三三三秒"
+    assert tts.calls[1]["text"] == "直播延迟设置三三三三秒。"
+    assert tts.calls[2]["text"] == "直播延迟设置三 三 三 三秒。"
+    assert tts.calls[3]["text"] == "直播延迟设置三 三 三 三秒。"
+    assert [attempt["seed"] for attempt in line_review["attempts"]] == [0, 1, 2, 3]
+    assert line_review["attempts"][0]["tail_passed"] is False
+    assert line_review["attempts"][1]["terminal_punctuation_guard"] is True
+    assert line_review["attempts"][2]["repeated_character_guard"] is True
+    assert line_review["tail_passed"] is True
+    assert line_review["passed"] is True
+    assert line_review["selected_seed"] == 3
 
 
 def test_saved_dialogue_can_be_retimed_and_rewritten_without_tts(tmp_path):
@@ -1020,6 +1163,12 @@ def test_edited_timeline_row_can_be_regenerated_alone_and_merged(tmp_path):
     inputs[2] = "贞贞"
     inputs[3] = "ZH"
     inputs[4] = rows
+    dialogue_labels = {
+        getattr(component, "label", None): index
+        for index, component in enumerate(generate_block.inputs)
+    }
+    inputs[dialogue_labels["生成后逐句自动 ASR 校对与句尾保护"]] = False
+    inputs[dialogue_labels["校对失败自动重试次数"]] = 0
     list(generate_block.fn(*inputs))
     assert len(tts.calls) == 2
     generated_history = load_history_items(output_dir, limit=1)[0]

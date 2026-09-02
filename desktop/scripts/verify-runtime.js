@@ -288,7 +288,7 @@ if (
   !desktopSource.includes("原生单次适配") ||
   !desktopSource.includes("任务恢复、单句重试与工程管理 · 按需展开") ||
   !desktopSource.includes("ASR 自动校对当前结果") ||
-  !desktopSource.includes("ASR 校对与字幕回写 · 默认关闭") ||
+  !desktopSource.includes("句尾完整性保护与 ASR 校对 · 默认开启") ||
   !desktopSource.includes("可编辑时间轴") ||
   !desktopSource.includes("t8-timeline-drag-payload") ||
   !desktopSource.includes("按住 Alt 可临时关闭吸附") ||

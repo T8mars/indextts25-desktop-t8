@@ -36,6 +36,9 @@ _BOUNDARY = re.compile(
     r"|<[^>\n]+>|\r?\n(?:[ \t]*\r?\n)*|[。！？!?；;：:]|(?<!\d)\.(?!\d)|[，、]|(?<!\d),(?!\d)",
     re.IGNORECASE,
 )
+_TERMINAL_PUNCTUATION = frozenset("。！？!?；;：:….")
+_TRAILING_CLOSERS = frozenset("'\"’”）)]}】》〉」』")
+_REPEATED_SPOKEN_CHARACTER = re.compile(r"([\u3400-\u9fff\u3040-\u30ff0-9])\1{2,}")
 
 
 @dataclass(frozen=True, slots=True)
@@ -86,6 +89,40 @@ def latin_word_count(text: str) -> int:
     """Count English/Spanish words without treating punctuation as speech."""
 
     return len(re.findall(r"[^\W_]+(?:['’\-][^\W_]+)*", str(text or ""), re.UNICODE))
+
+
+def ensure_terminal_punctuation(text: str, language: str) -> str:
+    """Give an unterminated retry an explicit sentence boundary.
+
+    IndexTTS occasionally merges the final spoken token with EOS. This helper
+    is intentionally used only by a verified retry, so the normal first pass
+    keeps the user's exact prosody.
+    """
+
+    value = str(text or "")
+    stripped = value.rstrip()
+    if not stripped:
+        return value
+    whitespace = value[len(stripped):]
+    boundary = len(stripped)
+    while boundary and stripped[boundary - 1] in _TRAILING_CLOSERS:
+        boundary -= 1
+    if boundary and stripped[boundary - 1] in _TERMINAL_PUNCTUATION:
+        return value
+    mark = "。" if str(language or "").strip().upper() in {"ZH", "ZHEN", "JA"} else "."
+    return stripped[:boundary] + mark + stripped[boundary:] + whitespace
+
+
+def separate_repeated_characters(text: str, language: str) -> str:
+    """Add soft token boundaries to repeated CJK characters/digits on retries."""
+
+    value = str(text or "")
+    if str(language or "").strip().upper() not in {"ZH", "ZHEN", "JA"}:
+        return value
+    return _REPEATED_SPOKEN_CHARACTER.sub(
+        lambda match: " ".join(match.group(0)),
+        value,
+    )
 
 
 def long_text_retry_limit(language: str, current_limit: int) -> int:
@@ -542,6 +579,7 @@ __all__ = [
     "concatenate_with_pauses",
     "estimate_segment_seconds",
     "effective_segment_limit",
+    "ensure_terminal_punctuation",
     "fit_duration_factor",
     "latin_word_count",
     "long_text_retry_limit",
@@ -549,5 +587,6 @@ __all__ = [
     "postprocess_waveform",
     "preflight_plan_rows",
     "run_with_long_text_guard",
+    "separate_repeated_characters",
     "split_speech_chunks",
 ]

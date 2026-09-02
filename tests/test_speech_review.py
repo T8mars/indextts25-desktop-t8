@@ -38,6 +38,37 @@ def test_english_review_uses_wer():
     assert review["passed"] is True
 
 
+def test_review_rejects_missing_repeated_character_near_sentence_tail():
+    review = speech_review.review_transcript(
+        "直播延迟设置三三三三秒",
+        "直播延迟设置333秒",
+        "ZH",
+        0.82,
+    )
+
+    assert review["similarity"] > 0.82
+    assert review["tail_passed"] is False
+    assert review["tail_edit_distance"] == 1
+    assert review["tail_differences"] == [
+        {"operation": "delete", "expected": "3", "recognized": ""}
+    ]
+    assert review["passed"] is False
+
+
+def test_review_allows_middle_word_difference_when_final_words_are_complete():
+    review = speech_review.review_transcript(
+        "Hello brave new world",
+        "hello new world",
+        "EN",
+        0.7,
+    )
+
+    assert review["tail_expected"] == "new world"
+    assert review["tail_recognized"] == "new world"
+    assert review["tail_passed"] is True
+    assert review["passed"] is True
+
+
 def test_arabic_review_normalizes_diacritics_tatweel_alef_and_ya():
     review = speech_review.review_transcript("إِلَى ٱلْمَدِينَةِ", "الـي المدينة", "AR", 0.99)
     assert review["metric"] == "wer"

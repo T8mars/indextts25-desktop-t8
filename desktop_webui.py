@@ -50,10 +50,12 @@ from desktop_generation_controls import (
     apply_duration_policy,
     build_desktop_plan,
     concatenate_with_pauses,
+    ensure_terminal_punctuation,
     normalize_preflight_text,
     postprocess_waveform,
     preflight_plan_rows,
     run_with_long_text_guard,
+    separate_repeated_characters,
 )
 from desktop_model_lifecycle import DesktopModelLifecycle
 from desktop_streaming_audio import BundledStreamingAudio
@@ -127,7 +129,7 @@ from segment_rate_workspace import (
 
 
 APP_TITLE = "T8star-Aix · IndexTTS 2.5"
-DESKTOP_VERSION = "0.25.0"
+DESKTOP_VERSION = "0.25.1"
 MODEL_MANIFEST = json.loads(
     (Path(__file__).resolve().parent / "desktop_model_manifest.json").read_text(encoding="utf-8")
 )
@@ -151,6 +153,36 @@ LANGUAGE_CHOICES = [
     ("阿拉伯语（AR）", "AR"),
 ]
 DICTIONARY_LANGUAGES = [value for _label, value in LANGUAGE_CHOICES]
+
+
+def normalize_emotion_mode_index(value, available_count: int | None = None) -> int:
+    """Normalize current and legacy emotion-mode values to a safe UI index."""
+
+    count = len(EMOTION_MODES) if available_count is None else max(1, int(available_count))
+    count = min(count, len(EMOTION_MODES))
+    if isinstance(value, str):
+        cleaned = value.strip()
+        if cleaned in EMOTION_MODES:
+            index = EMOTION_MODES.index(cleaned)
+        elif cleaned in PROFILE_EMOTION_MODE_IDS:
+            index = PROFILE_EMOTION_MODE_IDS.index(cleaned)
+        else:
+            try:
+                index = int(cleaned)
+            except ValueError:
+                index = 0
+    else:
+        try:
+            index = int(value)
+        except (TypeError, ValueError):
+            index = 0
+    return index if 0 <= index < count else 0
+
+
+def emotion_mode_ui_value(value, available_count: int | None = None) -> str:
+    """Return the choice label required when a Radio is used as an event output."""
+
+    return EMOTION_MODES[normalize_emotion_mode_index(value, available_count)]
 LOW_VRAM_THRESHOLD_GB = 10.0
 SAMPLE_PRONUNCIATION_ENTRIES = [
     PronunciationEntry("要求", "YAO4 QIU2", "ZH"),
@@ -466,6 +498,7 @@ CSS = """
 .t8-action-dock .prose p { margin: 0 !important; line-height: 1.45 !important; }
 .t8-action-dock button { min-height: 52px !important; font-weight: 760 !important; }
 .t8-action-dock .t8-generate { min-width: 210px !important; }
+.t8-action-dock .t8-download { min-width: 150px !important; }
 .t8-action-dock .t8-stop { min-width: 132px !important; }
 .t8-dock-progress-host {
   flex: 1 1 420px !important;
@@ -1155,6 +1188,35 @@ def append_history(output_dir: Path, item: dict) -> None:
         HISTORY_RAW_CACHE.pop(str(path.resolve()), None)
 
 
+def generated_download_update(path_value):
+    """Keep explicit downloads usable even when an audio preview cannot render."""
+
+    candidate = str(path_value or "").strip()
+    available = bool(candidate) and Path(candidate).is_file()
+    return gr.update(value=candidate if available else None, interactive=available)
+
+
+def append_history_best_effort(output_dir: Path, item: dict) -> str:
+    """History metadata must not invalidate an audio file that was already saved."""
+
+    try:
+        append_history(output_dir, item)
+        return ""
+    except (OSError, TypeError, ValueError) as exc:
+        traceback.print_exc()
+        return f"历史记录写入失败（音频仍可下载）：{str(exc).strip() or type(exc).__name__}"
+
+
+def load_history_best_effort(output_dir: Path) -> list[list[object]]:
+    """Keep returning generated files if the optional history refresh fails."""
+
+    try:
+        return load_history(output_dir)
+    except (OSError, TypeError, ValueError):
+        traceback.print_exc()
+        return []
+
+
 def pronunciation_dictionary_path(data_dir: Path) -> Path:
     return data_dir / DICTIONARY_FILENAME
 
@@ -1805,6 +1867,12 @@ def build_app(
             gr.update(visible=mode in (1, 2, 3)),
         )
 
+    def sync_single_downloads_event(path_value):
+        return generated_download_update(path_value), generated_download_update(path_value)
+
+    def sync_audiocpp_download_event(path_value):
+        return generated_download_update(path_value)
+
     def generate(
         prompt_audio: str,
         text: str,
@@ -2452,7 +2520,7 @@ def build_app(
                 candidate_dir.mkdir(parents=True, exist_ok=True)
 
                 def review_candidate(candidate, candidate_rate, attempt_index):
-                    candidate_path = candidate_dir / f"candidate_{attempt_index + 1:02d}_seed_{seed + attempt_index * 100_003}.wav"
+                    candidate_path = candidate_dir / f"candidate_{attempt_index + 1:02d}_seed_{seed + attempt_index}.wav"
                     save_audio_file(candidate_path, candidate, candidate_rate)
                     candidate_paths.append(str(candidate_path))
                     technical = technical_audio_review(candidate, candidate_rate)
@@ -2463,7 +2531,7 @@ def build_app(
                         "similarity": None,
                         "technical": technical,
                         "attempt": attempt_index + 1,
-                        "seed": seed + attempt_index * 100_003,
+                        "seed": seed + attempt_index,
                     }
                     if quality_asr_enabled:
                         try:
@@ -2504,7 +2572,7 @@ def build_app(
                             lambda retry_index=retry_index: infer_once(
                                 used_factor,
                                 target_duration_seconds if native_requested else None,
-                                retry_index * 100_003,
+                                retry_index,
                             )
                         )
                     )
@@ -2678,7 +2746,7 @@ def build_app(
         if stream_note:
             metrics += "；" + stream_note
 
-        append_history(output_dir, {
+        history_warning = append_history_best_effort(output_dir, {
             "schema_version": 2,
             "id": uuid.uuid4().hex,
             "created_at": time.strftime("%Y-%m-%d %H:%M:%S"),
@@ -2696,13 +2764,19 @@ def build_app(
             "segment_rate_guard": rate_guard_reports,
             "segment_workspace": str(segment_manifest_path or ""),
         })
-        memory_report = apply_memory_policy()
-        metrics += "；模型生命周期=" + json.dumps(memory_report, ensure_ascii=False)
+        if history_warning:
+            metrics += "；" + history_warning
+        try:
+            memory_report = apply_memory_policy()
+            metrics += "；模型生命周期=" + json.dumps(memory_report, ensure_ascii=False)
+        except Exception as exc:  # Cleanup failure must not hide an already saved WAV.
+            traceback.print_exc()
+            metrics += f"；模型清理失败（音频仍可下载）：{str(exc).strip() or type(exc).__name__}"
         yield (
             gr.skip(),
             str(target),
             candidate_paths,
-            load_history(output_dir),
+            load_history_best_effort(output_dir),
             format_pronunciation_report(pronunciation_result) + "\n\n" + metrics,
             metrics,
             segment_rate_rows(selected_rate_reports),
@@ -2949,7 +3023,7 @@ def build_app(
             "text": str(text_value or ""),
             "language": str(language_value or "ZH"),
             "duration_factor": float(duration_value),
-            "emotion_mode": int(emotion_mode_value or 0),
+            "emotion_mode": normalize_emotion_mode_index(emotion_mode_value),
             "emotion_weight": float(emotion_weight_value),
             "emotion_text": str(emotion_text_value or ""),
             "random_emotion": bool(random_emotion_value),
@@ -3004,10 +3078,16 @@ def build_app(
         advanced = settings.get("advanced") or {}
         vector = list(settings.get("emotion_vector") or [0.0] * 8)[:8]
         vector.extend([0.0] * (8 - len(vector)))
-        mode = int(settings.get("emotion_mode", 0))
+        available_mode_count = len(EMOTION_MODES) if qwen_emotion_available else 3
+        mode = normalize_emotion_mode_index(
+            settings.get("emotion_mode", 0),
+            available_mode_count,
+        )
         warning = ""
-        if mode == 3 and not qwen_emotion_available:
-            mode = 0
+        if (
+            normalize_emotion_mode_index(settings.get("emotion_mode", 0)) == 3
+            and not qwen_emotion_available
+        ):
             warning = "；当前为低显存模式，情感描述文本已改为跟随音色参考"
         audio = preset.get("audio") or {}
         return (
@@ -3015,7 +3095,7 @@ def build_app(
             settings.get("text", ""),
             settings.get("language", "ZH"),
             settings.get("duration_factor", 1.0),
-            mode,
+            emotion_mode_ui_value(mode, available_mode_count),
             audio.get("emotion"),
             settings.get("emotion_weight", 0.65),
             settings.get("emotion_text", ""),
@@ -3167,10 +3247,9 @@ def build_app(
             raise gr.Error("请上传角色的音色参考音频。")
         if update_selected and not selected_voice:
             raise gr.Error("要更新或改名，请先选择并载入已有角色。")
-        try:
-            emotion_mode_id = PROFILE_EMOTION_MODE_IDS[int(emotion_mode_value)]
-        except (IndexError, TypeError, ValueError) as exc:
-            raise gr.Error("请选择有效的角色情感模式。") from exc
+        emotion_mode_id = PROFILE_EMOTION_MODE_IDS[
+            normalize_emotion_mode_index(emotion_mode_value)
+        ]
         try:
             try:
                 waveform, sample_rate = load_audio_file(audio)
@@ -3222,7 +3301,7 @@ def build_app(
             profile.name,
             profile.audio_path,
             profile.language,
-            PROFILE_EMOTION_MODE_IDS.index(profile.emotion_mode),
+            emotion_mode_ui_value(profile.emotion_mode),
             profile.emotion_audio_path or None,
             profile.emotion_text,
             profile.emotion_strength,
@@ -4293,11 +4372,21 @@ def build_app(
                 int(dialogue_paragraph_pause_ms),
             )
             line_long_text_guard_reports: list[dict] = []
+            repeat_guard_available = bool(
+                line_plan.chunks
+                and separate_repeated_characters(
+                    line_plan.chunks[-1].text,
+                    language_value,
+                )
+                != line_plan.chunks[-1].text
+            )
 
             def infer_line(
                 factor: float,
                 native_target_seconds: float | None = None,
                 seed_offset: int = 0,
+                terminal_punctuation_guard: bool = False,
+                repeated_character_guard: bool = False,
             ):
                 def infer_once():
                     tts.gr_progress = progress
@@ -4310,10 +4399,33 @@ def build_app(
                     )
                     with safe_gpt_acceleration(sampling_values, line_plan) as (disabled, guarded):
                         for chunk_index, chunk in enumerate(line_plan.chunks):
+                            generation_text = chunk.text
+                            repeated_guard_applied = False
+                            terminal_guard_applied = False
+                            if (
+                                repeated_character_guard
+                                and chunk_index == len(line_plan.chunks) - 1
+                            ):
+                                generation_text = separate_repeated_characters(
+                                    generation_text,
+                                    language_value,
+                                )
+                                repeated_guard_applied = generation_text != chunk.text
+                            if (
+                                terminal_punctuation_guard
+                                and chunk_index == len(line_plan.chunks) - 1
+                            ):
+                                before_terminal = generation_text
+                                generation_text = ensure_terminal_punctuation(
+                                    generation_text,
+                                    language_value,
+                                )
+                                terminal_guard_applied = generation_text != before_terminal
+
                             def generate_with_limit(limit: int):
                                 return tts.infer(
                                     spk_audio_prompt=profile.audio_path,
-                                    text=chunk.text,
+                                    text=generation_text,
                                     output_path=None,
                                     lang=language_value,
                                     **resolved_emotion,
@@ -4357,14 +4469,14 @@ def build_app(
 
                             block_token_count = len(
                                 tts.tokenizer.encode(
-                                    f"<|{str(language_value).lower()}|> {chunk.text}",
+                                    f"<|{str(language_value).lower()}|> {generation_text}",
                                     allowed_special="all",
                                 )
                             )
                             result, guard_report = run_with_long_text_guard(
                                 generate_with_limit,
                                 result_duration_seconds,
-                                text=chunk.text,
+                                text=generation_text,
                                 language=language_value,
                                 token_count=block_token_count,
                                 max_tokens=line_plan.max_tokens,
@@ -4374,6 +4486,8 @@ def build_app(
                             guard_report.update(
                                 speech_block=chunk_index + 1,
                                 seed_offset=int(seed_offset),
+                                terminal_punctuation_guard=terminal_guard_applied,
+                                repeated_character_guard=repeated_guard_applied,
                             )
                             line_long_text_guard_reports.append(guard_report)
                             if not isinstance(result, tuple) or len(result) != 2:
@@ -4413,10 +4527,18 @@ def build_app(
                 factor: float,
                 native_target_seconds: float | None = None,
                 seed_offset: int = 0,
+                terminal_punctuation_guard: bool = False,
+                repeated_character_guard: bool = False,
             ):
                 nonlocal task
                 try:
-                    return infer_line(factor, native_target_seconds, seed_offset)
+                    return infer_line(
+                        factor,
+                        native_target_seconds,
+                        seed_offset,
+                        terminal_punctuation_guard,
+                        repeated_character_guard,
+                    )
                 except Exception as exc:
                     detail = str(exc).strip() or type(exc).__name__
                     task = update_task_line(
@@ -4511,6 +4633,12 @@ def build_app(
                         "seed": dialogue_seed + offset * 1000,
                         "passed": bool(selected_review.get("passed")),
                         "similarity": float(selected_review.get("similarity", 0.0)),
+                        "tail_passed": bool(selected_review.get("tail_passed")),
+                        "tail_similarity": float(
+                            selected_review.get("tail_similarity", 0.0)
+                        ),
+                        "terminal_punctuation_guard": False,
+                        "repeated_character_guard": False,
                         "recognized_text": selected_review.get(
                             "recognized_text", selected_review.get("text", "")
                         ),
@@ -4520,11 +4648,18 @@ def build_app(
                 for retry_index in range(1, dialogue_asr_retry_count + 1):
                     if selected_review.get("passed") or selected_review.get("error"):
                         break
+                    use_repeat_guard = bool(
+                        repeat_guard_available and retry_index >= 2
+                    )
                     candidate, candidate_rate, disabled_again, guarded_again, retry_note = (
                         recorded_infer_line(
                             used_factor,
                             line.slot_ms / 1000.0 if native_slot else None,
-                            retry_index * 100_003,
+                            retry_index,
+                            terminal_punctuation_guard=(
+                                retry_index == 1 or use_repeat_guard
+                            ),
+                            repeated_character_guard=use_repeat_guard,
                         )
                     )
                     accel_disabled = accel_disabled or disabled_again
@@ -4552,7 +4687,7 @@ def build_app(
                     save_audio_file(target, candidate[0], candidate_rate)
                     candidate_review = review_line_audio(target, line, language_value) or {}
                     candidate_seed = (
-                        dialogue_seed + offset * 1000 + retry_index * 100_003
+                        dialogue_seed + offset * 1000 + retry_index
                     )
                     asr_attempts.append(
                         {
@@ -4560,14 +4695,32 @@ def build_app(
                             "seed": candidate_seed,
                             "passed": bool(candidate_review.get("passed")),
                             "similarity": float(candidate_review.get("similarity", 0.0)),
+                            "tail_passed": bool(candidate_review.get("tail_passed")),
+                            "tail_similarity": float(
+                                candidate_review.get("tail_similarity", 0.0)
+                            ),
+                            "terminal_punctuation_guard": (
+                                retry_index == 1 or use_repeat_guard
+                            ),
+                            "repeated_character_guard": use_repeat_guard,
                             "recognized_text": candidate_review.get(
                                 "recognized_text", candidate_review.get("text", "")
                             ),
                         }
                     )
-                    if float(candidate_review.get("similarity", 0.0)) > float(
-                        selected_review.get("similarity", 0.0)
-                    ):
+                    candidate_rank = (
+                        bool(candidate_review.get("passed")),
+                        bool(candidate_review.get("tail_passed")),
+                        float(candidate_review.get("tail_similarity", 0.0)),
+                        float(candidate_review.get("similarity", 0.0)),
+                    )
+                    selected_rank = (
+                        bool(selected_review.get("passed")),
+                        bool(selected_review.get("tail_passed")),
+                        float(selected_review.get("tail_similarity", 0.0)),
+                        float(selected_review.get("similarity", 0.0)),
+                    )
+                    if candidate_rank > selected_rank:
                         selected_waveform = candidate
                         selected_rate = candidate_rate
                         selected_review = candidate_review
@@ -4700,7 +4853,7 @@ def build_app(
             f"{item.get('role') or '旁白'}|{item.get('resolved_text') or item.get('text') or ''}"
             for item in report_lines
         )
-        append_history(output_dir, {
+        history_warning = append_history_best_effort(output_dir, {
             "schema_version": 2,
             "id": uuid.uuid4().hex,
             "created_at": time.strftime("%Y-%m-%d %H:%M:%S"),
@@ -4733,10 +4886,11 @@ def build_app(
             str(archive),
             str(rewritten_srt_path),
             json.dumps(report, ensure_ascii=False, indent=2),
-            load_history(output_dir),
+            load_history_best_effort(output_dir),
             gr.update(choices=task_choices(output_dir), value=run_id),
             f"任务 {run_id} 已完成；{format_runtime_metrics(performance)}；"
-            "已生成 ASR 校对报告、回写字幕和可编辑时间轴。",
+            "已生成 ASR 校对报告、回写字幕和可编辑时间轴。"
+            + (f"；{history_warning}" if history_warning else ""),
             render_timeline_html(lines, report_lines),
             str(combined),
             render_dialogue_dock_progress(
@@ -4908,7 +5062,7 @@ def build_app(
             f"{item.get('role') or '旁白'}|{item.get('resolved_text') or item.get('text') or ''}"
             for item in report_lines
         )
-        append_history(output_dir, {
+        history_warning = append_history_best_effort(output_dir, {
             "schema_version": 2,
             "id": uuid.uuid4().hex,
             "created_at": time.strftime("%Y-%m-%d %H:%M:%S"),
@@ -4934,9 +5088,10 @@ def build_app(
             str(archive),
             str(srt_path),
             json.dumps(report, ensure_ascii=False, indent=2),
-            load_history(output_dir),
+            load_history_best_effort(output_dir),
             gr.update(choices=task_choices(output_dir), value=task_id),
-            f"任务 {task_id} 已按编辑后的时间轴重新混音；未重新执行 TTS。",
+            f"任务 {task_id} 已按编辑后的时间轴重新混音；未重新执行 TTS。"
+            + (f"；{history_warning}" if history_warning else ""),
             render_timeline_html(lines, report_lines),
             str(combined),
             render_dialogue_dock_progress(
@@ -5762,6 +5917,15 @@ def build_app(
                     min_width=110,
                     scale=0,
                 )
+                single_dock_download = gr.DownloadButton(
+                    "下载最近结果",
+                    value=None,
+                    variant="secondary",
+                    elem_classes=["t8-download"],
+                    min_width=150,
+                    scale=0,
+                    interactive=False,
+                )
                 stop_button = gr.Button(
                     "停止语音任务",
                     variant="stop",
@@ -5775,8 +5939,23 @@ def build_app(
                 autoplay=True,
                 type="numpy",
                 format="wav",
+                show_download_button=False,
             )
-            output_audio = gr.Audio(label="最终生成结果", type="filepath")
+            with gr.Row(equal_height=True):
+                output_audio = gr.Audio(
+                    label="最终生成结果",
+                    type="filepath",
+                    show_download_button=True,
+                    scale=8,
+                )
+                single_result_download = gr.DownloadButton(
+                    "下载最终音频 WAV",
+                    value=None,
+                    variant="primary",
+                    min_width=190,
+                    scale=2,
+                    interactive=False,
+                )
             with gr.Accordion("声音 A/B 候选试听、评分与收藏 · 生成后按需展开", open=False):
                 gr.Markdown(
                     "在高级生成参数中把“追加候选数量”设为 1–3 后，系统会保留所有候选并自动选优。"
@@ -5792,7 +5971,11 @@ def build_app(
                     candidate_ab_rating = gr.Slider(
                         1, 5, value=3, step=1, label="主观评分（星）"
                     )
-                candidate_ab_audio = gr.Audio(label="当前候选试听", type="filepath")
+                candidate_ab_audio = gr.Audio(
+                    label="当前候选试听",
+                    type="filepath",
+                    show_download_button=True,
+                )
                 candidate_ab_note = gr.Textbox(
                     label="评分备注",
                     placeholder="例如：A 更像原音色，B 情绪更自然",
@@ -5844,14 +6027,17 @@ def build_app(
                     segment_original_audio = gr.Audio(
                         label="原始段试听",
                         type="filepath",
+                        show_download_button=True,
                     )
                     segment_retry_audio = gr.Audio(
                         label="自动重试候选试听（未触发时为空）",
                         type="filepath",
+                        show_download_button=True,
                     )
                     segment_selected_audio = gr.Audio(
                         label="当前采用段试听",
                         type="filepath",
+                        show_download_button=True,
                     )
                 segment_rate_status = gr.Markdown("尚未生成可审计的多段长文本。")
             generation_performance = gr.Markdown(
@@ -6164,25 +6350,33 @@ def build_app(
                     dialogue_diffusion_steps = gr.Slider(5, 100, value=25, step=1, label="CFM 扩散步数")
                     dialogue_inference_cfg_rate = gr.Slider(0, 1.5, value=0.7, step=0.05, label="CFM 引导强度")
                     dialogue_cfm_temperature = gr.Slider(0.1, 1.5, value=1.0, step=0.05, label="CFM 温度")
-            with gr.Accordion("ASR 校对与字幕回写 · 默认关闭", open=False):
+            with gr.Accordion("句尾完整性保护与 ASR 校对 · 默认开启", open=False):
                 gr.Markdown(
-                    "启用后逐句使用本地 Whisper 校对，并把识别文本、CER/WER、差异、词级时间戳和通过状态写入任务报告。"
+                    "默认逐句使用本地 Whisper 核验整句和最后 4 个字（英文/西语/阿语为最后 2 个词）；"
+                    "检测到句尾缺字时最多换 3 个连续 seed 自动重做，首个重试还会补充句末标点帮助模型正确收尾。"
+                    "连续三个以上相同中文字或数字仍缺失时，后续候选会自动加入不发声的空格边界，避免模型合并重复字。"
+                    "识别文本、CER/WER、句尾差异、词级时间戳和通过状态会写入任务报告。"
                     "回写字幕默认采用实际混音时间；只有通过阈值的识别文本才替换原字幕，低分结果保留原文。"
                     "ASR 权重首次使用时下载到启动器用户数据目录的 `asr_models` 文件夹。"
                 )
                 with gr.Row():
-                    dialogue_asr_enabled = gr.Checkbox(value=False, label="生成后逐句自动 ASR 校对")
+                    dialogue_asr_enabled = gr.Checkbox(value=True, label="生成后逐句自动 ASR 校对与句尾保护")
                     dialogue_asr_backend = gr.Dropdown(choices=list(ASR_BACKENDS), value="auto", label="ASR 后端")
                     dialogue_asr_model = gr.Dropdown(choices=list(ASR_MODELS), value="base", label="ASR 模型")
-                    dialogue_asr_device = gr.Dropdown(choices=["auto", "cuda", "cpu"], value="auto", label="ASR 设备")
+                    dialogue_asr_device = gr.Dropdown(
+                        choices=["auto", "cuda", "cpu"],
+                        value="cpu",
+                        label="ASR 设备",
+                        info="默认 CPU，避免与 TTS 模型争抢显存；高显存显卡可手动改为 CUDA",
+                    )
                     dialogue_asr_threshold = gr.Slider(0, 1, value=0.82, step=0.01, label="ASR 通过阈值")
                     dialogue_asr_retry_count = gr.Slider(
                         0,
                         3,
-                        value=0,
+                        value=3,
                         step=1,
-                        label="失败自动重试次数",
-                        info="每次更换 seed，保留 ASR 相似度最高的一次；大批量会增加耗时",
+                        label="校对失败自动重试次数",
+                        info="推荐 3 次；优先保留句尾完整且整句相似度更高的一次，大批量会增加耗时",
                     )
                 with gr.Row():
                     subtitle_timing_mode = gr.Dropdown(
@@ -6192,11 +6386,11 @@ def build_app(
                     )
                     subtitle_text_mode = gr.Dropdown(
                         choices=[
-                            ("仅使用通过校对的 ASR 文本（推荐）", "asr_passed"),
+                            ("仅使用通过校对的 ASR 文本", "asr_passed"),
                             ("始终使用 ASR 文本", "asr_all"),
-                            ("始终保留原字幕", "original"),
+                            ("始终保留原字幕（推荐）", "original"),
                         ],
-                        value="asr_passed",
+                        value="original",
                         label="回写字幕文本",
                     )
                     subtitle_include_role = gr.Checkbox(value=True, label="回写字幕保留 [角色] 前缀")
@@ -6224,6 +6418,14 @@ def build_app(
                     "加入队列",
                     variant="secondary",
                     min_width=110,
+                    scale=0,
+                )
+                dialogue_combined_download = gr.DownloadButton(
+                    "下载合并音频 WAV",
+                    value=None,
+                    variant="secondary",
+                    elem_classes=["t8-download"],
+                    min_width=150,
                     scale=0,
                 )
                 stop_dialogue_button = gr.Button(
@@ -6320,15 +6522,11 @@ def build_app(
                 container=False,
                 interactive=True,
             )
-            with gr.Row(equal_height=True):
-                dialogue_output = gr.Audio(label="合并音频", type="filepath", scale=8)
-                dialogue_combined_download = gr.DownloadButton(
-                    "下载合并音频 WAV",
-                    value=None,
-                    variant="primary",
-                    scale=2,
-                    min_width=190,
-                )
+            dialogue_output = gr.Audio(
+                label="合并音频",
+                type="filepath",
+                show_download_button=True,
+            )
             with gr.Accordion("字幕、逐句文件与生成报告 · 生成后展开", open=False):
                 dialogue_archive = gr.File(label="逐句音频 + combined.wav + report.json + rewritten.srt", interactive=False)
                 dialogue_rewritten_srt = gr.File(label="自动回写字幕 SRT", interactive=False)
@@ -6558,7 +6756,21 @@ def build_app(
                 placeholder="例如：平静而坚定",
             )
             audiocpp_generate_button = gr.Button("使用 audio.cpp 实验后端生成", variant="primary")
-            audiocpp_output = gr.Audio(label="audio.cpp 生成结果", type="filepath")
+            with gr.Row(equal_height=True):
+                audiocpp_output = gr.Audio(
+                    label="audio.cpp 生成结果",
+                    type="filepath",
+                    show_download_button=True,
+                    scale=8,
+                )
+                audiocpp_download = gr.DownloadButton(
+                    "下载 audio.cpp 音频",
+                    value=None,
+                    variant="primary",
+                    min_width=190,
+                    scale=2,
+                    interactive=False,
+                )
             audiocpp_report = gr.TextArea(
                 label="audio.cpp 探测/生成报告 JSON",
                 value=json.dumps(audiocpp_initial_status, ensure_ascii=False, indent=2),
@@ -6910,7 +7122,7 @@ def build_app(
             outputs=audiocpp_report,
             queue=False,
         )
-        audiocpp_generate_button.click(
+        audiocpp_generation_event = audiocpp_generate_button.click(
             generate_audiocpp_event,
             inputs=[
                 audiocpp_executable,
@@ -6925,6 +7137,12 @@ def build_app(
             ],
             outputs=[audiocpp_output, audiocpp_report],
             concurrency_limit=1,
+        )
+        audiocpp_generation_event.then(
+            sync_audiocpp_download_event,
+            inputs=audiocpp_output,
+            outputs=audiocpp_download,
+            queue=False,
         )
 
         gr.HTML(
@@ -7526,6 +7744,12 @@ def build_app(
                 outputs=history_refresh_outputs,
                 queue=False,
             )
+            event.then(
+                sync_single_downloads_event,
+                inputs=output_audio,
+                outputs=[single_result_download, single_dock_download],
+                queue=False,
+            )
             return event
 
         generation_event = bind_generation(generate_button)
@@ -7560,7 +7784,7 @@ def build_app(
             ],
             queue=False,
         )
-        redo_internal_segment_button.click(
+        redo_internal_segment_event_handle = redo_internal_segment_button.click(
             redo_internal_segment_event,
             inputs=[segment_manifest_state, segment_rate_select],
             outputs=[
@@ -7574,6 +7798,12 @@ def build_app(
                 segment_rate_status,
             ],
             concurrency_limit=1,
+        )
+        redo_internal_segment_event_handle.then(
+            sync_single_downloads_event,
+            inputs=output_audio,
+            outputs=[single_result_download, single_dock_download],
+            queue=False,
         )
         stop_button.click(
             fn=None,

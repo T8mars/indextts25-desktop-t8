@@ -155,6 +155,64 @@ def _difference_details(expected: Sequence[str], recognized: Sequence[str], sepa
     return details
 
 
+def _tail_review(
+    expected: Sequence[str],
+    recognized: Sequence[str],
+    *,
+    separator: str,
+    window_size: int,
+) -> dict[str, Any]:
+    """Review edits that touch the spoken tail, including repeated-token deletion.
+
+    Comparing only the two suffix strings is insufficient for cases such as
+    ``3333秒`` -> ``333秒``: both can still have the same short suffix. The
+    alignment positions make the missing repeated token visible.
+    """
+
+    expected_items = list(expected)
+    recognized_items = list(recognized)
+    expected_start = max(0, len(expected_items) - int(window_size))
+    recognized_start = max(0, len(recognized_items) - int(window_size))
+    tail_differences: list[dict[str, str]] = []
+    tail_edit_count = 0
+    matcher = difflib.SequenceMatcher(
+        a=expected_items,
+        b=recognized_items,
+        autojunk=False,
+    )
+    for operation, left_start, left_end, right_start, right_end in matcher.get_opcodes():
+        if operation == "equal":
+            continue
+        expected_overlap = max(0, left_end - max(left_start, expected_start))
+        recognized_overlap = max(0, right_end - max(right_start, recognized_start))
+        touches_tail = (
+            operation in {"delete", "replace"} and expected_overlap > 0
+        ) or (
+            operation in {"insert", "replace"} and recognized_overlap > 0
+        )
+        if not touches_tail:
+            continue
+        tail_edit_count += max(expected_overlap, recognized_overlap, 1)
+        tail_differences.append(
+            {
+                "operation": operation,
+                "expected": separator.join(expected_items[left_start:left_end]),
+                "recognized": separator.join(recognized_items[right_start:right_end]),
+            }
+        )
+    effective_window = max(1, min(int(window_size), len(expected_items)))
+    tail_similarity = max(0.0, 1.0 - tail_edit_count / effective_window)
+    return {
+        "tail_expected": separator.join(expected_items[expected_start:]),
+        "tail_recognized": separator.join(recognized_items[recognized_start:]),
+        "tail_window_size": effective_window,
+        "tail_edit_distance": tail_edit_count,
+        "tail_similarity": round(tail_similarity, 6),
+        "tail_passed": bool(expected_items and recognized_items and not tail_differences),
+        "tail_differences": tail_differences,
+    }
+
+
 def review_transcript(expected_text: str, recognized_text: str, language: str = "AUTO", threshold: float = 0.82) -> dict[str, Any]:
     threshold = float(threshold)
     if not 0 <= threshold <= 1:
@@ -171,15 +229,28 @@ def review_transcript(expected_text: str, recognized_text: str, language: str = 
     metric_expected = list(expected) if metric == "cer" else expected_words
     metric_recognized = list(recognized) if metric == "cer" else recognized_words
     similarity = max(0.0, 1.0 - metric_error)
+    tail = _tail_review(
+        metric_expected,
+        metric_recognized,
+        separator="" if metric == "cer" else " ",
+        window_size=4 if metric == "cer" else 2,
+    )
     return {
         "expected_text": str(expected_text), "recognized_text": str(recognized_text),
         "normalized_expected": expected, "normalized_recognized": recognized,
         "edit_distance": char_distance, "cer": round(cer, 6),
         "word_edit_distance": word_distance, "wer": round(wer, 6) if metric == "wer" else None,
         "metric": metric, "metric_error_rate": round(metric_error, 6), "similarity": round(similarity, 6),
-        "threshold": threshold, "passed": bool(expected and recognized and similarity >= threshold),
+        "threshold": threshold,
+        "passed": bool(
+            expected
+            and recognized
+            and similarity >= threshold
+            and tail["tail_passed"]
+        ),
         "language": str(language).upper(),
         "differences": _difference_details(metric_expected, metric_recognized, "" if metric == "cer" else " "),
+        **tail,
         "normalization": ["NFKC", "casefold", "traditional_to_simplified", "number_canonicalization", "punctuation_ignored"] + (["arabic_diacritics_removed", "arabic_alef_ya_normalization"] if str(language or "AUTO").upper() == "AR" else []),
     }
 
