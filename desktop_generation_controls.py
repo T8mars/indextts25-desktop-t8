@@ -12,6 +12,7 @@ import torch
 import torch.nn.functional as F
 
 from indextts.utils.common import fade_out_pcm_tail
+from indextts.utils.text_segmentation import language_aware_token_budget
 
 
 LANGUAGE_AUTO_LIMITS = {"ZH": 120, "EN": 60, "JA": 100, "ES": 60, "AR": 80}
@@ -341,6 +342,13 @@ def build_desktop_plan(
         text, pause_preset, comma_pause_ms, sentence_pause_ms, paragraph_pause_ms
     )
     prefix = f"<|{language.lower()}|> "
+    prefix_tokens = len(tts.tokenizer.encode(prefix, allowed_special="all"))
+    content_budget = language_aware_token_budget(
+        limit,
+        prefix_tokens,
+        language=language,
+    )
+    limit = content_budget + prefix_tokens
     segments: list[dict[str, Any]] = []
     for block_index, chunk in enumerate(chunks, 1):
         parts = tts.split_text_by_tokens(chunk.text, limit, prefix)

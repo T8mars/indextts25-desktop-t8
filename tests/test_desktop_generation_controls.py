@@ -61,6 +61,23 @@ def test_desktop_auto_segmentation_and_pause_preview():
     assert plan.to_dict()["gpt_accel_cache_fix"] is True
 
 
+def test_desktop_custom_non_cjk_plan_reports_the_effective_safe_limit():
+    plan = build_desktop_plan(
+        FakeTTS(),
+        "A" * 90,
+        "EN",
+        "custom",
+        120,
+        "off",
+        0,
+        0,
+        0,
+    )
+    assert plan.max_tokens == 88
+    assert [len(item["text"]) for item in plan.segments] == [81, 9]
+    assert plan.max_segment_tokens == 88
+
+
 def test_long_text_preflight_normalizes_and_marks_risky_segments():
     import re
 

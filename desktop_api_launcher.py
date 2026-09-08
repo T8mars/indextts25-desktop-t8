@@ -17,7 +17,7 @@ from typing import Any
 APP_DATA_NAME = "T8star-Aix · IndexTTS 2.5"
 DEFAULT_PORT = 7861
 DEFAULT_HOST = "127.0.0.1"
-DESKTOP_VERSION = "0.26.1"
+DESKTOP_VERSION = "0.26.2"
 
 
 def resource_root() -> Path:

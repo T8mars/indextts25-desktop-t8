@@ -138,7 +138,7 @@ from segment_rate_workspace import (
 
 
 APP_TITLE = "T8star-Aix · IndexTTS 2.5"
-DESKTOP_VERSION = "0.26.1"
+DESKTOP_VERSION = "0.26.2"
 MODEL_MANIFEST = json.loads(
     (Path(__file__).resolve().parent / "desktop_model_manifest.json").read_text(encoding="utf-8")
 )
@@ -5826,7 +5826,7 @@ def build_app(
                         value=120,
                         step=10,
                         label="每段最大文本 Token",
-                        info="长文本会按标点和 Token 预算自动切分后合并",
+                        info="长文本按标点和 Token 切分；非中日韩等语言的大值会自动限制到安全预算",
                     )
                     segment_silence_ms = gr.Slider(
                         0, 3000, value=200, step=10, label="段间静音（毫秒）"
