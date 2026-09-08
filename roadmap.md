@@ -1,7 +1,7 @@
 # T8star-Aix IndexTTS 2.5 开发路线图
 
 本文档记录桌面整合包与 ComfyUI 节点的共同开发范围、依赖政策和验收标准。当前公开基线为
-**Desktop 0.25.0 / ComfyUI Node 0.23.0**。
+**Desktop 0.26.1 / ComfyUI Node 0.23.0**。
 
 | 发行物 | 当前版本 | 本版主要内容 |
 | --- | --- | --- |

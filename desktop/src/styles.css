@@ -225,6 +225,26 @@ input, select {
   justify-content: flex-end;
   margin-bottom: 10px;
 }
+.api-card {
+  border-color: rgba(69, 212, 131, 0.28);
+  background: rgba(69, 212, 131, 0.045);
+}
+.api-grid {
+  display: grid;
+  grid-template-columns: minmax(120px, 0.35fr) minmax(260px, 1fr);
+  gap: 12px;
+}
+.api-grid label { margin: 0; }
+.api-grid input { width: 100%; margin-top: 8px; }
+.api-key-row { margin-bottom: 12px; }
+.api-key-row button { flex: 0 0 auto; white-space: nowrap; }
+.api-options {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px 16px;
+}
+.api-endpoint code { color: #7be3ad; overflow-wrap: anywhere; }
+.api-actions { margin-top: 12px; }
 .manual-runtime-card select { width: 100%; margin-bottom: 6px; }
 .diagnostics-heading {
   display: flex;
@@ -409,4 +429,6 @@ footer { padding: 22px 4px 0; text-align: center; color: #71798a; font-size: 12p
   .model-download-heading { flex-direction: column; gap: 5px; }
   .model-download-heading span { text-align: left; }
   .actions button { width: 100%; }
+  .api-grid, .api-options { grid-template-columns: 1fr; }
+  .api-key-row { flex-wrap: wrap; }
 }

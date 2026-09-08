@@ -6,6 +6,8 @@ import argparse
 import gc
 import html as html_lib
 import json
+import os
+import secrets
 import shutil
 import threading
 import time
@@ -19,6 +21,7 @@ from pathlib import Path
 import gradio as gr
 import torch
 import torchaudio
+import uvicorn
 
 from audio_quality import analyze_reference_audio, prepare_reference_audio, waveform_html
 from candidate_quality import combined_candidate_score, select_best_candidate, technical_audio_review
@@ -58,6 +61,12 @@ from desktop_generation_controls import (
     separate_repeated_characters,
 )
 from desktop_model_lifecycle import DesktopModelLifecycle
+from desktop_api import (
+    DesktopTTSService,
+    InferenceCoordinator,
+    ShutdownController,
+    create_api_app,
+)
 from desktop_streaming_audio import BundledStreamingAudio
 from dialogue_runtime import (
     DialogueLine,
@@ -129,7 +138,7 @@ from segment_rate_workspace import (
 
 
 APP_TITLE = "T8star-Aix · IndexTTS 2.5"
-DESKTOP_VERSION = "0.25.1"
+DESKTOP_VERSION = "0.26.1"
 MODEL_MANIFEST = json.loads(
     (Path(__file__).resolve().parent / "desktop_model_manifest.json").read_text(encoding="utf-8")
 )
@@ -770,6 +779,22 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--qwen_emo", action="store_true", help="Force QwenEmotion on low-VRAM GPUs")
     parser.add_argument("--acceleration", choices=MODES, default="off", help="Optional acceleration mode")
     parser.add_argument("--verbose", action="store_true")
+    parser.add_argument(
+        "--api-default-voice",
+        default=os.environ.get("T8STAR_INDEXTTS_API_DEFAULT_VOICE", ""),
+        help="Default saved voice name or id used when an API request omits voice",
+    )
+    parser.add_argument(
+        "--api-no-history",
+        action="store_true",
+        help="Do not append API generations to the desktop history",
+    )
+    parser.add_argument(
+        "--api-cors-origin",
+        action="append",
+        default=[],
+        help="Allowed browser origin for API requests; repeat for multiple origins",
+    )
     return parser.parse_args()
 
 
@@ -1371,6 +1396,7 @@ def build_app(
     acceleration_summary: str = "",
     fallback_factory=None,
     model_factory=None,
+    model_lifecycle: DesktopModelLifecycle | None = None,
 ) -> gr.Blocks:
     dictionary_file = pronunciation_dictionary_path(data_dir)
     text_normalization_notice = format_text_normalization_notice(
@@ -1400,7 +1426,9 @@ def build_app(
     runtime_fallback_used = False
     runtime_fallback_note = ""
     initial_tts = tts
-    lifecycle = DesktopModelLifecycle(initial_tts, model_factory or (lambda: initial_tts))
+    lifecycle = model_lifecycle or DesktopModelLifecycle(
+        initial_tts, model_factory or (lambda: initial_tts)
+    )
     memory_policy_path = data_dir / "memory_policy.json"
     memory_policy_defaults = {
         "release_after_generation": False,
@@ -2379,6 +2407,11 @@ def build_app(
             )
             return combined, sample_rate, disabled, guarded
 
+        # Gradio registers streaming output state only after the streaming Audio
+        # component receives a non-update value. If a generator returns gr.skip()
+        # before emitting its first chunk, Gradio 5.45 later raises KeyError for
+        # that component while ending the stream (the UI reported "Error 181").
+        stream_output_started = False
         try:
             native_requested = target_duration_mode == "native" and target_duration_seconds > 0
             long_latin_guard_required = (
@@ -2401,8 +2434,8 @@ def build_app(
             if bool(stream_preview) and not stream_effective:
                 if segment_rate_guard_required:
                     stream_note = (
-                        "多段长文本需要先完成跨段语速异常检测与异常段单独重做；"
-                        "本次自动关闭流式试听，仅输出校验后的最终音频。"
+                        "多段文本已自动切换为完整生成，以执行跨段语速检查和异常段自动重试；"
+                        "流式试听未启用，不影响最终音频输出。"
                     )
                 elif long_latin_guard_required:
                     stream_note = (
@@ -2428,6 +2461,7 @@ def build_app(
                             selected_segment_session = None
                             runtime_note = ""
                             break
+                        stream_output_started = True
                         yield (
                             (sample_rate if 'sample_rate' in locals() else 22050, preview_waveform.squeeze(0).numpy()),
                             gr.skip(),
@@ -2772,8 +2806,13 @@ def build_app(
         except Exception as exc:  # Cleanup failure must not hide an already saved WAV.
             traceback.print_exc()
             metrics += f"；模型清理失败（音频仍可下载）：{str(exc).strip() or type(exc).__name__}"
+        final_stream_output = (
+            gr.skip()
+            if stream_output_started
+            else None
+        )
         yield (
-            gr.skip(),
+            final_stream_output,
             str(target),
             candidate_paths,
             load_history_best_effort(output_dir),
@@ -5434,7 +5473,7 @@ def build_app(
 
         with gr.Row(elem_classes=["t8-desktop-toolbar"]):
             return_launcher_button = gr.Button(
-                "返回启动配置（停止模型）",
+                "返回启动配置",
                 variant="secondary",
             )
             open_output_directory_button = gr.Button("打开输出目录")
@@ -6924,12 +6963,17 @@ def build_app(
 
         return_launcher_button.click(
             fn=None,
-            js="""() => {
+            js="""async () => {
               if (!window.desktopApi?.showLauncher) {
                 window.alert('此按钮仅在 T8star-Aix 桌面整合包中可用。');
                 return;
               }
-              if (window.confirm('返回启动配置会停止当前模型并释放显存，是否继续？')) {
+              const state = await window.desktopApi.getState();
+              const keepsApi = state?.apiMode === 'api-only' || state?.apiMode === 'attached';
+              const message = keepsApi
+                ? '返回启动配置后，独立 API 服务会继续运行。是否继续？'
+                : '返回启动配置会停止当前模型并释放显存，是否继续？';
+              if (window.confirm(message)) {
                 void window.desktopApi.showLauncher();
               }
             }""",
@@ -8061,8 +8105,10 @@ def main() -> None:
         flush=True,
     )
 
+    coordinator = InferenceCoordinator()
+
     def load_tts(selection):
-        return IndexTTS2(
+        model = IndexTTS2(
             cfg_path=str(model_dir / "config.yaml"),
             model_dir=str(model_dir),
             use_bf16=policy["use_bf16"],
@@ -8077,6 +8123,7 @@ def main() -> None:
             use_qwen_emo=policy["use_qwen_emo"],
             **selection.constructor_kwargs(),
         )
+        return coordinator.guard_model(model)
 
     startup_fallback = ""
     displayed_acceleration = acceleration
@@ -8116,6 +8163,8 @@ def main() -> None:
         if acceleration.effective != "off"
         else None
     )
+    model_factory = lambda: load_tts(acceleration)
+    lifecycle = DesktopModelLifecycle(tts, model_factory)
     demo = build_app(
         tts,
         output_dir,
@@ -8124,17 +8173,60 @@ def main() -> None:
         diagnostic,
         diagnostic_summary,
         fallback_factory=fallback_factory,
-        model_factory=lambda: load_tts(acceleration),
+        model_factory=model_factory,
+        model_lifecycle=lifecycle,
     )
     demo.queue(max_size=20, default_concurrency_limit=1)
-    demo.launch(
-        server_name=args.host,
-        server_port=args.port,
-        inbrowser=False,
-        show_error=True,
-        quiet=True,
+    api_key = str(os.environ.get("T8STAR_INDEXTTS_API_KEY") or "").strip()
+    generated_key = False
+    if len(api_key) < 16:
+        api_key = secrets.token_urlsafe(32)
+        generated_key = True
+    desktop_version = str(
+        os.environ.get("T8STAR_INDEXTTS_DESKTOP_VERSION") or "development"
+    ).strip()
+    api_service = DesktopTTSService(
+        lifecycle,
+        VoiceLibrary(data_dir),
+        output_dir,
+        coordinator,
+        default_voice=args.api_default_voice,
+        verbose=args.verbose,
+        save_history=not args.api_no_history,
+        history_writer=lambda item: append_history_best_effort(output_dir, item),
+    )
+    shutdown = ShutdownController()
+    api_app = create_api_app(
+        api_service,
+        api_key=api_key,
+        desktop_version=desktop_version,
+        coordinator=coordinator,
+        shutdown=shutdown,
+        allow_origins=args.api_cors_origin,
+    )
+    application = gr.mount_gradio_app(
+        api_app,
+        demo,
+        path="/",
         allowed_paths=[str(output_dir), str(data_dir)],
     )
+    config = uvicorn.Config(
+        application,
+        host=args.host,
+        port=args.port,
+        log_level="info" if args.verbose else "warning",
+        access_log=args.verbose,
+    )
+    server = uvicorn.Server(config)
+    shutdown.bind(lambda: setattr(server, "should_exit", True))
+    print(f">> Local API: http://{args.host}:{args.port}/docs", flush=True)
+    if generated_key:
+        print(
+            ">> Development API key (set T8STAR_INDEXTTS_API_KEY to persist it): "
+            + api_key,
+            flush=True,
+        )
+    server.run()
 
 
 if __name__ == "__main__":

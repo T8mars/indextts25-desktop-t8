@@ -6,12 +6,14 @@ const asar = require("@electron/asar");
 const desktopRoot = path.resolve(__dirname, "..");
 const projectRoot = path.resolve(desktopRoot, "..");
 const sourcePackage = JSON.parse(fs.readFileSync(path.join(desktopRoot, "package.json"), "utf8"));
-const packagedRoot = path.join(
-  desktopRoot,
-  "out",
-  `T8star-Aix-IndexTTS-2.5-v${sourcePackage.version}-win32-x64`,
-  "resources"
+const packagedAppRoot = path.resolve(
+  process.env.T8_PACKAGED_APP_ROOT || path.join(
+    desktopRoot,
+    "out",
+    `T8star-Aix-IndexTTS-2.5-v${sourcePackage.version}-win32-x64`
+  )
 );
+const packagedRoot = path.join(packagedAppRoot, "resources");
 
 if (!fs.existsSync(packagedRoot)) {
   console.error(`Packaged resources do not exist: ${packagedRoot}`);
@@ -96,7 +98,12 @@ if (
   !packagedHtmlSource.includes('id="outputPath"') ||
   !packagedHtmlSource.includes('id="dataPath"') ||
   !packagedHtmlSource.includes('id="logPath"') ||
-  (packagedHtmlSource.match(/<details\b[^>]*class="[^"]*\badvanced-card\b[^"]*"[^>]*>/g) || []).length !== 4 ||
+  !packagedHtmlSource.includes('id="apiPort"') ||
+  !packagedHtmlSource.includes('id="startApiButton"') ||
+  !packagedMainSource.includes('ipcMain.handle("desktop:start-api-service"') ||
+  !packagedPreloadSource.includes('startApiService') ||
+  !packagedRendererSource.includes('startApiButton.addEventListener') ||
+  (packagedHtmlSource.match(/<details\b[^>]*class="[^"]*\badvanced-card\b[^"]*"[^>]*>/g) || []).length !== 5 ||
   /<details\b[^>]*class="[^"]*\badvanced-card\b[^"]*"[^>]*\sopen(?:\s|=|>)/.test(packagedHtmlSource) ||
   !packagedUpdateSource.includes("verifyManifestSignature") ||
   !packagedUpdateSource.includes("verifyPayloadFiles") ||
@@ -255,8 +262,10 @@ if (!audioIoSource.includes("AudioDecoder") || !audioIoSource.includes("AudioEnc
 }
 
 const desktopSource = fs.readFileSync(path.join(packagedRoot, "desktop_webui.py"), "utf8");
+const desktopApiSource = fs.readFileSync(path.join(packagedRoot, "desktop_api.py"), "utf8");
+const desktopApiLauncherSource = fs.readFileSync(path.join(packagedRoot, "desktop_api_launcher.py"), "utf8");
 const voiceLibrarySource = fs.readFileSync(path.join(packagedRoot, "desktop_voice_library.py"), "utf8");
-for (const moduleName of ["desktop_presets.py", "desktop_voice_library.py", "desktop_generation_controls.py", "desktop_model_lifecycle.py", "desktop_streaming_audio.py", "desktop_candidate_workspace.py", "desktop_job_queue.py", "desktop_tasks.py", "desktop_project_bundle.py", "desktop_runtime_benchmark.py", "audio_quality.py", "audiocpp_backend.py", "audiocpp_component_manager.py", "candidate_quality.py", "speech_review.py", "timeline_tools.py", "context_emotion.py", "dialogue_runtime.py", "runtime_acceleration.py", "runtime_benchmark.py", "runtime_metrics.py", "segment_rate_workspace.py"]) {
+for (const moduleName of ["desktop_api.py", "desktop_api_launcher.py", "desktop_presets.py", "desktop_voice_library.py", "desktop_generation_controls.py", "desktop_model_lifecycle.py", "desktop_streaming_audio.py", "desktop_candidate_workspace.py", "desktop_job_queue.py", "desktop_tasks.py", "desktop_project_bundle.py", "desktop_runtime_benchmark.py", "audio_quality.py", "audiocpp_backend.py", "audiocpp_component_manager.py", "candidate_quality.py", "speech_review.py", "timeline_tools.py", "context_emotion.py", "dialogue_runtime.py", "runtime_acceleration.py", "runtime_benchmark.py", "runtime_metrics.py", "segment_rate_workspace.py"]) {
   if (!fs.existsSync(path.join(packagedRoot, moduleName))) {
     console.error(`Packaged desktop runtime module is missing: ${moduleName}`);
     process.exit(1);
@@ -281,7 +290,7 @@ if (
   !desktopSource.includes("停止语音任务") ||
   !desktopSource.includes("停止多角色任务") ||
   !desktopSource.includes("格式说明与真实示例 · 新手需要时展开") ||
-  !desktopSource.includes("返回启动配置（停止模型）") ||
+  !desktopSource.includes("返回启动配置") ||
   !desktopSource.includes("window.desktopApi.showLauncher") ||
   !desktopSource.includes("技术诊断 JSON（排错时展开或复制）") ||
   !desktopSource.includes("CFM 扩散步数") ||
@@ -324,16 +333,36 @@ if (
   console.error("Packaged desktop WebUI is missing pronunciation, role-emotion, preset, advanced, or VRAM controls.");
   process.exit(1);
 }
+for (const filename of ["启动API服务.cmd", "停止API服务.cmd", "查看API服务状态.cmd", "API服务使用说明.txt"]) {
+  if (!fs.existsSync(path.join(path.dirname(packagedRoot), filename))) {
+    console.error(`Packaged API root helper is missing: ${filename}`);
+    process.exit(1);
+  }
+}
+if (
+  !desktopApiSource.includes('/v1/audio/speech') ||
+  !desktopApiSource.includes('/api/v1/jobs') ||
+  !desktopApiSource.includes('InferenceCoordinator') ||
+  !desktopApiLauncherSource.includes('本窗口保持打开即表示服务持续监听')
+) {
+  console.error("Packaged local API runtime is incomplete.");
+  process.exit(1);
+}
 const packagedDesktopVersion = desktopSource.match(/^DESKTOP_VERSION\s*=\s*"([^"]+)"/m)?.[1];
 if (packagedDesktopVersion !== packagedPackage.version) {
   console.error(`Packaged WebUI version drift: ${packagedDesktopVersion} != ${packagedPackage.version}`);
+  process.exit(1);
+}
+const packagedApiVersion = desktopApiLauncherSource.match(/^DESKTOP_VERSION\s*=\s*"([^"]+)"/m)?.[1];
+if (packagedApiVersion !== packagedPackage.version) {
+  console.error(`Packaged API launcher version drift: ${packagedApiVersion} != ${packagedPackage.version}`);
   process.exit(1);
 }
 
 const check = spawnSync(pythonExe, [
   "-c",
   [
-    "import torch, gradio, transformers, flash_attn, triton, deepspeed",
+    "import torch, gradio, transformers, flash_attn, triton, deepspeed, fastapi, uvicorn",
     "from indextts.infer_v2_5 import IndexTTS2",
     "from indextts.gpt.model_v2_5 import GPT2InferenceModel",
     "from indextts.gpt.transformers_generation_utils import GenerationMixin",
@@ -343,6 +372,8 @@ const check = spawnSync(pythonExe, [
     "from indextts.pronunciation import PronunciationEntry, process_pronunciation_text",
     "from desktop_generation_controls import DesktopGenerationPlan, DesktopSpeechChunk, allocate_native_chunk_durations, effective_segment_limit, split_speech_chunks",
     "from desktop_model_lifecycle import DesktopModelLifecycle",
+    "from desktop_api import InferenceCoordinator, encode_audio_bytes",
+    "from desktop_api_launcher import DEFAULT_PORT",
     "from audio_quality import analyze_reference_audio, waveform_html",
     "from audiocpp_backend import build_audiocpp_command",
     "from desktop_tasks import task_choices",
@@ -360,6 +391,8 @@ const check = spawnSync(pythonExe, [
     "assert split_speech_chunks('第一句<pause=0.5>第二句', 'off', 0, 0, 0)[0].pause_after_ms == 500",
     "assert recommend_benchmark_mode([{'status': 'ok', 'requested_mode': 'off', 'effective_mode': 'off', 'rtf': 1.0}])['mode'] == 'off'",
     "assert combined_candidate_score(0.8, None) == 0.8",
+    "api_mp3, api_media = encode_audio_bytes(torch.zeros((1, 2400)), 24000, 'mp3')",
+    "assert len(api_mp3) > 100 and api_media == 'audio/mpeg' and DEFAULT_PORT == 7861",
     "duration_plan = DesktopGenerationPlan('EN', 60, (DesktopSpeechChunk('a'), DesktopSpeechChunk('bbb')), (), 'off')",
     "assert allocate_native_chunk_durations(duration_plan, 8.0) == (2.0, 6.0)",
     "assert task_choices('不存在的任务目录') == []",

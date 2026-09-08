@@ -50,16 +50,23 @@ Windows Electron desktop integration for IndexTTS 2.5. The packaged application 
 - contextual fixed-bottom generate/stop controls that remain available while scrolling in single-voice and multi-role workflows
 - collapsed-by-default guidance, quality tools, advanced controls, dialogue timing, ASR, timeline, report, and task-recovery workspaces
 - direct WebUI actions for returning to setup, opening outputs, opening user data, and opening the exact log directory
+- a persistent generic local API with OpenAI-compatible speech, native IndexTTS controls, authenticated async jobs, shared model locking, and bundled foreground start/status/stop CMD helpers
 
 The large model files are intentionally external. On first launch, select a complete IndexTTS 2.5 model directory.
-Version 0.25.1 is paired with ComfyUI Node 0.23.0 and model bundle `1.0.0` at revision `14166a74`. It fixes preset/voice loading so the emotion control method always resolves to a valid choice, keeps saved results visible even when optional history bookkeeping fails, and adds direct downloads beside generated audio, in the fixed action dock, and throughout the history center. A default-on sentence-tail guard now combines local ASR review, tail-aware candidate ranking, and up to three reproducible retries to reduce swallowed endings and repeated-number truncation without silently rewriting authored subtitles. Desktop updates remain split into signed app/runtime layers with resume, full verification, health checks, and rollback; models remain independent on Hugging Face. Advanced and engineering workspaces stay collapsed by default. Optional acceleration failures still reload the normal model and complete the task. No benchmark, model load, model download, update download, install, or acceleration mode starts automatically.
+Version 0.26.1 is paired with ComfyUI Node 0.23.0 and model bundle `1.0.0` at revision `14166a74`. It adds a persistent generic local HTTP service: OpenAI-compatible `/v1/audio/speech`, native advanced IndexTTS controls, authenticated asynchronous jobs with progress/cancellation/download, voice-library discovery, Swagger documentation, and graceful shutdown. Desktop UI and API calls share the same model lifecycle and global inference lock. The portable root includes foreground start/status/stop CMD helpers that use the bundled Python runtime and keep logs visible. API outputs use the existing output directory and generation history. It also fixes the Gradio `Error 181` seen after multi-segment generation automatically disables streaming preview while still producing the verified final audio. Desktop updates remain split into signed app/runtime layers with resume, full verification, health checks, and rollback; models remain independent on Hugging Face. Advanced and engineering workspaces stay collapsed by default. Optional acceleration failures still reload the normal model and complete the task. No benchmark, model load, model download, update download, install, API service, or acceleration mode starts automatically.
 The launcher validates official model file sizes, while the downloader performs full SHA-256 verification.
 The output directory and user-data directory can be moved independently from the launcher. Voice-library entries,
 presets, dialogue tasks, ASR caches, benchmarks, and logs follow the configured user-data directory; generated WAVs
 follow the configured output directory. Both choices persist across launches. The active WebUI exposes the resolved
 paths and direct folder buttons. Its `返回启动配置（停止模型）` action, or closing the WebUI window, stops the model,
 releases its process, and returns to setup instead of forcing the whole application to exit. Closing the setup window
-still exits normally.
+still exits normally. In API-only or attached-service mode, returning from the WebUI leaves that explicit API service running.
+
+### Generic local API service
+
+The launcher can start the regular WebUI and API together or start API-only while remaining on the setup screen. The default stable endpoint is `http://127.0.0.1:7861`; the OpenAI-compatible speech route is `/v1/audio/speech` and interactive documentation is `/docs`. An automatically generated API key is stored in Electron user settings. Requests can select only saved voice-library profiles, preventing arbitrary file reads through caller-supplied local paths.
+
+The portable root includes `启动API服务.cmd`, `查看API服务状态.cmd`, `停止API服务.cmd`, and a concise Chinese usage guide. These scripts use the bundled Python and the same saved model/runtime/API options as Electron. API calls and Gradio events share one model and one inference coordinator, so simultaneous clients queue instead of entering the GPU concurrently. See [`docs/LOCAL_API.md`](../docs/LOCAL_API.md) for compatible/native payloads, async jobs, LAN/CORS security, and troubleshooting.
 
 Optional acceleration fallback is presented as a normal operating state rather than an error: the WebUI shows the
 requested mode, the effective mode, and a Chinese explanation first. The complete capability JSON remains available
@@ -277,6 +284,8 @@ npm run build:runtime
 npm run build:update
 ```
 
+When the workspace drive does not have room for another multi-gigabyte runtime copy, set `T8_DESKTOP_OUT_DIR` to a directory on another drive before `npm run package`, then set `T8_PACKAGED_APP_ROOT` to the resulting app directory before `npm run verify:runtime`.
+
 Electron Forge copies the managed CPython runtime and `.venv/Lib/site-packages` into the packaged application's `resources` directory. It does not copy `checkpoints`.
 The post-package hook removes legacy 2.0 entrypoints and an explicit list of unused PyTorch static development archives.
 It retains CUDA DLLs, PyTorch headers, and import libraries needed by optional BigVGAN/C++ extension compilation, writes
@@ -291,7 +300,7 @@ npm run make
 ```
 
 This builds only `@electron-forge/maker-zip`. The unpacked application is still
-available under `desktop/out/T8star-Aix-IndexTTS-2.5-v0.25.1-win32-x64` for local testing.
+available under `desktop/out/T8star-Aix-IndexTTS-2.5-v0.26.1-win32-x64` for local testing.
 The bundled runtime contains tens of thousands of small files, so Squirrel/NuGet
 can spend a long time repeatedly rewriting a multi-gigabyte package. It is not the
 recommended user distribution. If an installer is specifically required, build it

@@ -17,6 +17,22 @@ const elements = {
   precisionMode: document.querySelector("#precisionMode"),
   referenceDevice: document.querySelector("#referenceDevice"),
   reuseDefaultEmotion: document.querySelector("#reuseDefaultEmotion"),
+  apiSummary: document.querySelector("#apiSummary"),
+  apiPort: document.querySelector("#apiPort"),
+  apiDefaultVoice: document.querySelector("#apiDefaultVoice"),
+  apiVoiceChoices: document.querySelector("#apiVoiceChoices"),
+  apiKey: document.querySelector("#apiKey"),
+  apiSaveHistory: document.querySelector("#apiSaveHistory"),
+  apiAllowLan: document.querySelector("#apiAllowLan"),
+  apiCorsOrigins: document.querySelector("#apiCorsOrigins"),
+  apiEndpoint: document.querySelector("#apiEndpoint"),
+  saveApiOptionsButton: document.querySelector("#saveApiOptionsButton"),
+  startApiButton: document.querySelector("#startApiButton"),
+  openApiUiButton: document.querySelector("#openApiUiButton"),
+  openApiDocsButton: document.querySelector("#openApiDocsButton"),
+  stopApiButton: document.querySelector("#stopApiButton"),
+  copyApiKeyButton: document.querySelector("#copyApiKeyButton"),
+  copyApiExampleButton: document.querySelector("#copyApiExampleButton"),
   refreshDiagnosticsButton: document.querySelector("#refreshDiagnosticsButton"),
   exportDiagnosticsButton: document.querySelector("#exportDiagnosticsButton"),
   diagnosticsVersions: document.querySelector("#diagnosticsVersions"),
@@ -329,7 +345,9 @@ function renderUpdateReport(report, busy) {
 
 function renderState(state) {
   currentState = state;
-  const busy = ["starting", "ready", "stopping", "downloading", "benchmarking"].includes(state.phase);
+  const transitioning = ["starting", "api-starting", "stopping", "downloading", "benchmarking"].includes(state.phase);
+  const serviceRunning = Boolean(state.apiRunning) || ["ready", "api-ready"].includes(state.phase);
+  const busy = transitioning || serviceRunning;
   elements.statusText.textContent = state.message || "等待操作";
   elements.modelPath.value = state.modelDir || "";
   elements.outputPath.value = state.outputDir || "";
@@ -342,17 +360,45 @@ function renderState(state) {
   elements.precisionMode.value = state.precisionMode || "auto";
   elements.referenceDevice.value = state.referenceDevice || "auto";
   elements.reuseDefaultEmotion.checked = Boolean(state.reuseDefaultEmotion);
+  elements.apiPort.value = Number(state.apiPort || 7861);
+  elements.apiDefaultVoice.value = state.apiDefaultVoice || "";
+  elements.apiVoiceChoices.replaceChildren();
+  for (const voice of state.apiVoiceChoices || []) {
+    const option = document.createElement("option");
+    option.value = voice.name;
+    option.label = voice.id ? `${voice.name} · ${voice.id}` : voice.name;
+    elements.apiVoiceChoices.appendChild(option);
+  }
+  elements.apiKey.value = state.apiKey || "";
+  elements.apiSaveHistory.checked = state.apiSaveHistory !== false;
+  elements.apiAllowLan.checked = state.apiHost === "0.0.0.0";
+  elements.apiCorsOrigins.value = state.apiCorsOrigins || "";
+  elements.apiEndpoint.textContent = state.serviceUrl || `http://127.0.0.1:${Number(state.apiPort || 7861)}`;
+  elements.apiSummary.textContent = serviceRunning
+    ? `运行中：${state.serviceUrl || elements.apiEndpoint.textContent} · ${state.apiMode === "api-only" ? "常驻 API 模式" : "桌面与 API 共用模型"}`
+    : "默认仅本机访问；可供 SillyTavern、自动化脚本或任意 HTTP 客户端调用。";
   elements.accelerationMode.disabled = busy;
   elements.runtimeProfile.disabled = busy;
   elements.applyRuntimeProfileButton.disabled = busy || elements.runtimeProfile.value === "custom";
   elements.precisionMode.disabled = busy;
   elements.referenceDevice.disabled = busy;
   elements.reuseDefaultEmotion.disabled = busy;
+  elements.apiPort.disabled = busy;
+  elements.apiDefaultVoice.disabled = busy;
+  elements.apiSaveHistory.disabled = busy;
+  elements.apiAllowLan.disabled = busy;
+  elements.apiCorsOrigins.disabled = busy;
+  elements.saveApiOptionsButton.disabled = busy;
+  elements.startApiButton.disabled = !state.modelValid || busy;
+  elements.openApiUiButton.disabled = !serviceRunning;
+  elements.openApiDocsButton.disabled = !serviceRunning;
+  elements.stopApiButton.disabled = !serviceRunning || state.phase === "stopping";
   renderAccelerationDiagnostics(state.accelerationDiagnostics, state.diagnosticsBusy);
   renderBenchmark(state.benchmarkReport, busy, Boolean(state.modelValid));
   renderUpdateReport(state.updateReport, state.updateBusy);
   renderModelDownload(state.modelDownload);
-  elements.startButton.disabled = !state.modelValid || busy;
+  elements.startButton.disabled = !state.modelValid || transitioning;
+  elements.startButton.textContent = serviceRunning ? "打开语音界面" : "启动 IndexTTS 2.5（同时启用 API）";
   elements.chooseModelButton.disabled = busy;
   elements.chooseOutputButton.disabled = busy;
   elements.chooseDataButton.disabled = busy;
@@ -392,9 +438,54 @@ elements.chooseDataButton.addEventListener("click", async () => {
 elements.openOutputButton.addEventListener("click", () => window.desktopApi.openOutputDirectory());
 elements.openDataButton.addEventListener("click", () => window.desktopApi.openDataDirectory());
 
+async function saveApiOptions() {
+  const next = await window.desktopApi.setApiOptions({
+      apiPort: Number(elements.apiPort.value),
+      apiDefaultVoice: elements.apiDefaultVoice.value,
+      apiSaveHistory: elements.apiSaveHistory.checked,
+      allowLan: elements.apiAllowLan.checked,
+      apiCorsOrigins: elements.apiCorsOrigins.value
+  });
+  renderState(next);
+  return next;
+}
+
 elements.startButton.addEventListener("click", async () => {
-  appendLog("正在启动内置 Python 与 IndexTTS 2.5…");
-  renderState(await window.desktopApi.startService());
+  try {
+    if (!currentState.apiRunning) await saveApiOptions();
+    appendLog("正在启动内置 Python 与 IndexTTS 2.5…");
+    renderState(await window.desktopApi.startService());
+  } catch (error) {
+    appendLog(`启动失败：${error.message}`);
+  }
+});
+
+elements.saveApiOptionsButton.addEventListener("click", async () => {
+  try { await saveApiOptions(); } catch (error) { appendLog(`保存 API 设置失败：${error.message}`); }
+});
+
+elements.startApiButton.addEventListener("click", async () => {
+  try {
+    await saveApiOptions();
+    appendLog("正在启动常驻 API 服务；模型加载完成后本页会显示运行地址…");
+    renderState(await window.desktopApi.startApiService());
+  } catch (error) {
+    appendLog(`启动 API 失败：${error.message}`);
+  }
+});
+
+elements.openApiUiButton.addEventListener("click", async () => {
+  try { await window.desktopApi.openApiUi(); } catch (error) { appendLog(error.message); }
+});
+elements.openApiDocsButton.addEventListener("click", () => window.desktopApi.openApiDocs());
+elements.stopApiButton.addEventListener("click", async () => renderState(await window.desktopApi.stopService()));
+elements.copyApiKeyButton.addEventListener("click", async () => {
+  await window.desktopApi.copyApiKey();
+  appendLog("API Key 已复制到剪贴板。");
+});
+elements.copyApiExampleButton.addEventListener("click", async () => {
+  await window.desktopApi.copyApiExample();
+  appendLog("PowerShell API 调用示例已复制到剪贴板。");
 });
 
 elements.runtimeProfile.addEventListener("change", () => {

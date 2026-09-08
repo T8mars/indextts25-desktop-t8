@@ -19,6 +19,8 @@ const version = packageJson.version;
 
 const APP_RESOURCE_FILES = [
   "desktop_webui.py",
+  "desktop_api.py",
+  "desktop_api_launcher.py",
   "desktop_runtime_benchmark.py",
   "desktop_generation_controls.py",
   "desktop_model_lifecycle.py",
@@ -49,6 +51,13 @@ const APP_RESOURCE_FILES = [
   "LICENSE",
   "LICENSE_ZH.txt",
   "DISCLAIMER"
+];
+
+const ROOT_FILES = [
+  "启动API服务.cmd",
+  "停止API服务.cmd",
+  "查看API服务状态.cmd",
+  "API服务使用说明.txt"
 ];
 
 function argumentValue(name, fallback = "") {
@@ -156,6 +165,13 @@ async function main() {
     const destination = path.join(payloadRoot, "resources", filename);
     fs.mkdirSync(path.dirname(destination), { recursive: true });
     fs.copyFileSync(source, destination);
+  }
+  for (const filename of ROOT_FILES) {
+    const source = sourceMode
+      ? path.join(desktopRoot, "scripts", filename)
+      : path.join(packagedRoot, filename);
+    if (!fs.existsSync(source)) throw new Error(`Packaged update root file is missing: ${filename}`);
+    fs.copyFileSync(source, path.join(payloadRoot, filename));
   }
 
   const files = [];

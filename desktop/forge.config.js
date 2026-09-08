@@ -49,6 +49,7 @@ if (!fs.existsSync(sitePackages)) {
 }
 
 module.exports = {
+  outDir: process.env.T8_DESKTOP_OUT_DIR || undefined,
   packagerConfig: {
     name: `T8star-Aix-IndexTTS-2.5-v${desktopPackage.version}`,
     executableName: "T8star-Aix-IndexTTS-2.5",
@@ -61,6 +62,8 @@ module.exports = {
       path.join(projectRoot, "indextts"),
       path.join(projectRoot, "assets"),
       path.join(projectRoot, "desktop_webui.py"),
+      path.join(projectRoot, "desktop_api.py"),
+      path.join(projectRoot, "desktop_api_launcher.py"),
       path.join(projectRoot, "desktop_runtime_benchmark.py"),
       path.join(projectRoot, "desktop_generation_controls.py"),
       path.join(projectRoot, "desktop_model_lifecycle.py"),
@@ -101,6 +104,12 @@ module.exports = {
   hooks: {
     postPackage: async (_forgeConfig, packageResult) => {
       const legacyPublicEntrypoints = ["infer.py", "infer_v2.py", "cli.py", "cli_v2.py"];
+      const apiRootFiles = [
+        "启动API服务.cmd",
+        "停止API服务.cmd",
+        "查看API服务状态.cmd",
+        "API服务使用说明.txt"
+      ];
       for (const outputPath of packageResult.outputPaths) {
         const packageModuleRoot = path.join(outputPath, "resources", "indextts");
         for (const filename of legacyPublicEntrypoints) {
@@ -108,6 +117,9 @@ module.exports = {
         }
         const report = prunePackagedRuntime(path.join(outputPath, "resources"));
         console.log(`Pruned ${report.savedGiB} GiB of unused PyTorch static development archives.`);
+        for (const filename of apiRootFiles) {
+          fs.copyFileSync(path.join(__dirname, "scripts", filename), path.join(outputPath, filename));
+        }
       }
     }
   },

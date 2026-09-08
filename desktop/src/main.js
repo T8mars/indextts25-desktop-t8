@@ -1,4 +1,4 @@
-const { app, BrowserWindow, dialog, ipcMain, shell } = require("electron");
+const { app, BrowserWindow, clipboard, dialog, ipcMain, shell } = require("electron");
 const crypto = require("node:crypto");
 const fs = require("node:fs");
 const https = require("node:https");
@@ -28,6 +28,7 @@ const {
 
 const APP_TITLE = "T8star-Aix · IndexTTS 2.5";
 const COMFY_NODE_VERSION = "0.23.0";
+const DEFAULT_API_PORT = 7861;
 const MODEL_DOWNLOAD_PROGRESS_PREFIX = "@@T8_MODEL_PROGRESS@@";
 const MODEL_URLS = {
   huggingface: "https://huggingface.co/t8star/IndexTTS-2.5-Comfy",
@@ -76,7 +77,16 @@ let state = {
   modelBundleVersion: "",
   autoCheckUpdates: true,
   updateChannel: "stable",
-  serviceUrl: ""
+  serviceUrl: "",
+  apiRunning: false,
+  apiMode: "",
+  apiHost: "127.0.0.1",
+  apiPort: DEFAULT_API_PORT,
+  apiKey: "",
+  apiDefaultVoice: "",
+  apiVoiceChoices: [],
+  apiSaveHistory: true,
+  apiCorsOrigins: ""
 };
 
 function fetchText(url, timeoutMs = 15000) {
@@ -335,6 +345,19 @@ function defaultDataDirectory() {
 
 function dataDirectory() {
   return path.resolve(state.dataDir || defaultDataDirectory());
+}
+
+function voiceChoicesForDataDirectory(directory) {
+  try {
+    const manifestPath = path.join(path.resolve(directory), "voices", "library.json");
+    const payload = JSON.parse(fs.readFileSync(manifestPath, "utf8"));
+    return Object.values(payload || {})
+      .filter((item) => item && typeof item === "object" && item.name)
+      .map((item) => ({ id: String(item.profile_id || ""), name: String(item.name) }))
+      .sort((left, right) => left.name.localeCompare(right.name, "zh-CN"));
+  } catch {
+    return [];
+  }
 }
 
 function logsDirectory() {
@@ -1119,27 +1142,44 @@ function runtimePaths() {
   };
 }
 
-function findAvailablePort() {
-  return new Promise((resolve, reject) => {
+function isPortAvailable(port) {
+  return new Promise((resolve) => {
     const server = net.createServer();
     server.unref();
-    server.on("error", reject);
-    server.listen(0, "127.0.0.1", () => {
-      const address = server.address();
-      server.close(() => resolve(address.port));
+    server.on("error", () => resolve(false));
+    server.listen(Number(port), "127.0.0.1", () => {
+      server.close(() => resolve(true));
     });
   });
 }
 
-async function waitForService(url, processRef) {
+async function apiHealth(url) {
+  try {
+    const response = await fetch(`${url}/health`, { signal: AbortSignal.timeout(2000) });
+    if (!response.ok) return null;
+    const payload = await response.json();
+    const fingerprint = crypto.createHash("sha256").update(String(state.apiKey || ""), "utf8").digest("hex").slice(0, 16);
+    return payload?.service === "t8star-indextts-2.5" && payload?.api_key_fingerprint === fingerprint
+      ? payload
+      : null;
+  } catch {
+    return null;
+  }
+}
+
+async function waitForService(url, processRef, requireWebUi = false) {
   const deadline = Date.now() + 10 * 60 * 1000;
   while (Date.now() < deadline) {
-    if (!pythonProcess || pythonProcess !== processRef || processRef.exitCode !== null) {
+    if (processRef && (!pythonProcess || pythonProcess !== processRef || processRef.exitCode !== null)) {
       throw new Error("Python 推理服务已退出，请查看日志。");
     }
     try {
-      const response = await fetch(`${url}/gradio_api/info`, { signal: AbortSignal.timeout(2000) });
-      if (response.ok) return;
+      const healthy = await apiHealth(url);
+      if (healthy) {
+        if (!requireWebUi) return healthy;
+        const response = await fetch(`${url}/gradio_api/info`, { signal: AbortSignal.timeout(2000) });
+        if (response.ok) return healthy;
+      }
     } catch {
       // Model loading can take tens of seconds. Keep polling while showing logs.
     }
@@ -1148,12 +1188,16 @@ async function waitForService(url, processRef) {
   throw new Error("模型加载超时，请查看日志或检查显存。");
 }
 
-async function startPythonService() {
+async function startPythonService(openWebUi = true) {
   if (downloadProcess && downloadProcess.exitCode === null) {
     updateState({ phase: "downloading", message: "模型仍在下载，请等待下载完成" });
     return state;
   }
   if (pythonProcess && pythonProcess.exitCode === null) {
+    if (openWebUi && state.serviceUrl) {
+      updateState({ phase: "ready", apiMode: state.apiMode || "combined", message: "IndexTTS 2.5 已就绪" });
+      await mainWindow.loadURL(state.serviceUrl);
+    }
     return state;
   }
 
@@ -1178,18 +1222,36 @@ async function startPythonService() {
   fs.mkdirSync(outputDirectory(), { recursive: true });
   fs.mkdirSync(dataDirectory(), { recursive: true });
   fs.mkdirSync(logsDirectory(), { recursive: true });
-  activePort = await findAvailablePort();
+  activePort = Number(state.apiPort || DEFAULT_API_PORT);
   const scriptPath = path.join(runtime.backendRoot, "desktop_webui.py");
   const serviceUrl = `http://127.0.0.1:${activePort}`;
   const pythonPathParts = [runtime.backendRoot, runtime.sitePackages];
   if (process.env.PYTHONPATH) pythonPathParts.push(process.env.PYTHONPATH);
 
+  const existing = await apiHealth(serviceUrl);
+  if (existing) {
+    updateState({
+      phase: openWebUi ? "ready" : "api-ready",
+      message: openWebUi ? "已连接正在运行的 API 服务" : "API 服务正在运行",
+      apiRunning: true,
+      apiMode: "attached",
+      serviceUrl
+    });
+    if (openWebUi) await mainWindow.loadURL(serviceUrl);
+    return state;
+  }
+  if (!(await isPortAvailable(activePort))) {
+    throw new Error(`端口 ${activePort} 已被其他程序占用，请在“本地 API 服务”中更换端口。`);
+  }
+
   updateState({
-    phase: "starting",
-    message: "正在加载 IndexTTS 2.5 模型…",
+    phase: openWebUi ? "starting" : "api-starting",
+    message: openWebUi ? "正在加载 IndexTTS 2.5 模型…" : "正在启动常驻 API 服务并加载模型…",
     modelValid: true,
     missingFiles: [],
-    serviceUrl
+    serviceUrl,
+    apiRunning: false,
+    apiMode: openWebUi ? "combined" : "api-only"
   });
   appendLog(`Starting bundled Python: ${runtime.pythonExe}`);
   appendLog(`Model directory: ${state.modelDir}`);
@@ -1203,6 +1265,7 @@ async function startPythonService() {
   appendLog(`Precision mode: ${state.precisionMode || "auto"}`);
   appendLog(`Reference encoders: ${state.referenceDevice || "auto"}`);
   appendLog(`Fast default emotion: ${Boolean(state.reuseDefaultEmotion)}`);
+  appendLog(`Local API: ${serviceUrl} | default voice: ${state.apiDefaultVoice || "request required"}`);
 
   const pythonArguments = [
     "-u",
@@ -1210,13 +1273,18 @@ async function startPythonService() {
     "--model_dir", state.modelDir,
     "--output_dir", outputDirectory(),
     "--data_dir", dataDirectory(),
-    "--host", "127.0.0.1",
+    "--host", state.apiHost || "127.0.0.1",
     "--port", String(activePort),
     "--acceleration", state.accelerationMode || "off",
     "--precision", state.precisionMode || "auto",
     "--reference-device", state.referenceDevice || "auto"
   ];
   if (state.reuseDefaultEmotion) pythonArguments.push("--reuse-spk-cond-for-emo");
+  if (state.apiDefaultVoice) pythonArguments.push("--api-default-voice", state.apiDefaultVoice);
+  if (!state.apiSaveHistory) pythonArguments.push("--api-no-history");
+  for (const origin of String(state.apiCorsOrigins || "").split(/[\r\n,]+/).map((item) => item.trim()).filter(Boolean)) {
+    pythonArguments.push("--api-cors-origin", origin);
+  }
 
   pythonProcess = spawn(runtime.pythonExe, pythonArguments, {
     cwd: runtime.backendRoot,
@@ -1226,6 +1294,9 @@ async function startPythonService() {
       PYTHONUTF8: "1",
       PYTHONUNBUFFERED: "1",
       PYTHONPATH: pythonPathParts.join(path.delimiter),
+      T8STAR_INDEXTTS_API_KEY: state.apiKey,
+      T8STAR_INDEXTTS_API_DEFAULT_VOICE: state.apiDefaultVoice || "",
+      T8STAR_INDEXTTS_DESKTOP_VERSION: app.getVersion(),
       HF_HOME: path.join(state.modelDir, "hf_cache"),
       HF_HUB_CACHE: path.join(state.modelDir, "hf_cache"),
       MODELSCOPE_CACHE: path.join(state.modelDir, "modelscope_cache")
@@ -1245,14 +1316,23 @@ async function startPythonService() {
     const expectedStop = stoppingPythonProcess === processRef;
     if (expectedStop) stoppingPythonProcess = null;
     if (!app.quitting && !expectedStop && state.phase !== "stopping") {
-      updateState({ phase: "error", message: `推理服务已退出（代码 ${code ?? "unknown"}）` });
+      updateState({
+        phase: "error",
+        apiRunning: false,
+        apiMode: "",
+        message: `推理服务已退出（代码 ${code ?? "unknown"}）`
+      });
     }
   });
 
   try {
-    await waitForService(serviceUrl, processRef);
-    updateState({ phase: "ready", message: "IndexTTS 2.5 已就绪" });
-    await mainWindow.loadURL(serviceUrl);
+    await waitForService(serviceUrl, processRef, openWebUi);
+    updateState({
+      phase: openWebUi ? "ready" : "api-ready",
+      apiRunning: true,
+      message: openWebUi ? "IndexTTS 2.5 已就绪（本地 API 同时可用）" : `API 服务已就绪：${serviceUrl}`
+    });
+    if (openWebUi) await mainWindow.loadURL(serviceUrl);
   } catch (error) {
     appendLog(error.stack || error.message);
     updateState({ phase: "error", message: error.message });
@@ -1423,6 +1503,32 @@ function stopPythonService() {
   stoppingPythonProcess = pythonProcess;
   pythonProcess.kill();
   pythonProcess = null;
+  updateState({ apiRunning: false, apiMode: "", serviceUrl: "" });
+}
+
+async function stopApiService() {
+  if (pythonProcess && pythonProcess.exitCode === null) {
+    stopPythonService();
+    updateState({
+      phase: state.modelValid ? "idle" : "model-required",
+      apiRunning: false,
+      apiMode: "",
+      serviceUrl: "",
+      message: "API 服务已停止"
+    });
+    return state;
+  }
+  const serviceUrl = state.serviceUrl || `http://127.0.0.1:${Number(state.apiPort || DEFAULT_API_PORT)}`;
+  if (await apiHealth(serviceUrl)) {
+    const response = await fetch(`${serviceUrl}/api/v1/admin/shutdown`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${state.apiKey}` },
+      signal: AbortSignal.timeout(5000)
+    });
+    if (!response.ok) throw new Error(`API 服务拒绝停止请求（HTTP ${response.status}）。`);
+  }
+  updateState({ phase: state.modelValid ? "idle" : "model-required", apiRunning: false, apiMode: "", serviceUrl: "", message: "API 服务已停止" });
+  return state;
 }
 
 function isTrustedRendererFrame(frame) {
@@ -1472,6 +1578,7 @@ async function chooseWorkingDirectory(kind) {
     : {
         dataDir: selected,
         logDir: path.join(selected, "logs"),
+        apiVoiceChoices: voiceChoicesForDataDirectory(selected),
         message: `音色库、预设、任务与日志将保存到：${selected}`
       };
   updateState(patch);
@@ -1482,17 +1589,21 @@ async function showLauncher() {
   if (returningToLauncher) return state;
   returningToLauncher = true;
   const hadRunningService = Boolean(pythonProcess && pythonProcess.exitCode === null);
+  const keepApiRunning = state.apiMode === "api-only" || state.apiMode === "attached";
   try {
-    if (hadRunningService) stopPythonService();
+    if (hadRunningService && !keepApiRunning) stopPythonService();
     await mainWindow.loadFile(path.join(__dirname, "index.html"));
-    activePort = null;
+    if (!keepApiRunning) activePort = null;
     const validation = validateModelDirectory(state.modelDir);
     updateState({
-      phase: validation.valid ? "idle" : "model-required",
-      message: hadRunningService
+      phase: keepApiRunning ? "api-ready" : (validation.valid ? "idle" : "model-required"),
+      apiRunning: keepApiRunning,
+      message: keepApiRunning
+        ? `API 服务继续运行：${state.serviceUrl}`
+        : hadRunningService
         ? "已返回启动配置并停止模型；可修改设置后重新启动"
         : "已返回启动配置",
-      serviceUrl: ""
+      serviceUrl: keepApiRunning ? state.serviceUrl : ""
     });
     return state;
   } finally {
@@ -1544,6 +1655,92 @@ function registerIpcHandlers() {
     } catch {
       return state;
     }
+  });
+
+  ipcMain.handle("desktop:start-api-service", async (event) => {
+    assertTrustedSender(event);
+    try {
+      return await startPythonService(false);
+    } catch (error) {
+      appendLog(error.stack || error.message);
+      updateState({ phase: "error", apiRunning: false, message: error.message });
+      return state;
+    }
+  });
+
+  ipcMain.handle("desktop:set-api-options", (event, options) => {
+    assertTrustedSender(event);
+    if (state.apiRunning || (pythonProcess && pythonProcess.exitCode === null)) {
+      throw new Error("API 服务运行中；修改设置前请先停止服务。");
+    }
+    const port = Number(options?.apiPort);
+    if (!Number.isInteger(port) || port < 1 || port > 65535) {
+      throw new Error("API 端口必须是 1–65535 的整数。");
+    }
+    const apiHost = options?.allowLan ? "0.0.0.0" : "127.0.0.1";
+    const apiDefaultVoice = String(options?.apiDefaultVoice || "").trim().slice(0, 120);
+    const origins = String(options?.apiCorsOrigins || "").split(/[\r\n,]+/)
+      .map((item) => item.trim()).filter(Boolean);
+    for (const origin of origins) {
+      if (origin === "*") continue;
+      let parsed;
+      try { parsed = new URL(origin); } catch { throw new Error(`CORS 来源不是有效网址：${origin}`); }
+      if (!["http:", "https:"].includes(parsed.protocol) || parsed.origin !== origin.replace(/\/$/, "")) {
+        throw new Error(`CORS 来源必须是 http(s) Origin（不含路径）：${origin}`);
+      }
+    }
+    const next = {
+      ...readSettings(),
+      apiPort: port,
+      apiHost,
+      apiDefaultVoice,
+      apiSaveHistory: options?.apiSaveHistory !== false,
+      apiCorsOrigins: origins.join(",")
+    };
+    writeSettings(next);
+    updateState({
+      apiPort: port,
+      apiHost,
+      apiDefaultVoice,
+      apiSaveHistory: next.apiSaveHistory,
+      apiCorsOrigins: next.apiCorsOrigins,
+      message: "本地 API 设置已保存；桌面启动与独立 CMD 会共用这些设置"
+    });
+    return state;
+  });
+
+  ipcMain.handle("desktop:copy-api-key", (event) => {
+    assertTrustedSender(event);
+    clipboard.writeText(state.apiKey);
+    return { ok: true };
+  });
+
+  ipcMain.handle("desktop:copy-api-example", (event) => {
+    assertTrustedSender(event);
+    const url = state.serviceUrl || `http://127.0.0.1:${Number(state.apiPort || DEFAULT_API_PORT)}`;
+    const voice = state.apiDefaultVoice || "桌面音色库中的角色名称";
+    const command = [
+      `$headers = @{ Authorization = \"Bearer ${state.apiKey}\" }`,
+      `$body = @{ model = \"tts-1\"; input = \"你好，这是一段 API 语音。\"; voice = \"${voice.replace(/\"/g, "") }\"; response_format = \"mp3\"; speed = 1.0 } | ConvertTo-Json`,
+      `Invoke-WebRequest -Uri \"${url}/v1/audio/speech\" -Method Post -Headers $headers -ContentType \"application/json\" -Body $body -OutFile \"speech.mp3\"`
+    ].join("\r\n");
+    clipboard.writeText(command);
+    return { ok: true };
+  });
+
+  ipcMain.handle("desktop:open-api-docs", async (event) => {
+    assertTrustedSender(event);
+    const url = state.serviceUrl || `http://127.0.0.1:${Number(state.apiPort || DEFAULT_API_PORT)}`;
+    await shell.openExternal(`${url}/docs`);
+  });
+
+  ipcMain.handle("desktop:open-api-ui", async (event) => {
+    assertTrustedSender(event);
+    const url = state.serviceUrl || `http://127.0.0.1:${Number(state.apiPort || DEFAULT_API_PORT)}`;
+    if (!(await apiHealth(url))) throw new Error("API 服务尚未运行。");
+    activePort = Number(state.apiPort || DEFAULT_API_PORT);
+    await mainWindow.loadURL(url);
+    return state;
   });
 
   ipcMain.handle("desktop:apply-runtime-profile", (event, profileName) => {
@@ -1735,10 +1932,15 @@ function registerIpcHandlers() {
     return state;
   });
 
-  ipcMain.handle("desktop:stop-service", (event) => {
+  ipcMain.handle("desktop:stop-service", async (event) => {
     assertTrustedSender(event);
-    stopPythonService();
-    return state;
+    try {
+      return await stopApiService();
+    } catch (error) {
+      appendLog(error.stack || error.message);
+      updateState({ phase: "error", message: error.message });
+      return state;
+    }
   });
 
   ipcMain.handle("desktop:show-launcher", async (event) => {
@@ -1856,6 +2058,10 @@ if (!singleInstance) {
 
   app.whenReady().then(() => {
     const settings = readSettings();
+    const apiKey = String(settings.apiKey || "").trim().length >= 16
+      ? String(settings.apiKey).trim()
+      : crypto.randomBytes(32).toString("base64url");
+    if (apiKey !== settings.apiKey) writeSettings({ ...settings, apiKey });
     let modelDir = commandLineModelDirectory() || settings.modelDir || "";
     if (!app.isPackaged && !modelDir) modelDir = path.join(projectRoot(), "checkpoints");
     const validation = validateModelDirectory(modelDir);
@@ -1889,12 +2095,33 @@ if (!singleInstance) {
       updateReady: false,
       autoCheckUpdates: settings.autoCheckUpdates !== false,
       updateChannel: normalizeChannel(settings.updateChannel),
+      apiHost: settings.apiHost === "0.0.0.0" ? "0.0.0.0" : "127.0.0.1",
+      apiPort: Number.isInteger(Number(settings.apiPort)) && Number(settings.apiPort) >= 1 && Number(settings.apiPort) <= 65535
+        ? Number(settings.apiPort)
+        : DEFAULT_API_PORT,
+      apiKey,
+      apiDefaultVoice: String(settings.apiDefaultVoice || ""),
+      apiSaveHistory: settings.apiSaveHistory !== false,
+      apiCorsOrigins: String(settings.apiCorsOrigins || ""),
       phase: validation.valid ? "idle" : "model-required",
       message: rollbackMessage || previousUpdateMessage
         || (validation.valid ? "模型校验通过，可以启动" : "请选择完整的 IndexTTS 2.5 模型目录")
     };
+    state.apiVoiceChoices = voiceChoicesForDataDirectory(state.dataDir);
     registerIpcHandlers();
     createWindow();
+    const savedApiUrl = `http://127.0.0.1:${state.apiPort}`;
+    apiHealth(savedApiUrl).then((health) => {
+      if (!health || pythonProcess) return;
+      activePort = state.apiPort;
+      updateState({
+        phase: "api-ready",
+        apiRunning: true,
+        apiMode: "attached",
+        serviceUrl: savedApiUrl,
+        message: `已检测到独立 API 服务：${savedApiUrl}`
+      });
+    });
     probeRuntimeHardware().catch((error) => {
       appendLog(`Hardware probe failed (model was not loaded): ${error.message}`);
       updateState({

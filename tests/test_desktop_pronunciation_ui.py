@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import wave
 from pathlib import Path
@@ -282,7 +283,7 @@ def test_desktop_builds_complete_pronunciation_workspace(tmp_path, monkeypatch):
     assert "生成语音" in values
     assert "停止语音任务" in values
     assert "停止多角色任务" in values
-    assert "返回启动配置（停止模型）" in values
+    assert "返回启动配置" in values
     assert "打开输出目录" in values
     assert "打开日志目录" in values
     assert "打开用户数据目录" in values
@@ -615,6 +616,57 @@ def test_cross_segment_workspace_can_audition_redo_and_merge_one_internal_segmen
     assert "单独重做并合入" in redo_result[7]
     updated = json.loads(manifest_path.read_text(encoding="utf-8"))
     assert updated["segments"][2]["selected_source"] == "manual_retry"
+
+
+def test_cross_segment_guard_finishes_gradio_stream_without_error_181(tmp_path):
+    output_dir = tmp_path / "outputs"
+    data_dir = tmp_path / "user-data"
+    output_dir.mkdir()
+    data_dir.mkdir()
+    prompt = _write_test_wav(tmp_path / "prompt.wav")
+    demo = build_app(_SegmentedTTS(), output_dir, data_dir, verbose=False)
+    generate_block = next(
+        block
+        for block in demo.fns.values()
+        if getattr(block.fn, "__name__", "") == "generate"
+    )
+    values = [getattr(component, "value", None) for component in generate_block.inputs]
+    by_label = {
+        getattr(component, "label", None): index
+        for index, component in enumerate(generate_block.inputs)
+    }
+    values[0] = {
+        "path": str(prompt),
+        "meta": {"_type": "gradio.FileData"},
+    }
+    values[1] = " ".join(_SegmentedTTS.segments)
+    values[9] = generate_block.inputs[9].postprocess([]).model_dump()
+    values[by_label["边生成边试听"]] = True
+
+    async def run_generation():
+        first = await demo.process_api(
+            generate_block,
+            values,
+            session_hash="segment-rate-regression",
+            simple_format=True,
+        )
+        assert first["is_generating"] is True
+        assert first["data"][0].get("__type__") != "update"
+        assert first["data"][0].get("path")
+        assert first["data"][0].get("is_stream") is True
+        finished = await demo.process_api(
+            generate_block,
+            values,
+            iterator=first["iterator"],
+            session_hash="segment-rate-regression",
+            simple_format=True,
+        )
+        return first, finished
+
+    first, finished = asyncio.run(run_generation())
+    assert finished["is_generating"] is False
+    assert first["data"][1].get("path")
+    assert "流式试听未启用，不影响最终音频输出" in first["data"][5]
 
 
 def test_desktop_context_emotion_suggestions_fill_timeline_without_synthesis(tmp_path):

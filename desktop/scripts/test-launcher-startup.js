@@ -20,6 +20,7 @@ const releaseWorkflowSource = fs.readFileSync(
   "utf8"
 );
 const webuiSource = fs.readFileSync(path.join(projectRoot, "desktop_webui.py"), "utf8");
+const apiLauncherSource = fs.readFileSync(path.join(projectRoot, "desktop_api_launcher.py"), "utf8");
 const desktopVersion = JSON.parse(
   fs.readFileSync(path.join(desktopRoot, "package.json"), "utf8")
 ).version;
@@ -35,6 +36,17 @@ const nodePyproject = fs.readFileSync(
   "utf8"
 );
 const nodeVersion = nodePyproject.match(/^version\s*=\s*"([^"]+)"/m)?.[1];
+
+for (const filename of ["启动API服务.cmd", "停止API服务.cmd", "查看API服务状态.cmd"]) {
+  const content = fs.readFileSync(path.join(desktopRoot, "scripts", filename));
+  assert.ok(
+    [...content].every((byte) => byte < 0x80),
+    `${filename} must keep executable batch content ASCII-only so cmd.exe cannot misparse UTF-8 before chcp.`
+  );
+  const source = content.toString("ascii");
+  assert.match(source, /%T8_RESOURCE_ROOT%\\cpython-\*/);
+  assert.match(source, /%%D\\python\.exe/);
+}
 
 assert.deepEqual(modelManifest.files["bpe.model"], {
   size: 475997,
@@ -66,7 +78,7 @@ for (const option of ["precisionMode", "referenceDevice", "reuseDefaultEmotion"]
   assert.ok(htmlSource.includes(`id="${option}"`), `Launcher must expose ${option}.`);
 }
 const advancedPanels = [...htmlSource.matchAll(/<details\b[^>]*class="[^"]*\badvanced-card\b[^"]*"[^>]*>/g)];
-assert.equal(advancedPanels.length, 4, "Launcher must group the four advanced areas into disclosures.");
+assert.equal(advancedPanels.length, 5, "Launcher must group all five optional areas into disclosures.");
 for (const [openingTag] of advancedPanels) {
   assert.doesNotMatch(openingTag, /\sopen(?:\s|=|>)/, "Advanced areas must be collapsed by default.");
 }
@@ -75,6 +87,7 @@ for (const title of [
   "加速环境预检",
   "真实加速基准与推荐",
   "桌面自动更新与上游动态",
+  "本地 API 服务（OpenAI 兼容）",
 ]) {
   assert.ok(htmlSource.includes(title), `Launcher must expose the collapsed advanced section: ${title}`);
 }
@@ -115,6 +128,15 @@ for (const profileControl of [
   "modelDownloadTitle",
   "modelDownloadDetail",
   "modelDownloadDisk",
+  "apiPort",
+  "apiDefaultVoice",
+  "apiKey",
+  "apiSaveHistory",
+  "apiAllowLan",
+  "startApiButton",
+  "openApiUiButton",
+  "openApiDocsButton",
+  "stopApiButton",
 ]) {
   assert.ok(htmlSource.includes(`id="${profileControl}"`), `Launcher must expose ${profileControl}.`);
 }
@@ -131,6 +153,10 @@ assert.match(mainSource, /ipcMain\.handle\("desktop:install-update"/);
 assert.match(mainSource, /ipcMain\.handle\("desktop:choose-output-directory"/);
 assert.match(mainSource, /ipcMain\.handle\("desktop:choose-data-directory"/);
 assert.match(mainSource, /ipcMain\.handle\("desktop:show-launcher"/);
+assert.match(mainSource, /ipcMain\.handle\("desktop:start-api-service"/);
+assert.match(mainSource, /ipcMain\.handle\("desktop:set-api-options"/);
+assert.match(mainSource, /T8STAR_INDEXTTS_API_KEY/);
+assert.match(mainSource, /\/v1\/audio\/speech/);
 assert.match(mainSource, /ipcMain\.handle\("desktop:open-output-directory"/);
 assert.match(mainSource, /ipcMain\.handle\("desktop:reveal-output-item"/);
 assert.match(mainSource, /path\.relative\(outputRoot, resolved\)/);
@@ -175,6 +201,10 @@ assert.ok(
   "The Python WebUI version must match the Electron package version."
 );
 assert.ok(
+  apiLauncherSource.includes(`DESKTOP_VERSION = "${desktopVersion}"`),
+  "The standalone API launcher version must match the Electron package version."
+);
+assert.ok(
   forgeSource.includes('path.join(projectRoot, "context_emotion.py")'),
   "The packaged desktop runtime must include the context-emotion helper."
 );
@@ -187,8 +217,10 @@ assert.ok(webuiSource.includes("停止语音任务"));
 assert.ok(webuiSource.includes("停止多角色任务"));
 assert.ok(webuiSource.includes("格式说明与真实示例 · 新手需要时展开"));
 assert.ok(webuiSource.includes("任务恢复、单句重试与工程管理 · 按需展开"));
-assert.ok(webuiSource.includes("返回启动配置（停止模型）"));
+assert.ok(webuiSource.includes("返回启动配置"));
 assert.ok(webuiSource.includes("window.desktopApi.showLauncher"));
+assert.ok(forgeSource.includes('path.join(projectRoot, "desktop_api.py")'));
+assert.ok(forgeSource.includes('path.join(projectRoot, "desktop_api_launcher.py")'));
 assert.ok(webuiSource.includes("技术诊断 JSON（排错时展开或复制）"));
 for (const expected of [
   `DESKTOP ${desktopVersion}`,

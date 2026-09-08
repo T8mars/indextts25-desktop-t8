@@ -5,16 +5,16 @@
     <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:;" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>T8star-Aix · IndexTTS 2.5</title>
-    <link rel="stylesheet" href="styles.css?v=0.25.1" />
+    <link rel="stylesheet" href="styles.css?v=0.26.1" />
   </head>
   <body>
     <main class="shell">
       <section class="hero">
         <div class="hero-main">
-          <div class="badge">INDEXTTS 2.5 · DESKTOP 0.25.1</div>
+          <div class="badge">INDEXTTS 2.5 · DESKTOP 0.26.1</div>
           <h1>T8star-Aix · IndexTTS 2.5</h1>
           <p class="build-meta">
-            Desktop 0.25.1 · ComfyUI Node 0.23.0<br />
+            Desktop 0.26.1 · ComfyUI Node 0.23.0<br />
             Core ee40fa7d · Model 14166a74
           </p>
         </div>
@@ -80,6 +80,55 @@
               <p id="hardwareSummary" class="hardware-summary">正在检测显卡（只检测环境，不加载模型）…</p>
               <p id="runtimeProfileHint" class="hint">自动推荐只填写下方选项，不会自动启动或加载模型。</p>
             </div>
+
+            <details class="diagnostics-card advanced-card api-card" aria-labelledby="apiTitle">
+              <summary>
+                <span class="advanced-summary-copy">
+                  <strong id="apiTitle">本地 API 服务（OpenAI 兼容）</strong>
+                  <span id="apiSummary">默认仅本机访问；可供 SillyTavern、自动化脚本或任意 HTTP 客户端调用。</span>
+                </span>
+              </summary>
+              <div class="advanced-card-body">
+                <div class="api-grid">
+                  <label>
+                    固定端口
+                    <input id="apiPort" type="number" min="1" max="65535" value="7861" />
+                  </label>
+                  <label>
+                    默认音色（音色库名称或 ID，可留空）
+                    <input id="apiDefaultVoice" type="text" list="apiVoiceChoices" maxlength="120" placeholder="留空时每次请求必须填写 voice" />
+                    <datalist id="apiVoiceChoices"></datalist>
+                  </label>
+                </div>
+                <label for="apiKey">API Key（自动生成并保存在本机）</label>
+                <div class="path-row api-key-row">
+                  <input id="apiKey" type="password" readonly />
+                  <button id="copyApiKeyButton" class="ghost">复制 Key</button>
+                  <button id="copyApiExampleButton" class="ghost">复制调用示例</button>
+                </div>
+                <div class="api-options">
+                  <label class="checkbox-row" for="apiSaveHistory">
+                    <input id="apiSaveHistory" type="checkbox" checked />
+                    API 生成写入“生成历史”并保存到输出目录
+                  </label>
+                  <label class="checkbox-row" for="apiAllowLan">
+                    <input id="apiAllowLan" type="checkbox" />
+                    允许局域网访问（仅可信网络；必须携带 API Key）
+                  </label>
+                </div>
+                <label for="apiCorsOrigins">浏览器 CORS 来源（可选，逗号分隔；普通客户端无需填写）</label>
+                <input id="apiCorsOrigins" type="text" placeholder="例如：http://127.0.0.1:8000" />
+                <p class="hint api-endpoint">服务地址：<code id="apiEndpoint">http://127.0.0.1:7861</code> · 接口：<code>/v1/audio/speech</code> · 文档：<code>/docs</code></p>
+                <div class="diagnostics-actions api-actions">
+                  <button id="saveApiOptionsButton" class="secondary">保存 API 设置</button>
+                  <button id="startApiButton" class="primary">仅启动 API（留在本页）</button>
+                  <button id="openApiUiButton" class="secondary" disabled>打开语音界面</button>
+                  <button id="openApiDocsButton" class="ghost" disabled>打开接口文档</button>
+                  <button id="stopApiButton" class="ghost" disabled>停止 API</button>
+                </div>
+                <p class="hint">整合包 EXE 同级还提供“启动API服务.cmd / 查看API服务状态.cmd / 停止API服务.cmd”。CMD 使用内置 Python，前台窗口持续显示日志，关闭或按 Ctrl+C 即停止。</p>
+              </div>
+            </details>
 
             <details class="diagnostics-card advanced-card manual-runtime-card" aria-labelledby="manualRuntimeTitle">
               <summary>
@@ -235,7 +284,7 @@
 
       <footer>
         基于 Bilibili IndexTTS 2.5 · 非官方桌面整合版 · Python 与运行依赖已包含在应用中<br />
-        Desktop 0.25.1 · ComfyUI Node 0.23.0 · Core ee40fa7d · Model Bundle 1.0.0 / 14166a74<br />
+        Desktop 0.26.1 · ComfyUI Node 0.23.0 · Core ee40fa7d · Model Bundle 1.0.0 / 14166a74<br />
         启动器只检测模型，不会自动加载；请先选择精度、参考编码器与加速模式，再点击“启动 IndexTTS 2.5”
       </footer>
     </main>
