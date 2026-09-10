@@ -12,6 +12,7 @@ const mainSource = fs.readFileSync(path.join(desktopRoot, "src", "main.js"), "ut
 const preloadSource = fs.readFileSync(path.join(desktopRoot, "src", "preload.js"), "utf8");
 const rendererSource = fs.readFileSync(path.join(desktopRoot, "src", "renderer.js"), "utf8");
 const htmlSource = fs.readFileSync(path.join(desktopRoot, "src", "index.html"), "utf8");
+const stylesSource = fs.readFileSync(path.join(desktopRoot, "src", "styles.css"), "utf8");
 const profileSource = fs.readFileSync(path.join(desktopRoot, "src", "runtime_profiles.js"), "utf8");
 const diagnosticSource = fs.readFileSync(path.join(desktopRoot, "src", "diagnostic_report.js"), "utf8");
 const forgeSource = fs.readFileSync(path.join(desktopRoot, "forge.config.js"), "utf8");
@@ -173,6 +174,16 @@ assert.match(preloadSource, /chooseDataDirectory/);
 assert.match(rendererSource, /chooseOutputButton\.addEventListener/);
 assert.match(rendererSource, /chooseDataButton\.addEventListener/);
 assert.match(mainSource, /resolveDesktopUpdate/);
+assert.doesNotMatch(
+  mainSource,
+  /Update check: \$\{JSON\.stringify\(report\)\}/,
+  "The launcher must not render the complete signed update manifest in its visible log."
+);
+assert.match(mainSource, /MAX_UI_LOG_LINE_CHARS/);
+assert.match(rendererSource, /MAX_VISIBLE_LOG_CHARS/);
+assert.match(stylesSource, /\.workspace\s*\{[^}]*align-items:\s*start/s);
+assert.match(stylesSource, /\.model-form\s*\{\s*margin:\s*0;/);
+assert.match(stylesSource, /\.log-card\s*\{[^}]*height:\s*clamp\(/s);
 assert.match(mainSource, /markUpdateHealthyIfRequested/);
 assert.match(releaseWorkflowSource, /T8_UPDATE_PRIVATE_KEY_BASE64/);
 assert.match(releaseWorkflowSource, /desktop-update-manifest\.sig/);

@@ -99,6 +99,7 @@ const accelerationLabels = {
 };
 
 let currentState = {};
+const MAX_VISIBLE_LOG_CHARS = 120000;
 
 function formatBytes(value) {
   const bytes = Number(value);
@@ -420,6 +421,13 @@ function renderState(state) {
 function appendLog(line) {
   if (elements.logOutput.textContent === "等待启动…") elements.logOutput.textContent = "";
   elements.logOutput.textContent += `${line}\n`;
+  if (elements.logOutput.textContent.length > MAX_VISIBLE_LOG_CHARS) {
+    const retained = elements.logOutput.textContent.slice(-MAX_VISIBLE_LOG_CHARS);
+    const firstLineBreak = retained.indexOf("\n");
+    elements.logOutput.textContent = `… 更早的界面日志已省略，完整内容请点击“打开日志”查看。\n${
+      firstLineBreak >= 0 ? retained.slice(firstLineBreak + 1) : retained
+    }`;
+  }
   elements.logOutput.scrollTop = elements.logOutput.scrollHeight;
 }
 

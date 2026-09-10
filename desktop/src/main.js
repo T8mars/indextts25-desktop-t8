@@ -29,6 +29,7 @@ const {
 const APP_TITLE = "T8star-Aix · IndexTTS 2.5";
 const COMFY_NODE_VERSION = "0.23.1";
 const DEFAULT_API_PORT = 7861;
+const MAX_UI_LOG_LINE_CHARS = 2000;
 const MODEL_DOWNLOAD_PROGRESS_PREFIX = "@@T8_MODEL_PROGRESS@@";
 const MODEL_URLS = {
   huggingface: "https://huggingface.co/t8star/IndexTTS-2.5-Comfy",
@@ -224,7 +225,15 @@ async function checkForUpdates() {
       : "当前未发现新版本。";
   updateState({ updateBusy: false, updateReport: report, message: report.summary });
   writeSettings({ ...readSettings(), lastUpdateCheck: report.checkedAt });
-  appendLog(`Update check: ${JSON.stringify(report)}`);
+  const shortRevision = (value) => String(value || "unknown").slice(0, 8);
+  appendLog([
+    `Update check: ${report.summary}`,
+    `Desktop ${report.desktop.current || "unknown"} -> ${report.desktop.latest || "unknown"}`,
+    `Node ${report.node.bundled || "unknown"} -> ${report.node.latest || "unknown"}`,
+    `Core ${shortRevision(report.officialCode.pinned)} -> ${shortRevision(report.officialCode.latest)}`,
+    `Model ${report.officialModel.pinned || "unknown"} -> ${report.officialModel.latest || "unknown"}`,
+    `errors=${report.errors.length}`
+  ].join(" | "));
   return state;
 }
 
@@ -830,7 +839,12 @@ function appendLog(rawLine) {
   const stamp = new Date().toISOString();
   fs.appendFileSync(path.join(logsDirectory(), "desktop.log"), `[${stamp}] ${line}\n`, "utf8");
   if (mainWindow && !mainWindow.isDestroyed()) {
-    mainWindow.webContents.send("desktop:log", line);
+    const displayLine = line.split(/\r?\n/).map((part) => (
+      part.length > MAX_UI_LOG_LINE_CHARS
+        ? `${part.slice(0, MAX_UI_LOG_LINE_CHARS)} … [界面已省略 ${part.length - MAX_UI_LOG_LINE_CHARS} 个字符，完整内容保存在日志文件]`
+        : part
+    )).join("\n");
+    mainWindow.webContents.send("desktop:log", displayLine);
   }
 }
 

@@ -69,6 +69,7 @@ h1 {
 .workspace {
   display: grid;
   grid-template-columns: minmax(560px, 1.15fr) minmax(380px, 0.85fr);
+  align-items: start;
   flex: 1;
   gap: 20px;
   min-height: 0;
@@ -94,7 +95,7 @@ h1 {
   margin-bottom: clamp(28px, 4vh, 44px);
 }
 
-.model-form { margin: auto 0; }
+.model-form { margin: 0; }
 
 .status-dot {
   display: inline-block;
@@ -382,7 +383,17 @@ button.ghost { padding: 8px 12px; background: transparent; color: #aeb6c7; }
 .missing-files { margin: 12px 0 0; color: #ff8795; font-size: 13px; }
 .missing-files:empty { display: none; }
 
-.log-card { display: flex; flex-direction: column; min-height: 0; overflow: hidden; }
+.log-card {
+  position: sticky;
+  top: 20px;
+  display: flex;
+  align-self: start;
+  flex-direction: column;
+  width: 100%;
+  height: clamp(360px, calc(100vh - 180px), 720px);
+  min-height: 0;
+  overflow: hidden;
+}
 .log-title { padding: 14px 18px; border-bottom: 1px solid rgba(255,255,255,.08); color: #cbd1dd; font-size: 13px; font-weight: 700; }
 
 pre {
@@ -403,7 +414,7 @@ footer { padding: 22px 4px 0; text-align: center; color: #71798a; font-size: 12p
   .shell { min-height: auto; }
   .workspace { grid-template-columns: 1fr; }
   .status-card { min-height: 330px; }
-  .log-card { min-height: 300px; }
+  .log-card { position: static; height: auto; min-height: 300px; }
   pre { height: 240px; min-height: 240px; }
   .model-form { margin: 0; }
 }
