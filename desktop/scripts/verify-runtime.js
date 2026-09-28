@@ -15,6 +15,21 @@ const packagedAppRoot = path.resolve(
 );
 const packagedRoot = path.join(packagedAppRoot, "resources");
 
+function requireRegularFile(filePath, label) {
+  let stats;
+  try {
+    stats = fs.statSync(filePath);
+  } catch {
+    console.error(`${label} is missing: ${filePath}`);
+    process.exit(1);
+  }
+  if (!stats.isFile() || stats.size <= 0) {
+    console.error(`${label} is not a non-empty regular file: ${filePath}`);
+    process.exit(1);
+  }
+  return stats;
+}
+
 if (!fs.existsSync(packagedRoot)) {
   console.error(`Packaged resources do not exist: ${packagedRoot}`);
   process.exit(1);
@@ -58,6 +73,10 @@ if (
   !packagedMainSource.includes('ipcMain.handle("desktop:open-data-directory"') ||
   !packagedMainSource.includes('mainWindow.on("close"') ||
   !packagedMainSource.includes("stoppingPythonProcess === processRef") ||
+  !packagedMainSource.includes("function terminateProcessTree(processRef)") ||
+  !packagedMainSource.includes('spawn("taskkill.exe", ["/PID", String(processRef.pid), "/T", "/F"]') ||
+  !packagedMainSource.includes("path.resolve(fileURLToPath(url)) === path.resolve(__dirname, \"index.html\")") ||
+  !packagedMainSource.includes("if (!isTrustedRendererFrame({ url: targetUrl })) event.preventDefault()") ||
   !packagedMainSource.includes("checkForUpdates") ||
   !packagedMainSource.includes("markUpdateHealthyIfRequested") ||
   !packagedMainSource.includes("MODEL_DOWNLOAD_PROGRESS_PREFIX") ||
@@ -170,6 +189,88 @@ if (!fs.existsSync(accelerationManifestPath)) {
   process.exit(1);
 }
 
+const confuciusRoot = path.join(packagedRoot, "confucius_component");
+const confuciusManifestPath = path.join(confuciusRoot, "confucius-component.json");
+requireRegularFile(confuciusManifestPath, "Packaged Confucius component manifest");
+const confuciusManifest = JSON.parse(fs.readFileSync(confuciusManifestPath, "utf8"));
+if (
+  confuciusManifest.schemaVersion !== 1 ||
+  confuciusManifest.component !== "Confucius4-R2T2" ||
+  confuciusManifest.protocolVersion !== 1 ||
+  confuciusManifest.profile !== "sm120"
+) {
+  console.error("Packaged Confucius component manifest is incompatible.");
+  process.exit(1);
+}
+for (const [relativePath, label] of [
+  [confuciusManifest.workerPython, "Confucius worker Python"],
+  [path.posix.join(confuciusManifest.buildDir, "bin/Release/ggml-cuda.dll"), "Confucius CUDA runtime"],
+  [path.posix.join(confuciusManifest.buildDir, "python/Release/qwen3asr_native.cp312-win_amd64.pyd"), "Confucius native Python extension"],
+  ["r2t2_core/worker.py", "Confucius worker entrypoint"],
+  ["models/FireRedVAD-ONNX/fireredvad_stream_vad_with_cache.onnx", "Confucius VAD model"],
+  ["licenses/LICENSE", "Confucius software license"],
+  ["licenses/MODEL_LICENSE", "Confucius model license"]
+]) {
+  requireRegularFile(path.join(confuciusRoot, ...String(relativePath).split("/")), label);
+}
+for (const [filename, metadata] of Object.entries(confuciusManifest.models || {})) {
+  const modelPath = path.join(confuciusRoot, ...confuciusManifest.modelDir.split("/"), filename);
+  const stats = requireRegularFile(modelPath, `Confucius model ${filename}`);
+  if (stats.size !== Number(metadata.Size)) {
+    console.error(`Packaged Confucius model size mismatch: ${filename}`);
+    process.exit(1);
+  }
+  if (!/^[a-f0-9]{64}$/.test(String(metadata.Sha256 || ""))) {
+    console.error(`Packaged Confucius model digest metadata is invalid: ${filename}`);
+    process.exit(1);
+  }
+}
+if (Object.keys(confuciusManifest.models || {}).length !== 2) {
+  console.error("Packaged Confucius model set is incomplete.");
+  process.exit(1);
+}
+const confuciusWorkerPython = path.join(
+  confuciusRoot,
+  ...String(confuciusManifest.workerPython).split("/")
+);
+if (fs.existsSync(path.join(path.dirname(confuciusWorkerPython), "pyvenv.cfg"))) {
+  console.error("Packaged Confucius worker is a machine-bound venv instead of a portable Python runtime.");
+  process.exit(1);
+}
+const confuciusBuildDir = path.join(
+  confuciusRoot,
+  ...String(confuciusManifest.buildDir).split("/")
+);
+const confuciusImportCheck = spawnSync(confuciusWorkerPython, [
+  "-c",
+  [
+    "import sys",
+    "from pathlib import Path",
+    `root = Path(${JSON.stringify(confuciusRoot)}).resolve()`,
+    "assert Path(sys.executable).resolve().is_relative_to(root)",
+    "assert Path(sys.base_prefix).resolve().is_relative_to(root)",
+    "from r2t2_core.native import _load_extension",
+    `native = _load_extension(Path(${JSON.stringify(confuciusBuildDir)}))`,
+    "import onnxruntime, numpy, soundfile",
+    "print(native.__file__, onnxruntime.__version__)"
+  ].join("; ")
+], {
+  cwd: confuciusRoot,
+  encoding: "utf8",
+  env: {
+    ...process.env,
+    PYTHONIOENCODING: "utf-8",
+    PYTHONPATH: confuciusRoot
+  }
+});
+if (confuciusImportCheck.status !== 0) {
+  console.error(confuciusImportCheck.stdout);
+  console.error(confuciusImportCheck.stderr);
+  console.error("Packaged Confucius worker/native runtime cannot be imported offline.");
+  process.exit(confuciusImportCheck.status || 1);
+}
+console.log(`Packaged Confucius worker runtime OK: ${confuciusImportCheck.stdout.trim()}`);
+
 const moduleRoot = path.join(packagedRoot, "indextts");
 for (const legacyFile of ["infer.py", "infer_v2.py", "cli.py", "cli_v2.py"]) {
   if (fs.existsSync(path.join(moduleRoot, legacyFile))) {
@@ -265,7 +366,7 @@ const desktopSource = fs.readFileSync(path.join(packagedRoot, "desktop_webui.py"
 const desktopApiSource = fs.readFileSync(path.join(packagedRoot, "desktop_api.py"), "utf8");
 const desktopApiLauncherSource = fs.readFileSync(path.join(packagedRoot, "desktop_api_launcher.py"), "utf8");
 const voiceLibrarySource = fs.readFileSync(path.join(packagedRoot, "desktop_voice_library.py"), "utf8");
-for (const moduleName of ["desktop_api.py", "desktop_api_launcher.py", "desktop_presets.py", "desktop_voice_library.py", "desktop_generation_controls.py", "desktop_model_lifecycle.py", "desktop_streaming_audio.py", "desktop_candidate_workspace.py", "desktop_job_queue.py", "desktop_tasks.py", "desktop_project_bundle.py", "desktop_runtime_benchmark.py", "audio_quality.py", "audiocpp_backend.py", "audiocpp_component_manager.py", "candidate_quality.py", "speech_review.py", "timeline_tools.py", "context_emotion.py", "dialogue_runtime.py", "runtime_acceleration.py", "runtime_benchmark.py", "runtime_metrics.py", "segment_rate_workspace.py"]) {
+for (const moduleName of ["desktop_api.py", "desktop_api_launcher.py", "desktop_presets.py", "desktop_voice_library.py", "desktop_generation_controls.py", "desktop_model_lifecycle.py", "desktop_streaming_audio.py", "desktop_candidate_workspace.py", "desktop_job_queue.py", "desktop_tasks.py", "desktop_project_bundle.py", "desktop_runtime_benchmark.py", "audio_quality.py", "audiocpp_backend.py", "audiocpp_component_manager.py", "confucius_asr.py", "confucius_asr_gateway.py", "confucius_live_client.js", "confucius_live_worklet.js", "generation_cancellation.py", "candidate_quality.py", "speech_review.py", "timeline_tools.py", "context_emotion.py", "dialogue_runtime.py", "runtime_acceleration.py", "runtime_benchmark.py", "runtime_metrics.py", "segment_rate_workspace.py"]) {
   if (!fs.existsSync(path.join(packagedRoot, moduleName))) {
     console.error(`Packaged desktop runtime module is missing: ${moduleName}`);
     process.exit(1);
@@ -397,7 +498,7 @@ const check = spawnSync(pythonExe, [
     "assert allocate_native_chunk_durations(duration_plan, 8.0) == (2.0, 6.0)",
     "assert task_choices('不存在的任务目录') == []",
     "assert asr_available()",
-    "assert ASR_BACKENDS == ('auto', 'openai_whisper', 'faster_whisper')",
+    "assert ASR_BACKENDS == ('auto', 'confucius_r2t2', 'openai_whisper', 'faster_whisper')",
     "assert GenerationMixin in GPT2InferenceModel.__bases__",
     "assert uses_torchcodec_io() is False",
     "assert review_transcript('第二十五條臺詞', '第25条台词', 'ZH', 0.99)['passed']",

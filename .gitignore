@@ -62,3 +62,6 @@ desktop.ini
 /desktop/.vite/
 /desktop/runtime-stage/
 /release_packages/
+/confucius_component/
+/confucius_component.staging/
+/confucius_component.previous/

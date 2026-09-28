@@ -38,6 +38,18 @@ jobs:
           cache: npm
           cache-dependency-path: desktop/package-lock.json
 
+      - name: Set up Python syntax gate
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.10"
+
+      - name: Compile Desktop Python entrypoints
+        shell: pwsh
+        run: |
+          python -m py_compile `
+            desktop_webui.py desktop_api.py speech_review.py `
+            confucius_asr.py confucius_asr_gateway.py generation_cancellation.py
+
       - name: Install desktop dependencies
         working-directory: desktop
         run: npm ci --ignore-scripts --no-audit --no-fund

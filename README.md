@@ -1,8 +1,9 @@
 # T8star-Aix · IndexTTS 2.5 Desktop
 
 这是基于官方 IndexTTS 2.5 制作的 Windows Electron 桌面整合版源码仓库，当前桌面版本为
-**0.26.3**。完整功能、开发和打包说明见 [Desktop README](desktop/README.md)。
+**0.26.4**。完整功能、开发和打包说明见 [Desktop README](desktop/README.md)。
 
+> 0.26.4 新增独立实时字幕与上传音频转写：默认使用隔离的 Confucius4-R2T2 Q8 本地组件，Whisper 继续负责阿拉伯语、词级时间戳和安全回退；同时修复停止/断线资源释放、预设控制方式恢复、生成下载入口和多段任务取消等问题。
 > 0.26.3 修复启动器自动更新清单撑高左右布局的问题：右侧只显示简洁摘要并限制可见日志长度，完整日志仍可从“打开日志”查看；同时保留 0.26.2 对官方 PR #802 的非 CJK 长文本安全分段更新。
 > 0.26.1 新增通用常驻本地 API：兼容 OpenAI `/v1/audio/speech`，同时提供 IndexTTS 高级参数与异步任务接口；
 > 桌面界面和 API 共用一份模型、音色库、输出历史和 GPU 推理锁，便携包另带前台常驻的启动/状态/停止 CMD。
@@ -18,6 +19,15 @@
 - IndexTTS 2.5 模型网盘：[夸克网盘](https://pan.quark.cn/s/c9c267081fbf)
 - IndexTTS 2.5 Hugging Face 模型：[t8star/IndexTTS-2.5-Comfy](https://huggingface.co/t8star/IndexTTS-2.5-Comfy)
 
+## 模型下载地址
+
+- 推荐镜像（启动器自动下载、续传与 SHA-256 校验使用）：<https://huggingface.co/t8star/IndexTTS-2.5-Comfy>
+- 当前固定模型版本：<https://huggingface.co/t8star/IndexTTS-2.5-Comfy/tree/14166a7401f9f87f53770a1784390e8c0e9da15a>
+- 国内网盘备用：<https://pan.quark.cn/s/c9c267081fbf>
+- 官方模型源：<https://huggingface.co/IndexTeam/IndexTTS-2.5>
+
+下载完成后，应选择包含 `config_v2_5.yaml`、`bpe.model` 与完整权重文件的模型目录。推荐直接在启动器点击“**Hugging Face 自动下载／修复完整模型**”，程序会固定到上面的已验证版本，不会把模型写入 C 盘，除非用户主动选择 C 盘目录。
+
 仓库不包含约 10 GB 的模型权重、Python 虚拟环境、Electron 构建产物、用户数据或生成音频。
 运行便携版时，可在启动器中选择完整的 IndexTTS 2.5 模型目录，也可点击
 “Hugging Face 自动下载／修复完整模型”；选择父目录后会创建 `IndexTTS-2.5` 子目录。源码开发环境与打包步骤见上方
@@ -26,6 +36,8 @@ Desktop README。本整合版并非 IndexTTS 官方发行版，模型与基础�
 ## 桌面界面、目录与日志
 
 - “语音生成”和“多角色 / 批量台词 / SRT”页使用固定在窗口底部的生成/停止操作栏，滚动到任何位置都可立即操作；非常用说明、质检和高级参数默认折叠。
+- 新增独立“实时字幕”页：本地 Confucius4-R2T2 作为默认实时/文件 ASR，支持中、英、粤、日、韩、德、法、俄、葡、西、意十一种语言；Whisper 继续负责阿拉伯语、词级时间戳以及组件或 worker 故障时的完整文件回退。它是语音转写，不是跨语言翻译。
+- Confucius 使用隔离的 Python 3.12 worker 和 Q8 组件，不向 IndexTTS/ComfyUI Python 安装依赖；录音、字幕、上下文和热词默认不落盘。实时页可开始、停止、取消、复制或下载 TXT，高级分段参数默认折叠。
 - 多角色固定操作栏会持续显示当前行、已完成数量和百分比；时间轴选中任意台词后可直接上移/下移，角色、语言、文本和情感一起移动，已有 SRT 时间槽保持原位。
 - 时间轴表格上方直接显示逐句情感速写；折叠速查列出八维顺序与含义。当前可编辑时间轴可单独导出为保真的 JSON 或易于表格编辑的 CSV，之后导入并继续生成，不必打包完整音频工程。
 - “任务队列”统一保存单句、多角色和 SRT 任务，桌面程序重启后仍可继续；失败或取消的任务可以重新排队。
@@ -41,6 +53,19 @@ Desktop README。本整合版并非 IndexTTS 官方发行版，模型与基础�
 Desktop 0.26.1 可供 SillyTavern、直播工具、剪辑脚本和其他程序直接调用，不依赖专用适配器。启动器可选择“桌面 + API”或“仅 API”；便携包 EXE 同级的 `启动API服务.cmd` 会使用内置 Python 在前台持续监听，错误不会一闪而过。默认地址 `http://127.0.0.1:7861`，OpenAI 兼容接口为 `POST /v1/audio/speech`，完整 Swagger 文档为 `/docs`。
 
 API Key 自动生成并可在启动器复制；音色只从桌面角色音色库选择，生成结果保存到相同输出目录并进入生成历史。原生高级接口还支持情感向量、种子、采样/扩散、分段和后处理，长文本可用异步任务查询进度和取消。详细启动方式、请求示例、安全与排错说明见 [本地 API 使用说明](docs/LOCAL_API.md)。
+
+## Confucius4-R2T2 实时字幕组件
+
+完整便携包执行 `npm run package` / `npm run make` 时会先调用 `desktop/scripts/build-confucius-component.ps1`，只分层复制隔离 worker、必要 native DLL、FireRedVAD 和固定的 Q8 主模型/projector，不复制 Confucius 开发仓库中的 ComfyUI 节点、测试语料、Hugging Face 下载缓存或 BF16 权重。默认源目录是 `E:\Confucius4-R2T2`，也可用环境变量 `T8STAR_CONFUCIUS_SOURCE_ROOT` 指定。组件清单固定模型大小与 SHA-256；首次使用前必须在实时字幕页阅读并接受模型许可。当前 native profile 是已实测的 `sm120` Preview，未经过真实显卡验收的 RTX 20/30/40 系列不会被文档冒称支持。
+
+Desktop 与 Confucius sidecar 共用 GPU 租约：实时会话持续期间，TTS 与文件 ASR 会排队；停止、取消、断线或应用退出会释放租约、卸载 sidecar 模型并终止进程树。开发者可用下列命令重复验证真实 Q8 文件与 WebSocket Live 链路（数据目录应放在有足够空间的 D 盘）：
+
+```powershell
+.\.venv\Scripts\python.exe .\desktop\scripts\smoke-confucius-live.py `
+  --data-dir D:\IndexTTS-Data `
+  --audio E:\Confucius4-R2T2\.reference\Confucius4-R2T2\resources\test.wav `
+  --accept-license
+```
 
 ## 中文数字、日期与年份读法
 

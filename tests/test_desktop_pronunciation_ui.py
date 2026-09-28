@@ -790,7 +790,7 @@ def test_desktop_single_generation_retries_failed_asr_candidate(tmp_path, monkey
     tts = _CapturingTTS()
     demo = build_app(tts, output_dir, data_dir, verbose=False)
     transcripts = iter(("错误结果", "自动质检文本", "自动质检文版"))
-    monkeypatch.setattr(desktop_webui, "asr_available", lambda *_args: True)
+    monkeypatch.setattr(desktop_webui, "asr_available", lambda *_args, **_kwargs: True)
     monkeypatch.setattr(
         desktop_webui,
         "transcribe_audio_file",
@@ -959,7 +959,7 @@ def test_dialogue_tail_guard_retries_missing_final_character_with_boundary(tmp_p
             "直播延迟设置3333秒",
         )
     )
-    monkeypatch.setattr(desktop_webui, "asr_available", lambda *_args: True)
+    monkeypatch.setattr(desktop_webui, "asr_available", lambda *_args, **_kwargs: True)
     monkeypatch.setattr(
         desktop_webui,
         "transcribe_audio_file",

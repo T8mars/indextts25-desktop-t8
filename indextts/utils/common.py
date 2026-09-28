@@ -1,5 +1,4 @@
-import os
-import random
+import math
 import re
 
 import torch
@@ -31,12 +30,14 @@ def fade_out_pcm_tail(wav, sampling_rate, duration_ms=20.0):
     if fade_samples == 1:
         result[..., -1] = 0
         return result.contiguous()
-    fade = torch.linspace(
-        1.0,
-        0.0,
-        fade_samples,
-        dtype=torch.float32,
-        device=result.device,
+    fade = 0.5 * (
+        1.0 + torch.cos(torch.linspace(
+            0.0,
+            math.pi,
+            fade_samples,
+            dtype=torch.float32,
+            device=result.device,
+        ))
     )
     tail = result[..., -fade_samples:].to(torch.float32) * fade
     result[..., -fade_samples:] = tail.to(result.dtype)
@@ -61,7 +62,7 @@ def load_audio(audiopath, sampling_rate):
     if sr != sampling_rate:
         try:
             audio = torchaudio.functional.resample(audio, sr, sampling_rate)
-        except Exception as e:
+        except Exception:
             print(f"Warning: {audiopath}, wave shape: {audio.shape}, sample_rate: {sr}")
             return None
     # clip audio invalid values

@@ -75,6 +75,11 @@ module.exports = {
       path.join(projectRoot, "audio_quality.py"),
       path.join(projectRoot, "audiocpp_backend.py"),
       path.join(projectRoot, "audiocpp_component_manager.py"),
+      path.join(projectRoot, "confucius_asr.py"),
+      path.join(projectRoot, "confucius_asr_gateway.py"),
+      path.join(projectRoot, "confucius_live_client.js"),
+      path.join(projectRoot, "confucius_live_worklet.js"),
+      path.join(projectRoot, "generation_cancellation.py"),
       path.join(projectRoot, "speech_review.py"),
       path.join(projectRoot, "timeline_tools.py"),
       path.join(projectRoot, "context_emotion.py"),
@@ -94,7 +99,11 @@ module.exports = {
       path.join(projectRoot, "LICENSE"),
       path.join(projectRoot, "LICENSE_ZH.txt"),
       path.join(projectRoot, "DISCLAIMER")
-    ],
+    ].concat(
+      fs.existsSync(path.join(projectRoot, "confucius_component"))
+        ? [path.join(projectRoot, "confucius_component")]
+        : []
+    ),
     ignore: [
       /^\/out($|\/)/,
       /^\/node_modules\/.cache($|\/)/

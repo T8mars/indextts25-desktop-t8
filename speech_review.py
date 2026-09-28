@@ -1,4 +1,4 @@
-"""Optional local Whisper transcription and deterministic transcript review."""
+"""Local Confucius/Whisper transcription and deterministic transcript review."""
 
 from __future__ import annotations
 
@@ -17,7 +17,7 @@ from indextts.utils.audio_io import load_audio_file
 
 
 ASR_MODELS = ("tiny", "base", "small", "medium", "turbo")
-ASR_BACKENDS = ("auto", "openai_whisper", "faster_whisper")
+ASR_BACKENDS = ("auto", "confucius_r2t2", "openai_whisper", "faster_whisper")
 ASR_LANGUAGE_CODES = {"AUTO": None, "ZH": "zh", "EN": "en", "JA": "ja", "ES": "es", "AR": "ar"}
 _MODEL_CACHE: dict[tuple[str, str, str, str], Any] = {}
 _MODEL_LOCK = threading.RLock()
@@ -42,29 +42,61 @@ _OPENCC_CHECKED = False
 
 
 def _backend_installed(backend: str) -> bool:
+    if backend == "confucius_r2t2":
+        return importlib.util.find_spec("confucius_asr") is not None
     return importlib.util.find_spec("whisper" if backend == "openai_whisper" else "faster_whisper") is not None
 
 
 def resolve_asr_backend(backend: str = "auto") -> str:
     value = str(backend or "auto").lower()
     if value not in ASR_BACKENDS:
-        raise ValueError("ASR 后端只能是 auto、openai_whisper 或 faster_whisper。")
+        raise ValueError("ASR 后端只能是 auto、confucius_r2t2、openai_whisper 或 faster_whisper。")
     if value == "auto":
         for candidate in ("faster_whisper", "openai_whisper"):
             if _backend_installed(candidate):
                 return candidate
         raise RuntimeError("未安装 ASR 后端；请安装 openai-whisper 或 faster-whisper。")
+    if value == "confucius_r2t2":
+        return value
     if not _backend_installed(value):
         package = "openai-whisper" if value == "openai_whisper" else "faster-whisper"
         raise RuntimeError(f"未安装所选 ASR 后端 {package}。")
     return value
 
 
-def asr_available(backend: str = "auto") -> bool:
+def asr_available(
+    backend: str = "auto",
+    *,
+    download_root: str | Path | None = None,
+    language: str = "AUTO",
+) -> bool:
+    value = str(backend or "auto").lower()
+    if value == "confucius_r2t2":
+        return _confucius_ready(download_root, language)
+    if value == "auto" and _confucius_ready(download_root, language):
+        return True
     try:
-        resolve_asr_backend(backend)
+        resolve_asr_backend(value)
         return True
     except (RuntimeError, ValueError):
+        return False
+
+
+def _confucius_data_dir(download_root: str | Path | None) -> Path | None:
+    if download_root is None:
+        return None
+    root = Path(download_root).expanduser().resolve()
+    return root.parent if root.name.casefold() == "asr_models" else root
+
+
+def _confucius_ready(download_root: str | Path | None, language: str) -> bool:
+    data_dir = _confucius_data_dir(download_root)
+    if data_dir is None or str(language).upper() == "AR":
+        return False
+    try:
+        from confucius_asr import LANGUAGE_MAP, component_status
+        return str(language).upper() in LANGUAGE_MAP and bool(component_status(data_dir).get("ready"))
+    except (ImportError, OSError, RuntimeError, ValueError):
         return False
 
 
@@ -271,6 +303,8 @@ def load_asr_model(model_name: str = "base", device: str = "auto", download_root
     if model_name not in ASR_MODELS:
         raise ValueError("ASR 模型只能是：" + "、".join(ASR_MODELS))
     resolved_backend, resolved_device = resolve_asr_backend(backend), resolve_asr_device(device)
+    if resolved_backend == "confucius_r2t2":
+        raise RuntimeError("Confucius ASR 由独立 worker 加载，不能作为 Whisper 模型直接加载。")
     root = "" if download_root is None else str(Path(download_root).resolve())
     key = (resolved_backend, model_name, resolved_device, root)
     with _MODEL_LOCK:
@@ -309,7 +343,43 @@ def transcribe_waveform(waveform, sample_rate: int, *, language: str = "AUTO", m
     if int(sample_rate) != 16000:
         audio = torchaudio.functional.resample(audio, int(sample_rate), 16000)
     samples = audio.squeeze(0).clamp(-1, 1).numpy()
-    resolved_backend = resolve_asr_backend(backend)
+    requested_backend = str(backend or "auto").lower()
+    if requested_backend not in ASR_BACKENDS:
+        raise ValueError("ASR 后端只能是 auto、confucius_r2t2、openai_whisper 或 faster_whisper。")
+    use_confucius = requested_backend == "confucius_r2t2" or (
+        requested_backend == "auto" and _confucius_ready(download_root, language)
+    )
+    if use_confucius:
+        from confucius_asr import ConfuciusError, get_manager, map_language, normalize_result
+        data_dir = _confucius_data_dir(download_root)
+        if data_dir is None:
+            raise RuntimeError("Confucius ASR 需要桌面用户数据目录。")
+        options = {
+            "sample_rate": 16000,
+            "channels": 1,
+            "channel": "mean",
+            "mode": "offline",
+            "stream_chunk_ms": 320,
+            "language": map_language(language),
+            "context": "",
+            "hotwords": "",
+            "auto_gain": True,
+        }
+        error: ConfuciusError | None = None
+        for _ in range(2):
+            try:
+                result = get_manager(data_dir).transcribe(samples.astype("<f4", copy=False).tobytes(), options)
+                return normalize_result(result, requested_language=language)
+            except ConfuciusError as exc:
+                error = exc
+                if not exc.retryable:
+                    break
+        if requested_backend == "confucius_r2t2":
+            raise error or RuntimeError("Confucius ASR 识别失败。")
+        fallback_reason = f"{error.code}: {error}" if error is not None else "Confucius ASR unavailable"
+    else:
+        fallback_reason = ""
+    resolved_backend = resolve_asr_backend("auto" if requested_backend == "auto" else requested_backend)
     model, resolved_device = load_asr_model(model_name, device, download_root, resolved_backend)
     if resolved_backend == "openai_whisper":
         result = model.transcribe(samples, language=ASR_LANGUAGE_CODES[language], task="transcribe", fp16=resolved_device == "cuda", verbose=False, condition_on_previous_text=False, temperature=0.0, word_timestamps=True)
@@ -325,7 +395,7 @@ def transcribe_waveform(waveform, sample_rate: int, *, language: str = "AUTO", m
         for segment_index, segment in enumerate(segments):
             for word in getattr(segment, "words", None) or ():
                 words.append({"word": str(word.word).strip(), "start": round(float(word.start), 3), "end": round(float(word.end), 3), "probability": round(float(getattr(word, "probability", 0)), 6), "segment": segment_index})
-    return {"text": text, "detected_language": detected_language, "requested_language": language, "model": str(model_name).lower(), "device": resolved_device, "backend": resolved_backend, "segments": len(segments), "word_timestamps": words}
+    return {"text": text, "detected_language": detected_language, "requested_language": language, "model": str(model_name).lower(), "device": resolved_device, "backend": resolved_backend, "segments": len(segments), "word_timestamps": words, "timestamps_available": True, "fallback_reason": fallback_reason}
 
 
 def transcribe_audio_file(path: str | Path, **kwargs) -> dict[str, Any]:

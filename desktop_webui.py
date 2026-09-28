@@ -20,7 +20,6 @@ from pathlib import Path
 
 import gradio as gr
 import torch
-import torchaudio
 import uvicorn
 
 from audio_quality import analyze_reference_audio, prepare_reference_audio, waveform_html
@@ -68,6 +67,8 @@ from desktop_api import (
     create_api_app,
 )
 from desktop_streaming_audio import BundledStreamingAudio
+from confucius_asr import close_all_managers, set_gpu_coordinator
+from confucius_asr_gateway import ConfuciusDesktopGateway, build_confucius_router
 from dialogue_runtime import (
     DialogueLine,
     compose_timeline,
@@ -97,6 +98,7 @@ from indextts.speech_rate_guard import (
 )
 from indextts.utils.reference_condition_cache import ReferenceConditionCache
 from indextts.utils.audio_io import load_audio_file, save_audio_file
+from generation_cancellation import generation_cancellation
 from indextts.utils.front import probe_text_normalization
 from indextts.pronunciation import (
     ANNOTATION_PATTERN,
@@ -138,7 +140,7 @@ from segment_rate_workspace import (
 
 
 APP_TITLE = "T8star-Aix · IndexTTS 2.5"
-DESKTOP_VERSION = "0.26.3"
+DESKTOP_VERSION = "0.26.4"
 MODEL_MANIFEST = json.loads(
     (Path(__file__).resolve().parent / "desktop_model_manifest.json").read_text(encoding="utf-8")
 )
@@ -509,6 +511,34 @@ CSS = """
 .t8-action-dock .t8-generate { min-width: 210px !important; }
 .t8-action-dock .t8-download { min-width: 150px !important; }
 .t8-action-dock .t8-stop { min-width: 132px !important; }
+.t8-live-shell { display: grid; gap: 14px; }
+.t8-live-card {
+  border: 1px solid var(--border-color-primary); border-radius: 14px;
+  padding: 18px; background: var(--block-background-fill);
+}
+.t8-live-controls { display: flex; gap: 10px; flex-wrap: wrap; align-items: end; }
+.t8-live-field { display: grid; gap: 6px; min-width: 170px; flex: 1 1 190px; }
+.t8-live-field label { font-size: 13px; font-weight: 700; }
+.t8-live-help { display: block; font-size: 12px; line-height: 1.45; opacity: .72; }
+.t8-live-field select, .t8-live-field input, .t8-live-field textarea {
+  box-sizing: border-box; width: 100%; border: 1px solid var(--border-color-primary);
+  border-radius: 9px; padding: 10px; background: var(--input-background-fill);
+  color: var(--body-text-color);
+}
+.t8-live-caption { min-height: 160px; white-space: pre-wrap; font-size: 20px; line-height: 1.7; }
+.t8-live-preview { min-height: 32px; white-space: pre-wrap; opacity: .62; font-size: 17px; }
+.t8-live-status { font-weight: 700; }
+.t8-live-status[data-tone="recording"] { color: #ef2b82; }
+.t8-live-status[data-tone="error"] { color: #e34b4b; }
+.t8-live-status[data-tone="ready"] { color: #1f9d68; }
+.t8-live-actions { align-items: stretch !important; }
+.t8-live-actions button {
+  box-sizing: border-box; height: 44px; min-height: 44px; margin: 0;
+  padding: 0 20px; display: inline-flex; align-items: center;
+  justify-content: center; line-height: 1; font-weight: 750;
+}
+.t8-live-primary { background: #ef2b82; color: white; border: 0; border-radius: 9px; }
+.t8-live-secondary { border: 1px solid var(--border-color-primary); border-radius: 9px; }
 .t8-dock-progress-host {
   flex: 1 1 420px !important;
   min-width: 280px !important;
@@ -747,8 +777,69 @@ TIMELINE_EDITOR_JS = r"""() => {
     window.addEventListener('pointerup', onUp, { once: true });
     window.addEventListener('pointercancel', onUp, { once: true });
   });
+  import('/api/confucius/assets/client.js').catch((error) => {
+    console.error('Confucius live client failed to load', error);
+  });
   return [];
 }"""
+
+
+CONFUCIUS_LIVE_HTML = """
+<section class="t8-live-shell" aria-label="Confucius4 实时字幕">
+  <div class="t8-live-card">
+    <h2>实时字幕 · Confucius4-R2T2</h2>
+    <p>默认使用新的 Confucius4-R2T2 本地识别；不上传录音或文本。首次使用需安装独立组件并接受模型许可。原 Whisper 仍用于词级时间戳、阿拉伯语与安全回退。</p>
+    <div class="t8-live-controls">
+      <div class="t8-live-field"><label for="confucius-live-language">识别语言</label>
+        <select id="confucius-live-language">
+          <option>Auto</option><option>Chinese</option><option>English</option><option>Cantonese</option>
+          <option>Japanese</option><option>Korean</option><option>German</option><option>French</option>
+          <option>Russian</option><option>Portuguese</option><option>Spanish</option><option>Italian</option>
+          <option value="Arabic">Arabic（仅音频文件，Whisper 回退）</option>
+        </select>
+      </div>
+      <div class="t8-live-field"><label for="confucius-live-context">内容背景（可选）</label><input id="confucius-live-context" maxlength="4096" placeholder="例如：产品发布会，讨论语音模型和显卡"><small class="t8-live-help">帮助模型理解场景，不是待转写文字。</small></div>
+      <div class="t8-live-field"><label for="confucius-live-hotwords">重点词 / 专有名词（可选）</label><input id="confucius-live-hotwords" maxlength="2048" placeholder="例如：孔子，IndexTTS, T8star-Aix"><small class="t8-live-help">适合人名、产品名和术语；中文、英文逗号都可以。</small></div>
+    </div>
+    <details style="margin-top:12px"><summary>高级分段参数</summary>
+      <div class="t8-live-controls" style="margin-top:10px">
+        <div class="t8-live-field"><label for="confucius-live-chunk">流式块长度（ms）</label><select id="confucius-live-chunk"><option>160</option><option selected>320</option><option>480</option><option>640</option></select></div>
+        <div class="t8-live-field"><label for="confucius-live-min-segment">最短稳定段（秒）</label><select id="confucius-live-min-segment"><option>0</option><option>4</option><option selected>8</option></select></div>
+      </div>
+    </details>
+  </div>
+  <div class="t8-live-card">
+    <h3>上传音频转写</h3>
+    <p>支持浏览器可解码的 WAV、MP3、M4A/AAC、FLAC、OGG/WebM 等常见格式。文件只在本机浏览器解码并提交给 loopback 本地服务，不写入临时目录、不外传；最多 256 MiB / 30 分钟。复用上方语言、上下文和热词；阿拉伯语自动安全回退本地 Whisper。</p>
+    <div class="t8-live-actions t8-live-controls">
+      <input id="confucius-file-input" type="file" accept="audio/*,.wav,.mp3,.m4a,.aac,.flac,.ogg,.opus,.webm" aria-label="选择要转写的本地音频">
+      <button id="confucius-file-transcribe" class="t8-live-primary">转写所选音频</button>
+    </div>
+  </div>
+  <div class="t8-live-card">
+    <div id="confucius-live-status" class="t8-live-status" data-tone="idle">正在检查组件…</div>
+    <p id="confucius-component-summary"></p>
+    <p><a href="/api/confucius/license-text" target="_blank" rel="noopener">先阅读 Confucius4-R2T2 模型许可全文</a>；接受记录只保存在本机用户数据目录。</p>
+    <div class="t8-live-actions t8-live-controls">
+      <button id="confucius-component-refresh" class="t8-live-secondary">重新检查组件</button>
+      <button id="confucius-license-accept" class="t8-live-secondary" hidden>接受模型许可</button>
+      <button id="confucius-live-start" class="t8-live-primary">开始实时识别</button>
+      <button id="confucius-live-stop" class="t8-live-secondary" disabled>停止并完成</button>
+      <button id="confucius-live-cancel" class="t8-live-secondary" disabled>取消</button>
+    </div>
+  </div>
+  <div class="t8-live-card">
+    <h3>稳定字幕 / 文件转写结果</h3>
+    <div id="confucius-live-stable" class="t8-live-caption" aria-live="polite"></div>
+    <div id="confucius-live-preview" class="t8-live-preview" aria-live="polite"></div>
+    <div class="t8-live-actions t8-live-controls">
+      <button id="confucius-live-copy" class="t8-live-secondary">复制文本</button>
+      <button id="confucius-live-download" class="t8-live-secondary">下载 TXT</button>
+      <button id="confucius-live-clear" class="t8-live-secondary">清理字幕</button>
+    </div>
+  </div>
+</section>
+"""
 
 
 def parse_args() -> argparse.Namespace:
@@ -1921,6 +2012,7 @@ def build_app(
         *values,
         progress=gr.Progress(),
     ):
+        generation_cancellation.begin()
         ensure_model()
         if not prompt_audio:
             raise gr.Error("请先从已保存音色库选择角色，或上传/录制音色参考音频。")
@@ -2549,7 +2641,11 @@ def build_app(
             quality_report = {"enabled": False, "additional_candidates": 0}
             candidate_paths: list[str] = []
             if retry_count:
-                quality_asr_enabled = asr_available(str(quality_asr_backend))
+                quality_asr_enabled = asr_available(
+                    str(quality_asr_backend),
+                    download_root=data_dir / "asr_models",
+                    language=str(language),
+                )
                 candidate_dir = data_dir / "quality_candidates" / target.stem
                 candidate_dir.mkdir(parents=True, exist_ok=True)
 
@@ -4104,6 +4200,7 @@ def build_app(
         force_line_number,
         progress=gr.Progress(),
     ):
+        generation_cancellation.begin()
         resume_task_id = str(resume_task_id or "").strip()
         force_line_number = int(force_line_number or 0)
         requested_timeline_rows = edited_timeline_rows
@@ -4163,7 +4260,11 @@ def build_app(
             raise gr.Error(str(exc)) from exc
         dialogue_asr_retry_count = max(0, int(dialogue_asr_retry_count or 0))
         dialogue_review_enabled = bool(dialogue_asr_enabled or dialogue_asr_retry_count > 0)
-        if dialogue_review_enabled and not asr_available(str(dialogue_asr_backend)):
+        if dialogue_review_enabled and not asr_available(
+            str(dialogue_asr_backend),
+            download_root=data_dir / "asr_models",
+            language="AUTO",
+        ):
             raise gr.Error("所选 ASR 后端不可用；请安装 openai-whisper / faster-whisper，或切换后端。")
         if force_line_number and not resume_task_id:
             raise gr.Error("单句重试前请先选择一个已保存任务。")
@@ -6085,7 +6186,8 @@ def build_app(
             )
             with gr.Accordion("ASR 自动校对当前结果", open=False):
                 gr.Markdown(
-                    "使用本地 Whisper 识别最终音频；中文/日文显示 CER，英文/西语/阿语显示 WER。"
+                    "默认优先使用本地 Confucius4-R2T2 识别最终音频；组件不可用、阿拉伯语或识别服务故障时安全回退 Whisper。"
+                    "需要词级时间戳时请直接选择 Whisper。中文/日文显示 CER，英文/西语/阿语显示 WER。"
                     "校对会统一简繁体、数字和标点，并输出差异明细及词级时间戳；"
                     "音频直接以内存波形送入 ASR，不依赖系统 FFmpeg。首次使用所选模型时会下载权重，"
                     "并保存在启动器用户数据目录的 `asr_models` 文件夹。"
@@ -6108,6 +6210,9 @@ def build_app(
                 single_asr_waveform = gr.HTML(
                     '<div class="t8-timeline-empty">校对后显示音频波形和逐字时间标记。</div>'
                 )
+
+        with gr.Tab("实时字幕"):
+            gr.HTML(CONFUCIUS_LIVE_HTML, container=False)
 
         with gr.Tab("角色音色库"):
             gr.Markdown(
@@ -6391,12 +6496,13 @@ def build_app(
                     dialogue_cfm_temperature = gr.Slider(0.1, 1.5, value=1.0, step=0.05, label="CFM 温度")
             with gr.Accordion("句尾完整性保护与 ASR 校对 · 默认开启", open=False):
                 gr.Markdown(
-                    "默认逐句使用本地 Whisper 核验整句和最后 4 个字（英文/西语/阿语为最后 2 个词）；"
+                    "默认优先使用本地 Confucius4-R2T2 核验整句和最后 4 个字（英文/西语/阿语为最后 2 个词）；"
+                    "组件不可用、阿拉伯语或 worker 故障时，完整单句安全回退 Whisper；需要词级时间戳时请直接选择 Whisper。"
                     "检测到句尾缺字时最多换 3 个连续 seed 自动重做，首个重试还会补充句末标点帮助模型正确收尾。"
                     "连续三个以上相同中文字或数字仍缺失时，后续候选会自动加入不发声的空格边界，避免模型合并重复字。"
                     "识别文本、CER/WER、句尾差异、词级时间戳和通过状态会写入任务报告。"
                     "回写字幕默认采用实际混音时间；只有通过阈值的识别文本才替换原字幕，低分结果保留原文。"
-                    "ASR 权重首次使用时下载到启动器用户数据目录的 `asr_models` 文件夹。"
+                    "Confucius Q8 组件随完整整合包提供；Whisper 权重首次使用时下载到启动器用户数据目录的 `asr_models` 文件夹。"
                 )
                 with gr.Row():
                     dialogue_asr_enabled = gr.Checkbox(value=True, label="生成后逐句自动 ASR 校对与句尾保护")
@@ -7850,7 +7956,7 @@ def build_app(
             queue=False,
         )
         stop_button.click(
-            fn=None,
+            fn=generation_cancellation.stop,
             cancels=[generation_event],
             queue=False,
         )
@@ -8023,7 +8129,7 @@ def build_app(
                 queue=False,
             )
         stop_dialogue_button.click(
-            fn=None,
+            fn=generation_cancellation.stop,
             cancels=[dialogue_generation_event, resume_dialogue_event, retry_dialogue_event, rebuild_dialogue_event],
             queue=False,
         )
@@ -8057,7 +8163,7 @@ def build_app(
             queue=False,
         )
         stop_job_queue_button.click(
-            fn=None,
+            fn=generation_cancellation.stop,
             cancels=[run_job_queue],
             queue=False,
         )
@@ -8106,6 +8212,7 @@ def main() -> None:
     )
 
     coordinator = InferenceCoordinator()
+    set_gpu_coordinator(coordinator)
 
     def load_tts(selection):
         model = IndexTTS2(
@@ -8123,6 +8230,7 @@ def main() -> None:
             use_qwen_emo=policy["use_qwen_emo"],
             **selection.constructor_kwargs(),
         )
+        generation_cancellation.attach(model)
         return coordinator.guard_model(model)
 
     startup_fallback = ""
@@ -8163,7 +8271,9 @@ def main() -> None:
         if acceleration.effective != "off"
         else None
     )
-    model_factory = lambda: load_tts(acceleration)
+    def model_factory():
+        return load_tts(acceleration)
+
     lifecycle = DesktopModelLifecycle(tts, model_factory)
     demo = build_app(
         tts,
@@ -8204,6 +8314,9 @@ def main() -> None:
         shutdown=shutdown,
         allow_origins=args.api_cors_origin,
     )
+    confucius_gateway = ConfuciusDesktopGateway(data_dir, coordinator=coordinator)
+    api_app.include_router(build_confucius_router(confucius_gateway))
+    api_app.add_event_handler("shutdown", close_all_managers)
     application = gr.mount_gradio_app(
         api_app,
         demo,

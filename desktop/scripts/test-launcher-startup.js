@@ -16,6 +16,10 @@ const stylesSource = fs.readFileSync(path.join(desktopRoot, "src", "styles.css")
 const profileSource = fs.readFileSync(path.join(desktopRoot, "src", "runtime_profiles.js"), "utf8");
 const diagnosticSource = fs.readFileSync(path.join(desktopRoot, "src", "diagnostic_report.js"), "utf8");
 const forgeSource = fs.readFileSync(path.join(desktopRoot, "forge.config.js"), "utf8");
+const runtimeVerificationSource = fs.readFileSync(
+  path.join(desktopRoot, "scripts", "verify-runtime.js"),
+  "utf8"
+);
 const releaseWorkflowSource = fs.readFileSync(
   path.join(projectRoot, ".github", "workflows", "desktop-release.yml"),
   "utf8"
@@ -163,9 +167,17 @@ assert.match(mainSource, /ipcMain\.handle\("desktop:reveal-output-item"/);
 assert.match(mainSource, /path\.relative\(outputRoot, resolved\)/);
 assert.match(mainSource, /shell\.showItemInFolder\(resolved\)/);
 assert.match(mainSource, /ipcMain\.handle\("desktop:open-data-directory"/);
+assert.match(mainSource, /path\.resolve\(fileURLToPath\(url\)\) === path\.resolve\(__dirname, "index\.html"\)/);
+assert.match(mainSource, /if \(!isTrustedRendererFrame\(\{ url: targetUrl \}\)\) event\.preventDefault\(\)/);
+assert.doesNotMatch(mainSource, /targetUrl\.startsWith\("file:"\)/);
 assert.match(mainSource, /"--output_dir", outputDirectory\(\)/);
 assert.match(mainSource, /"--data_dir", dataDirectory\(\)/);
 assert.match(mainSource, /stoppingPythonProcess === processRef/);
+assert.match(mainSource, /function terminateProcessTree\(processRef\)/);
+assert.match(
+  mainSource,
+  /spawn\("taskkill\.exe", \["\/PID", String\(processRef\.pid\), "\/T", "\/F"\]/
+);
 assert.match(mainSource, /mainWindow\.on\("close"[\s\S]{0,500}showLauncher\(\)/);
 assert.match(preloadSource, /showLauncher: \(\) => ipcRenderer\.invoke\("desktop:show-launcher"\)/);
 assert.match(preloadSource, /revealOutputItem: \(target\) => ipcRenderer\.invoke\("desktop:reveal-output-item", target\)/);
@@ -199,6 +211,9 @@ assert.match(diagnosticSource, /预检只检查硬件、依赖与工具链，不
 assert.match(diagnosticSource, /aio\.lib\/cufile\.lib/);
 assert.match(mainSource, /--precision/);
 assert.match(mainSource, /--reference-device/);
+assert.match(runtimeVerificationSource, /confucius-component\.json/);
+assert.match(runtimeVerificationSource, /qwen3asr_native\.cp312-win_amd64\.pyd/);
+assert.match(runtimeVerificationSource, /'confucius_r2t2'/);
 assert.match(webuiSource, /with gr\.Tab\("生成历史"\)/);
 assert.match(webuiSource, /history_audio_download = gr\.DownloadButton/);
 assert.match(webuiSource, /window\.desktopApi\?\.revealOutputItem/);

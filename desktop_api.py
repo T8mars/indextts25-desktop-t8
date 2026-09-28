@@ -12,7 +12,7 @@ import contextvars
 import hashlib
 import hmac
 import io
-import json
+import secrets
 import threading
 import time
 import uuid
@@ -25,7 +25,6 @@ from typing import Any, Callable, Literal
 from urllib.parse import quote
 
 import av
-import numpy as np
 import torch
 from fastapi import BackgroundTasks, Depends, FastAPI, Header, HTTPException, Request
 from fastapi.exceptions import RequestValidationError
@@ -43,6 +42,7 @@ from desktop_model_lifecycle import DesktopModelLifecycle
 from desktop_voice_library import VoiceLibrary, VoiceProfile
 from indextts.pronunciation import PronunciationEntry, process_pronunciation_text
 from indextts.utils.audio_io import save_audio_file
+from generation_cancellation import generation_cancellation
 
 
 SUPPORTED_LANGUAGES = frozenset({"ZH", "EN", "JA", "ES", "AR"})
@@ -57,9 +57,14 @@ class InferenceCoordinator:
     def __init__(self) -> None:
         self._execution_lock = threading.RLock()
         self._state_lock = threading.RLock()
+        self._condition = threading.Condition(self._state_lock)
         self._source = contextvars.ContextVar("t8_inference_source", default="desktop")
         self._waiting = 0
+        self._normal_claims = 0
+        self._lease_waiters = 0
         self._active = ""
+        self._lease_source = ""
+        self._lease_token = ""
         self._completed = 0
         self._failed = 0
 
@@ -73,25 +78,63 @@ class InferenceCoordinator:
 
     def run(self, callback: Callable[[], Any]) -> Any:
         source = self._source.get()
-        with self._state_lock:
+        with self._condition:
             self._waiting += 1
-        with self._execution_lock:
-            with self._state_lock:
-                self._waiting -= 1
-                self._active = source
+            while self._lease_token or self._lease_waiters:
+                self._condition.wait()
+            self._normal_claims += 1
+        try:
+            with self._execution_lock:
+                with self._state_lock:
+                    self._waiting -= 1
+                    self._active = source
+                try:
+                    result = callback()
+                except Exception:
+                    with self._state_lock:
+                        self._failed += 1
+                    raise
+                else:
+                    with self._state_lock:
+                        self._completed += 1
+                    return result
+                finally:
+                    with self._state_lock:
+                        self._active = ""
+        finally:
+            with self._condition:
+                self._normal_claims -= 1
+                self._condition.notify_all()
+
+    def acquire_lease(self, source: str) -> str:
+        """Reserve the GPU across a long-lived sidecar session.
+
+        Unlike an RLock, this token may be released by the WebSocket cleanup
+        task rather than the request thread that created the session.
+        """
+
+        token = secrets.token_urlsafe(24)
+        with self._condition:
+            self._waiting += 1
+            self._lease_waiters += 1
             try:
-                result = callback()
-            except Exception:
-                with self._state_lock:
-                    self._failed += 1
-                raise
-            else:
-                with self._state_lock:
-                    self._completed += 1
-                return result
+                while self._lease_token or self._normal_claims:
+                    self._condition.wait()
+                self._lease_token = token
+                self._lease_source = str(source or "sidecar")
             finally:
-                with self._state_lock:
-                    self._active = ""
+                self._lease_waiters -= 1
+                self._waiting -= 1
+        return token
+
+    def release_lease(self, token: str) -> bool:
+        with self._condition:
+            if not self._lease_token or not secrets.compare_digest(self._lease_token, str(token or "")):
+                return False
+            self._lease_token = ""
+            self._lease_source = ""
+            self._condition.notify_all()
+            return True
 
     def guard_model(self, model: Any) -> Any:
         """Wrap a model's public infer method once without changing callers."""
@@ -112,8 +155,9 @@ class InferenceCoordinator:
     def status(self) -> dict[str, Any]:
         with self._state_lock:
             return {
-                "active": bool(self._active),
-                "active_source": self._active,
+                "active": bool(self._active or self._lease_token),
+                "active_source": self._lease_source or self._active,
+                "lease_active": bool(self._lease_token),
                 "waiting": self._waiting,
                 "completed": self._completed,
                 "failed": self._failed,
@@ -404,6 +448,7 @@ class DesktopTTSService:
         request_id: str | None = None,
         progress_callback: Callable[[int, int], None] | None = None,
     ) -> GeneratedSpeech:
+        generation_cancellation.begin(cancel_event)
         text = str(options.text or "").strip()
         if not text:
             raise ValueError("input cannot be blank")
@@ -815,7 +860,13 @@ def create_api_app(
             raise HTTPException(status_code=401, detail="Invalid or missing API key")
 
     @app.exception_handler(HTTPException)
-    async def http_error_handler(_request, exc: HTTPException):
+    async def http_error_handler(request: Request, exc: HTTPException):
+        # The same-origin Confucius browser gateway has its own structured
+        # ``detail`` contract consumed by the live-caption client.  Keep that
+        # contract intact while the public TTS API continues to use the stable
+        # OpenAI-style error envelope below.
+        if request.url.path.startswith("/api/confucius/"):
+            return JSONResponse(status_code=exc.status_code, content={"detail": exc.detail})
         return _error(
             str(exc.detail),
             status_code=exc.status_code,

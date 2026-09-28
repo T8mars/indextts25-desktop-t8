@@ -5,6 +5,7 @@ const https = require("node:https");
 const net = require("node:net");
 const os = require("node:os");
 const path = require("node:path");
+const { fileURLToPath } = require("node:url");
 const { spawn } = require("node:child_process");
 const { createDiagnosticReport } = require("./diagnostic_report");
 const {
@@ -1508,6 +1509,26 @@ function cancelModelDownload() {
   });
 }
 
+function terminateProcessTree(processRef) {
+  if (!processRef || processRef.exitCode !== null) return;
+  if (process.platform !== "win32" || !Number.isInteger(processRef.pid)) {
+    processRef.kill();
+    return;
+  }
+  // ChildProcess.kill() terminates only the direct process on Windows. The
+  // Confucius ASR worker is a grandchild of the WebUI process, so terminate
+  // the owned tree to avoid leaving its model/GPU worker alive after exit.
+  const killer = spawn("taskkill.exe", ["/PID", String(processRef.pid), "/T", "/F"], {
+    detached: true,
+    windowsHide: true,
+    stdio: "ignore"
+  });
+  killer.once("error", () => {
+    try { processRef.kill(); } catch { /* The process may already be gone. */ }
+  });
+  killer.unref();
+}
+
 function stopPythonService() {
   if (!pythonProcess || pythonProcess.exitCode !== null) {
     pythonProcess = null;
@@ -1515,7 +1536,7 @@ function stopPythonService() {
   }
   updateState({ phase: "stopping", message: "正在关闭推理服务…" });
   stoppingPythonProcess = pythonProcess;
-  pythonProcess.kill();
+  terminateProcessTree(pythonProcess);
   pythonProcess = null;
   updateState({ apiRunning: false, apiMode: "", serviceUrl: "" });
 }
@@ -1549,7 +1570,10 @@ function isTrustedRendererFrame(frame) {
   if (!frame || !frame.url) return false;
   try {
     const url = new URL(frame.url);
-    if (url.protocol === "file:" && path.basename(url.pathname) === "index.html") return true;
+    if (
+      url.protocol === "file:" &&
+      path.resolve(fileURLToPath(url)) === path.resolve(__dirname, "index.html")
+    ) return true;
     return Boolean(
       activePort &&
       url.protocol === "http:" &&
@@ -2031,9 +2055,7 @@ function createWindow() {
 
   mainWindow.webContents.setWindowOpenHandler(() => ({ action: "deny" }));
   mainWindow.webContents.on("will-navigate", (event, targetUrl) => {
-    const allowedLocal = targetUrl.startsWith("file:") ||
-      (activePort && targetUrl.startsWith(`http://127.0.0.1:${activePort}`));
-    if (!allowedLocal) event.preventDefault();
+    if (!isTrustedRendererFrame({ url: targetUrl })) event.preventDefault();
   });
   mainWindow.webContents.once("did-finish-load", () => markUpdateHealthyIfRequested());
   mainWindow.once("ready-to-show", () => {

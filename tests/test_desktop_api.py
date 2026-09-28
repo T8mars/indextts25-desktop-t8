@@ -9,12 +9,12 @@ import numpy as np
 import pytest
 import torch
 import gradio as gr
+from fastapi import HTTPException
 from fastapi.testclient import TestClient
 
 from desktop_api import (
     DesktopTTSService,
     InferenceCoordinator,
-    SpeechOptions,
     create_api_app,
     encode_audio_bytes,
 )
@@ -163,6 +163,23 @@ def test_validation_errors_use_stable_error_envelope(api_fixture):
     assert response.json()["error"]["type"] == "validation_error"
 
 
+def test_confucius_gateway_keeps_structured_http_error_contract(api_fixture):
+    client, *_ = api_fixture
+
+    @client.app.get("/api/confucius/test-error")
+    def confucius_error():
+        raise HTTPException(
+            status_code=409,
+            detail={"code": "ASR_LICENSE_REQUIRED", "message": "请先接受模型许可。"},
+        )
+
+    response = client.get("/api/confucius/test-error")
+    assert response.status_code == 409
+    assert response.json() == {
+        "detail": {"code": "ASR_LICENSE_REQUIRED", "message": "请先接受模型许可。"}
+    }
+
+
 def test_openai_fixed_voice_alias_uses_configured_local_default(api_fixture):
     client, _model, _history, _tmp_path = api_fixture
     response = client.post(
@@ -238,3 +255,26 @@ def test_inference_coordinator_serializes_desktop_and_api_calls():
 
     assert peak_active == 1
     assert coordinator.status()["completed"] == 2
+
+
+def test_inference_coordinator_long_lived_lease_blocks_inference():
+    coordinator = InferenceCoordinator()
+    lease = coordinator.acquire_lease("confucius_live_asr")
+    started = threading.Event()
+    completed = threading.Event()
+
+    def worker():
+        started.set()
+        coordinator.run(lambda: completed.set())
+
+    thread = threading.Thread(target=worker)
+    thread.start()
+    assert started.wait(1)
+    time.sleep(0.05)
+    assert completed.is_set() is False
+    assert coordinator.status()["active"] is True
+    assert coordinator.status()["active_source"] == "confucius_live_asr"
+    assert coordinator.release_lease(lease) is True
+    assert completed.wait(1)
+    thread.join(timeout=1)
+    assert coordinator.status()["lease_active"] is False
