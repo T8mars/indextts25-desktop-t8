@@ -140,7 +140,7 @@ from segment_rate_workspace import (
 
 
 APP_TITLE = "T8star-Aix · IndexTTS 2.5"
-DESKTOP_VERSION = "0.26.4"
+DESKTOP_VERSION = "0.26.5"
 MODEL_MANIFEST = json.loads(
     (Path(__file__).resolve().parent / "desktop_model_manifest.json").read_text(encoding="utf-8")
 )
@@ -3407,6 +3407,7 @@ def build_app(
                 notes=str(notes_value or ""),
                 quality=quality,
                 replace_name_or_id=selected_voice if update_selected else None,
+                allow_name_overwrite=False,
             )
         except Exception as exc:
             raise gr.Error(f"保存角色音色失败：{exc}") from exc
@@ -3420,7 +3421,7 @@ def build_app(
             f"已同步“{profile.name}”到语音生成页，可直接复用其音色参考。",
             False,
             (
-                f"已保存角色音色：{profile.name}。参考音频质量 "
+                f"已保存角色音色：{profile.name}，音色库共 {len(choices)} 个角色。参考音频质量 "
                 f"{profile.quality.get('score', '—')}/100（{profile.quality.get('grade', '未评级')}）。"
             ),
         )
@@ -3446,8 +3447,29 @@ def build_app(
             "、".join(profile.tags),
             profile.favorite,
             profile.notes,
-            True,
-            f"已载入：{profile.name}。可直接试听；修改后勾选“更新所选角色”即可覆盖或改名。",
+            False,
+            f"已载入：{profile.name}。另存为新角色请填写不同名称；"
+            "修改或改名当前角色，请主动勾选“更新所选角色”。",
+        )
+
+    def new_voice_event():
+        return (
+            "",
+            None,
+            "ZH",
+            EMOTION_MODES[0],
+            None,
+            "",
+            0.65,
+            False,
+            *([0.0] * 8),
+            "",
+            "",
+            False,
+            "",
+            False,
+            "已切换到新增角色：填写不同的角色名称并上传参考音频，再点击保存。已有角色会保留。",
+            gr.update(value=None),
         )
 
     def export_voice_bundle_event(selected_voice, export_all):
@@ -6220,6 +6242,10 @@ def build_app(
                 "音色库 2.0 支持标签、收藏、备注、保存时质量评分和便携音色包；"
                 "音色和情感参考音频都会复制到 Electron 用户数据目录，原文件移动后仍可使用。"
             )
+            gr.Markdown(
+                "**添加多个角色：** 点击“新建角色” → 填写不同名称并上传参考音频 → 保存；逐个添加即可。"
+                "只有修改或改名已有角色时，才勾选“更新所选角色”。"
+            )
             with gr.Row():
                 with gr.Column():
                     voice_name = gr.Textbox(label="角色名称", placeholder="例如：旁白、小明、店长")
@@ -6282,12 +6308,15 @@ def build_app(
                     delete_voice_select = gr.Dropdown(
                         choices=voice_choices(),
                         label="选择已有角色",
-                        info="载入后可试听、修改或改名；不载入时同名保存会覆盖。",
+                        info="载入后可试听或另存；修改或改名原角色需主动勾选下方更新选项。",
                     )
-                    load_voice_button = gr.Button("载入 / 试听 / 编辑")
+                    with gr.Row():
+                        new_voice_button = gr.Button("＋ 新建角色")
+                        load_voice_button = gr.Button("载入 / 试听 / 编辑")
                     voice_update_selected = gr.Checkbox(
                         value=False,
                         label="更新所选角色（允许改名）",
+                        info="新增角色保持不勾选；勾选后保存会更新所选角色。",
                     )
                     delete_voice_button = gr.Button("删除角色音色", variant="stop")
                     with gr.Row():
@@ -7494,26 +7523,33 @@ def build_app(
             ],
             queue=False,
         )
+        voice_editor_outputs = [
+            voice_name,
+            voice_audio,
+            voice_language,
+            voice_emotion_mode,
+            voice_emotion_audio,
+            voice_emotion_text,
+            voice_emotion_strength,
+            voice_random_emotion,
+            *voice_vector_controls,
+            voice_dictionary,
+            voice_tags,
+            voice_favorite,
+            voice_notes,
+            voice_update_selected,
+            voice_status,
+        ]
         load_voice_button.click(
             load_voice_event,
             inputs=[delete_voice_select],
-            outputs=[
-                voice_name,
-                voice_audio,
-                voice_language,
-                voice_emotion_mode,
-                voice_emotion_audio,
-                voice_emotion_text,
-                voice_emotion_strength,
-                voice_random_emotion,
-                *voice_vector_controls,
-                voice_dictionary,
-                voice_tags,
-                voice_favorite,
-                voice_notes,
-                voice_update_selected,
-                voice_status,
-            ],
+            outputs=voice_editor_outputs,
+            queue=False,
+        )
+        new_voice_button.click(
+            new_voice_event,
+            inputs=[],
+            outputs=[*voice_editor_outputs, delete_voice_select],
             queue=False,
         )
         delete_voice_button.click(

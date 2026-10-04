@@ -55,7 +55,9 @@ Windows Electron desktop integration for IndexTTS 2.5. The packaged application 
 - a persistent generic local API with OpenAI-compatible speech, native IndexTTS controls, authenticated async jobs, shared model locking, and bundled foreground start/status/stop CMD helpers
 
 The large model files are intentionally external. On first launch, select a complete IndexTTS 2.5 model directory.
-Version 0.26.4 is paired with ComfyUI Node 0.23.1 and model bundle `1.0.0` at revision `14166a74`. It adds the isolated Confucius4-R2T2 Q8 real-time/file transcription component, retains Whisper for Arabic, word timestamps, and safe fallback, and hardens cancellation, disconnect cleanup, preset restoration, and download access. It retains the 0.26.3 launcher layout fix and the 0.26.2 alignment with upstream PR #802: oversized non-CJK segment budgets are capped at roughly 86 tokens while existing conservative limits such as EN/ES=60 are not scaled twice. Preview, API, and inference share the effective limit. The persistent generic local HTTP service remains available with OpenAI-compatible `/v1/audio/speech`, native advanced IndexTTS controls, authenticated asynchronous jobs with progress/cancellation/download, voice-library discovery, Swagger documentation, and graceful shutdown. Desktop UI, API calls, and ASR share coordinated model/GPU lifecycles. The portable root includes foreground start/status/stop CMD helpers that use the bundled Python runtime and keep logs visible. API outputs use the existing output directory and generation history. Desktop updates remain split into signed app/runtime layers with resume, full verification, health checks, and rollback; models remain independent on Hugging Face. Advanced and engineering workspaces stay collapsed by default. Optional acceleration failures still reload the normal model and complete the task. No benchmark, model load, model download, update download, install, API service, ASR service, or acceleration mode starts automatically.
+Version 0.26.5 is paired with ComfyUI Node 0.23.1 and model bundle `1.0.0` at revision `14166a74`. It fixes adding a second voice overwriting the first: loading no longer enables update mode automatically, creating a duplicate name is rejected, and a `＋ 新建角色` button clears the editor for the next voice. Explicit updates and renaming remain available. See [0.26.5 release notes](../docs/RELEASE_0.26.5.md).
+
+It retains the isolated Confucius4-R2T2 Q8 real-time/file transcription component, Whisper for Arabic, word timestamps, and safe fallback, and cancellation, disconnect cleanup, preset restoration, and download access. It retains the 0.26.3 launcher layout fix and the 0.26.2 alignment with upstream PR #802: oversized non-CJK segment budgets are capped at roughly 86 tokens while existing conservative limits such as EN/ES=60 are not scaled twice. Preview, API, and inference share the effective limit. The persistent generic local HTTP service remains available with OpenAI-compatible `/v1/audio/speech`, native advanced IndexTTS controls, authenticated asynchronous jobs with progress/cancellation/download, voice-library discovery, Swagger documentation, and graceful shutdown. Desktop UI, API calls, and ASR share coordinated model/GPU lifecycles. The portable root includes foreground start/status/stop CMD helpers that use the bundled Python runtime and keep logs visible. API outputs use the existing output directory and generation history. Desktop updates remain split into signed app/runtime layers with resume, full verification, health checks, and rollback; models remain independent on Hugging Face. Advanced and engineering workspaces stay collapsed by default. Optional acceleration failures still reload the normal model and complete the task. No benchmark, model load, model download, update download, install, API service, ASR service, or acceleration mode starts automatically.
 The launcher validates official model file sizes, while the downloader performs full SHA-256 verification.
 The output directory and user-data directory can be moved independently from the launcher. Voice-library entries,
 presets, dialogue tasks, ASR caches, benchmarks, and logs follow the configured user-data directory; generated WAVs
@@ -116,7 +118,9 @@ The visible `角色音色库` tab copies named voice and emotion-reference audio
 `语音生成` tab exposes these saved roles in a refreshable dropdown; selecting one reuses its copied timbre audio immediately,
 so repeated single-voice generation does not require another upload. Each role
 can independently use speaker-following, emotion-reference audio, an eight-dimensional emotion vector, or Qwen emotion
-text. Existing roles can be loaded back for auditioning, editing, overwriting, or renaming without changing their library ID. The
+text. Use `＋ 新建角色` to reset the editor, enter a distinct name, upload the reference, and save each additional role.
+Loading a role leaves `更新所选角色` unchecked, so a different name saves a new role. A duplicate name is rejected unless
+the user explicitly checks `更新所选角色` to update or rename the selected role without changing its library ID. The
 `多角色 / 批量台词 / SRT` tab accepts `角色|台词|语言|时长系数|逐句情感`, JSON arrays, or SRT with `[角色] 台词`
 and `角色：台词` markers. The optional fifth column supports `text:生气、激动` or
 `vector:喜,怒,哀,惧,厌恶,低落,惊喜,平静`; append `;strength=0.75` and, for vector sampling,
@@ -302,7 +306,7 @@ npm run make
 ```
 
 This builds only `@electron-forge/maker-zip`. The unpacked application is still
-available under `desktop/out/T8star-Aix-IndexTTS-2.5-v0.26.4-win32-x64` for local testing.
+available under `desktop/out/T8star-Aix-IndexTTS-2.5-v0.26.5-win32-x64` for local testing.
 The bundled runtime contains tens of thousands of small files, so Squirrel/NuGet
 can spend a long time repeatedly rewriting a multi-gigabyte package. It is not the
 recommended user distribution. If an installer is specifically required, build it

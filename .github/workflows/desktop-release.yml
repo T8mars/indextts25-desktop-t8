@@ -47,7 +47,7 @@ jobs:
         shell: pwsh
         run: |
           python -m py_compile `
-            desktop_webui.py desktop_api.py speech_review.py `
+            desktop_webui.py desktop_api.py desktop_voice_library.py speech_review.py `
             confucius_asr.py confucius_asr_gateway.py generation_cancellation.py
 
       - name: Install desktop dependencies

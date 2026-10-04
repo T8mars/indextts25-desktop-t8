@@ -451,6 +451,7 @@ class VoiceLibrary:
         notes: str = "",
         quality: dict[str, Any] | None = None,
         replace_name_or_id: str | None = None,
+        allow_name_overwrite: bool = True,
     ) -> VoiceProfile:
         clean_name = str(name).strip()
         source = Path(source_audio).expanduser().resolve()
@@ -498,6 +499,11 @@ class VoiceLibrary:
         )
         if replace_id and name_match_id and replace_id != name_match_id:
             raise ValueError(f"角色名称已存在：{clean_name}")
+        if name_match_id and not replace_id and not allow_name_overwrite:
+            raise ValueError(
+                f"角色名称已存在：{clean_name}。新增角色请使用不同名称；"
+                "要修改原角色，请先载入并勾选“更新所选角色”。"
+            )
         profile_id = (
             replace_id
             or name_match_id
